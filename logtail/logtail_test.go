@@ -1,0 +1,826 @@
+// Copyright (c) Tailscale Inc & contributors
+// SPDX-License-Identifier: BSD-3-Clause
+
+package logtail
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/go-json-experiment/json/jsontext"
+	"tailscale.com/envknob"
+	"tailscale.com/net/memnet"
+	"tailscale.com/tstest"
+	"tailscale.com/tstime"
+	"tailscale.com/util/eventbus/eventbustest"
+	"tailscale.com/util/must"
+)
+
+// TestMain installs a safety net that refuses non-localhost dials for any
+// test in this package. Config.BaseURL defaults to https://log.tailscale.com
+// and Config.HTTPC defaults to http.DefaultClient, so a test that forgets to
+// override either can otherwise silently hit the real logtail server.
+// Tests that need an HTTP server should use memnet (see newTestLogtailServer).
+func TestMain(m *testing.M) {
+	tr := http.DefaultTransport.(*http.Transport)
+	orig := tr.DialContext
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
+		if err == nil && (host == "127.0.0.1" || host == "::1" || host == "localhost") {
+			return orig(ctx, network, addr)
+		}
+		return nil, fmt.Errorf("logtail tests: refusing to dial non-localhost address %q; use memnet or a custom Config.HTTPC", addr)
+	}
+	os.Exit(m.Run())
+}
+
+func TestFastShutdown(t *testing.T) { synctest.Test(t, synctestFastShutdown) }
+
+func synctestFastShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, logger := newTestLogtailServer(t)
+	if err := logger.Shutdown(ctx); err != nil {
+		t.Error(err)
+	}
+}
+
+// maximum number of times a test will call l.Write()
+const logLines = 3
+
+type LogtailTestServer struct {
+	uploaded chan []byte
+}
+
+// newTestLogtailServer wires up an in-memory HTTP server (via memnet) and a
+// *Logger whose HTTPC dials it. Lives inside the caller's synctest bubble so
+// the default FlushDelay and any other fake timers advance automatically.
+func newTestLogtailServer(t *testing.T) (*LogtailTestServer, *Logger) {
+	// Enable the logtail started message
+	envknob.Setenv("TS_DEBUG_LOGTAIL", "1")
+
+	conf, uploaded := newCaptureServer(t, 0)
+	conf.Bus = eventbustest.NewBus(t)
+	ts := &LogtailTestServer{uploaded: uploaded}
+
+	logger := NewLogger(conf, t.Logf)
+
+	// There is always an initial "logtail started" message.
+	body := <-ts.uploaded
+	if !strings.Contains(string(body), "started") {
+		t.Errorf("unknown start logging statement: %q", string(body))
+	}
+	return ts, logger
+}
+
+func TestDrainPendingMessages(t *testing.T) { synctest.Test(t, synctestDrainPendingMessages) }
+
+func synctestDrainPendingMessages(t *testing.T) {
+	ts, logger := newTestLogtailServer(t)
+
+	for range logLines {
+		logger.Write([]byte("log line"))
+	}
+
+	// All the "log line" messages usually arrive at once, but poll if needed.
+	var body strings.Builder
+	for i := 0; i <= logLines; i++ {
+		body.WriteString(string(<-ts.uploaded))
+		count := strings.Count(body.String(), "log line")
+		if count == logLines {
+			break
+		}
+	}
+
+	if err := logger.Shutdown(context.Background()); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestEncodeAndUploadMessages(t *testing.T) { synctest.Test(t, synctestEncodeAndUploadMessages) }
+
+func synctestEncodeAndUploadMessages(t *testing.T) {
+	ts, logger := newTestLogtailServer(t)
+
+	tests := []struct {
+		name string
+		log  string
+		want string
+	}{
+		{
+			"plain text",
+			"log line",
+			"log line",
+		},
+		{
+			"simple JSON",
+			`{"text":"log line"}`,
+			"log line",
+		},
+	}
+
+	for _, tt := range tests {
+		io.WriteString(logger, tt.log)
+		body := <-ts.uploaded
+
+		data := unmarshalOne(t, body)
+		got := data["text"]
+		if got != tt.want {
+			t.Errorf("%s: got %q; want %q", tt.name, got.(string), tt.want)
+		}
+
+		ltail, ok := data["logtail"]
+		if ok {
+			logtailmap := ltail.(map[string]any)
+			_, ok = logtailmap["client_time"]
+			if !ok {
+				t.Errorf("%s: no client_time present", tt.name)
+			}
+		} else {
+			t.Errorf("%s: no logtail map present", tt.name)
+		}
+	}
+
+	if err := logger.Shutdown(context.Background()); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestLoggerWriteLength(t *testing.T) {
+	lg := &Logger{
+		clock:  tstime.StdClock{},
+		buffer: NewMemoryBuffer(1024),
+	}
+	inBuf := []byte("some text to encode")
+	n, err := lg.Write(inBuf)
+	if err != nil {
+		t.Error(err)
+	}
+	if n != len(inBuf) {
+		t.Errorf("logger.Write wrote %d bytes, expected %d", n, len(inBuf))
+	}
+}
+
+func TestParseAndRemoveLogLevel(t *testing.T) {
+	tests := []struct {
+		log       string
+		wantLevel int
+		wantLog   string
+	}{
+		{
+			"no level",
+			0,
+			"no level",
+		},
+		{
+			"[v1] level 1",
+			1,
+			"level 1",
+		},
+		{
+			"level 1 [v1] ",
+			1,
+			"level 1 ",
+		},
+		{
+			"[v2] level 2",
+			2,
+			"level 2",
+		},
+		{
+			"level [v2] 2",
+			2,
+			"level 2",
+		},
+		{
+			"[v3] no level 3",
+			0,
+			"[v3] no level 3",
+		},
+		{
+			"some ignored text then [v\x00JSON]5{\"foo\":1234}",
+			5,
+			`{"foo":1234}`,
+		},
+	}
+
+	for _, tt := range tests {
+		gotLevel, gotLog := parseAndRemoveLogLevel([]byte(tt.log))
+		if gotLevel != tt.wantLevel {
+			t.Errorf("parseAndRemoveLogLevel(%q): got:%d; want %d",
+				tt.log, gotLevel, tt.wantLevel)
+		}
+		if string(gotLog) != tt.wantLog {
+			t.Errorf("parseAndRemoveLogLevel(%q): got:%q; want %q",
+				tt.log, gotLog, tt.wantLog)
+		}
+	}
+}
+
+func unmarshalOne(t *testing.T, body []byte) map[string]any {
+	t.Helper()
+	var entries []map[string]any
+	err := json.Unmarshal(body, &entries)
+	if err != nil {
+		t.Error(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one entry, got %d", len(entries))
+	}
+	return entries[0]
+}
+
+// newCaptureServer wires up an in-memory HTTP server (via memnet) that sends
+// each uploaded request body to the returned channel and responds with
+// respStatus (0 means 200 OK), returning a Config whose HTTPC dials it.
+func newCaptureServer(t *testing.T, respStatus int) (Config, chan []byte) {
+	t.Helper()
+	// max channel backlog = 1 "started" + #logLines x "log line" + 1 "closed"
+	uploaded := make(chan []byte, 2+logLines)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("failed to read HTTP request: %v", err)
+		}
+		uploaded <- body
+		if respStatus != 0 {
+			w.WriteHeader(respStatus)
+		}
+	})
+
+	ln := memnet.Listen("logtail-test:0")
+	httpsrv := &http.Server{Handler: handler}
+	go httpsrv.Serve(ln)
+	t.Cleanup(func() {
+		httpsrv.Close()
+		ln.Close()
+	})
+
+	conf := Config{
+		BaseURL: "http://" + ln.Addr().String(),
+		HTTPC:   &http.Client{Transport: &http.Transport{DialContext: ln.Dial}},
+	}
+	return conf, uploaded
+}
+
+func TestUploadLogs(t *testing.T) {
+	t.Run("InlinesValueAlongsideLogtail", func(t *testing.T) {
+		conf, got := newCaptureServer(t, 0)
+		entries := []LogEntry[jsontext.Value]{
+			{Value: jsontext.Value(`{"text":"first line"}`)},
+			{Value: jsontext.Value(`{"text":"second line","extra":42}`)},
+		}
+		if n, err := UploadLogs(context.Background(), conf, slices.Values(entries)); err != nil {
+			t.Fatal(err)
+		} else if n != len(entries) {
+			t.Errorf("uploaded %d entries, want %d", n, len(entries))
+		}
+
+		var all []map[string]any
+		body := <-got
+		if err := json.Unmarshal(body, &all); err != nil {
+			t.Fatalf("unmarshal %q: %v", body, err)
+		}
+		if len(all) != 2 {
+			t.Fatalf("got %d entries, want 2", len(all))
+		}
+		if got, want := all[0]["text"], "first line"; got != want {
+			t.Errorf("entry 0 text = %v; want %q", got, want)
+		}
+		if got, want := all[1]["text"], "second line"; got != want {
+			t.Errorf("entry 1 text = %v; want %q", got, want)
+		}
+		if got, want := all[1]["extra"], float64(42); got != want {
+			t.Errorf("entry 1 extra = %v; want %v", got, want)
+		}
+		for i, e := range all {
+			lt, ok := e["logtail"].(map[string]any)
+			if !ok {
+				t.Errorf("entry %d missing logtail metadata", i)
+				continue
+			}
+			if _, ok := lt["client_time"]; !ok {
+				t.Errorf("entry %d missing client_time", i)
+			}
+		}
+	})
+
+	t.Run("TypedStructPayload", func(t *testing.T) {
+		conf, got := newCaptureServer(t, 0)
+		type record struct {
+			Text  string `json:"text"`
+			Count int    `json:"count"`
+		}
+		entries := []LogEntry[record]{
+			{Value: record{Text: "hi", Count: 3}},
+		}
+		if n, err := UploadLogs(context.Background(), conf, slices.Values(entries)); err != nil {
+			t.Fatal(err)
+		} else if n != len(entries) {
+			t.Errorf("uploaded %d entries, want %d", n, len(entries))
+		}
+		e := unmarshalOne(t, <-got)
+		if got, want := e["text"], "hi"; got != want {
+			t.Errorf("text = %v; want %q", got, want)
+		}
+		if got, want := e["count"], float64(3); got != want {
+			t.Errorf("count = %v; want %v", got, want)
+		}
+		if _, ok := e["logtail"].(map[string]any); !ok {
+			t.Errorf("missing logtail metadata")
+		}
+	})
+
+	t.Run("MapPayload", func(t *testing.T) {
+		conf, got := newCaptureServer(t, 0)
+		entries := []LogEntry[map[string]any]{
+			{Value: map[string]any{"text": "m", "n": 5}},
+		}
+		if n, err := UploadLogs(context.Background(), conf, slices.Values(entries)); err != nil {
+			t.Fatal(err)
+		} else if n != len(entries) {
+			t.Errorf("uploaded %d entries, want %d", n, len(entries))
+		}
+		e := unmarshalOne(t, <-got)
+		if got, want := e["text"], "m"; got != want {
+			t.Errorf("text = %v; want %q", got, want)
+		}
+		if got, want := e["n"], float64(5); got != want {
+			t.Errorf("n = %v; want %v", got, want)
+		}
+	})
+
+	t.Run("MapWithNamedStringKey", func(t *testing.T) {
+		type label string // ~string key
+		conf, got := newCaptureServer(t, 0)
+		entries := []LogEntry[map[label]int]{
+			{Value: map[label]int{"a": 1, "b": 2}},
+		}
+		if n, err := UploadLogs(context.Background(), conf, slices.Values(entries)); err != nil {
+			t.Fatal(err)
+		} else if n != len(entries) {
+			t.Errorf("uploaded %d entries, want %d", n, len(entries))
+		}
+		e := unmarshalOne(t, <-got)
+		if got, want := e["a"], float64(1); got != want {
+			t.Errorf("a = %v; want %v", got, want)
+		}
+		if got, want := e["b"], float64(2); got != want {
+			t.Errorf("b = %v; want %v", got, want)
+		}
+	})
+
+	t.Run("PointerToStructPayload", func(t *testing.T) {
+		type record struct {
+			Text string `json:"text"`
+		}
+		conf, got := newCaptureServer(t, 0)
+		entries := []LogEntry[*record]{
+			{Value: &record{Text: "ptr"}},
+		}
+		if n, err := UploadLogs(context.Background(), conf, slices.Values(entries)); err != nil {
+			t.Fatal(err)
+		} else if n != len(entries) {
+			t.Errorf("uploaded %d entries, want %d", n, len(entries))
+		}
+		e := unmarshalOne(t, <-got)
+		if got, want := e["text"], "ptr"; got != want {
+			t.Errorf("text = %v; want %q", got, want)
+		}
+	})
+
+	t.Run("NilPointerPayloadOmitsInlinedValue", func(t *testing.T) {
+		type record struct {
+			Text string `json:"text"`
+		}
+		conf, got := newCaptureServer(t, 0)
+		entries := []LogEntry[*record]{
+			{Value: nil},
+		}
+		if n, err := UploadLogs(context.Background(), conf, slices.Values(entries)); err != nil {
+			t.Fatal(err)
+		} else if n != len(entries) {
+			t.Errorf("uploaded %d entries, want %d", n, len(entries))
+		}
+		e := unmarshalOne(t, <-got)
+		if _, ok := e["text"]; ok {
+			t.Errorf("expected no inlined members for nil pointer payload, got %v", e)
+		}
+		if _, ok := e["logtail"].(map[string]any); !ok {
+			t.Errorf("missing logtail metadata")
+		}
+	})
+
+	t.Run("RejectsNon-objectPayload", func(t *testing.T) {
+		conf, _ := newCaptureServer(t, 0)
+		entries := []LogEntry[int]{{Value: 5}}
+		if n, err := UploadLogs(context.Background(), conf, slices.Values(entries)); err == nil {
+			t.Fatal("expected an error marshaling a non-object inline payload")
+		} else if n != 0 {
+			t.Errorf("uploaded %d entries, want 0", n)
+		}
+	})
+
+	t.Run("PreservesCaller-setLogtailFields", func(t *testing.T) {
+		conf, got := newCaptureServer(t, 0)
+		entries := []LogEntry[jsontext.Value]{
+			{Logtail: Logtail{ProcID: 1234}, Value: jsontext.Value(`{"text":"x"}`)},
+		}
+		if n, err := UploadLogs(context.Background(), conf, slices.Values(entries)); err != nil {
+			t.Fatal(err)
+		} else if n != len(entries) {
+			t.Errorf("uploaded %d entries, want %d", n, len(entries))
+		}
+		e := unmarshalOne(t, <-got)
+		lt := e["logtail"].(map[string]any)
+		if got, want := lt["proc_id"], float64(1234); got != want {
+			t.Errorf("proc_id = %v; want %v", got, want)
+		}
+	})
+
+	t.Run("UploadErrorOnNon-200", func(t *testing.T) {
+		conf, _ := newCaptureServer(t, http.StatusInternalServerError)
+		entries := []LogEntry[jsontext.Value]{{Value: jsontext.Value(`{"text":"x"}`)}}
+		if n, err := UploadLogs(context.Background(), conf, slices.Values(entries)); err == nil {
+			t.Fatal("expected an error when the server responds non-200")
+		} else if n != 0 {
+			t.Errorf("uploaded %d entries, want 0", n)
+		}
+	})
+
+	t.Run("IncludesIncrementingProc_seq", func(t *testing.T) {
+		conf, got := newCaptureServer(t, 0)
+		conf.IncludeProcSequence = true
+		entries := []LogEntry[jsontext.Value]{
+			{Value: jsontext.Value(`{"text":"one"}`)},
+			{Value: jsontext.Value(`{"text":"two"}`)},
+			{Value: jsontext.Value(`{"text":"three"}`)},
+		}
+		if n, err := UploadLogs(context.Background(), conf, slices.Values(entries)); err != nil {
+			t.Fatal(err)
+		} else if n != len(entries) {
+			t.Errorf("uploaded %d entries, want %d", n, len(entries))
+		}
+
+		var all []map[string]any
+		if err := json.Unmarshal(<-got, &all); err != nil {
+			t.Fatal(err)
+		}
+		if len(all) != 3 {
+			t.Fatalf("got %d entries, want 3", len(all))
+		}
+		for i, e := range all {
+			lt := e["logtail"].(map[string]any)
+			seq, ok := lt["proc_seq"].(float64)
+			if !ok {
+				t.Fatalf("entry %d missing proc_seq", i)
+			}
+			if int(seq) != i+1 {
+				t.Errorf("entry %d proc_seq = %v; want %d", i, seq, i+1)
+			}
+		}
+	})
+}
+
+type simpleMemBuf struct {
+	Buffer
+	buf bytes.Buffer
+}
+
+func (b *simpleMemBuf) Write(p []byte) (n int, err error) { return b.buf.Write(p) }
+
+func TestEncode(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{
+			"normal",
+			`{"logtail":{"client_time":"1970-01-01T00:02:03.000000456Z","proc_id":7,"proc_seq":1},"text":"normal"}` + "\n",
+		},
+		{
+			"and a [v1] level one",
+			`{"logtail":{"client_time":"1970-01-01T00:02:03.000000456Z","proc_id":7,"proc_seq":1},"v":1,"text":"and a level one"}` + "\n",
+		},
+		{
+			"[v2] some verbose two",
+			`{"logtail":{"client_time":"1970-01-01T00:02:03.000000456Z","proc_id":7,"proc_seq":1},"v":2,"text":"some verbose two"}` + "\n",
+		},
+		{
+			"{}",
+			`{"logtail":{"client_time":"1970-01-01T00:02:03.000000456Z","proc_id":7,"proc_seq":1}}` + "\n",
+		},
+		{
+			`{"foo":"bar"}`,
+			`{"logtail":{"client_time":"1970-01-01T00:02:03.000000456Z","proc_id":7,"proc_seq":1},"foo":"bar"}` + "\n",
+		},
+		{
+			"foo: [v\x00JSON]0{\"foo\":1}",
+			"{\"logtail\":{\"client_time\":\"1970-01-01T00:02:03.000000456Z\",\"proc_id\":7,\"proc_seq\":1},\"foo\":1}\n",
+		},
+		{
+			"foo: [v\x00JSON]2{\"foo\":1}",
+			"{\"logtail\":{\"client_time\":\"1970-01-01T00:02:03.000000456Z\",\"proc_id\":7,\"proc_seq\":1},\"v\":2,\"foo\":1}\n",
+		},
+	}
+	for _, tt := range tests {
+		buf := new(simpleMemBuf)
+		lg := &Logger{
+			clock:        tstest.NewClock(tstest.ClockOpts{Start: time.Unix(123, 456).UTC()}),
+			buffer:       buf,
+			procID:       7,
+			procSequence: 1,
+		}
+		io.WriteString(lg, tt.in)
+		got := buf.buf.String()
+		if got != tt.want {
+			t.Errorf("for %q,\n got: %#q\nwant: %#q\n", tt.in, got, tt.want)
+		}
+		if err := json.Compact(new(bytes.Buffer), buf.buf.Bytes()); err != nil {
+			t.Errorf("invalid output JSON for %q: %s", tt.in, got)
+		}
+	}
+}
+
+// Test that even if Logger.Write modifies the input buffer, we still return the
+// length of the input buffer, not what we shrank it down to. Otherwise the
+// caller will think we did a short write, violating the io.Writer contract.
+func TestLoggerWriteResult(t *testing.T) {
+	buf := NewMemoryBuffer(100)
+	lg := &Logger{
+		clock:  tstest.NewClock(tstest.ClockOpts{Start: time.Unix(123, 0)}),
+		buffer: buf,
+	}
+
+	const in = "[v1] foo"
+	n, err := lg.Write([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := n, len(in); got != want {
+		t.Errorf("Write = %v; want %v", got, want)
+	}
+	back, err := buf.TryReadLine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(back), `{"logtail":{"client_time":"1970-01-01T00:02:03Z"},"v":1,"text":"foo"}`+"\n"; got != want {
+		t.Errorf("mismatch.\n got: %#q\nwant: %#q", back, want)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestNewLoggerDisabled(t *testing.T) { synctest.Test(t, synctestNewLoggerDisabled) }
+
+func synctestNewLoggerDisabled(t *testing.T) {
+	// When Config.Disabled is true, NewLogger must not emit the usual
+	// "logtail started" banner: the logger should start in the disabled
+	// state before the internal startup write, so nothing ever lands
+	// in the buffer for the upload goroutine to drain.
+	buf := NewMemoryBuffer(100)
+
+	// Any HTTP attempt indicates the banner leaked into the buffer and
+	// the upload goroutine tried to ship it. Report it once (so the
+	// retry spin doesn't drown the log), then block on the request
+	// context so synctest.Wait sees a durable block and Shutdown's
+	// uploadCancel can unblock us cleanly.
+	var once sync.Once
+	httpc := &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			once.Do(func() {
+				t.Errorf("unexpected HTTP request while Disabled=true: %s", r.URL)
+			})
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		}),
+	}
+
+	logger := NewLogger(Config{
+		BaseURL:  "http://logtail.test.invalid",
+		HTTPC:    httpc,
+		Bus:      eventbustest.NewBus(t),
+		Buffer:   buf,
+		Disabled: true,
+	}, t.Logf)
+	defer func() {
+		// Pass an already-cancelled context so Shutdown invokes
+		// uploadCancel immediately; otherwise on the regression path
+		// (Disabled=false) the upload goroutine stays in its retry
+		// loop and synctest.Test never returns.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		logger.Shutdown(ctx)
+	}()
+
+	synctest.Wait()
+
+	if back, _ := buf.TryReadLine(); len(back) != 0 {
+		t.Errorf("Disabled logger buffered a startup entry: %q", back)
+	}
+}
+
+func TestLoggerSetEnabled(t *testing.T) {
+	buf := NewMemoryBuffer(100)
+	lg := &Logger{
+		clock:  tstest.NewClock(tstest.ClockOpts{Start: time.Unix(123, 0)}),
+		buffer: buf,
+	}
+
+	if _, err := lg.Write([]byte("enabled1")); err != nil {
+		t.Fatal(err)
+	}
+	if back, _ := buf.TryReadLine(); !strings.Contains(string(back), "enabled1") {
+		t.Fatalf("initial write not buffered; got %q", back)
+	}
+
+	lg.SetEnabled(false)
+	if _, err := lg.Write([]byte("disabled")); err != nil {
+		t.Fatal(err)
+	}
+	if back, _ := buf.TryReadLine(); len(back) != 0 {
+		t.Errorf("write while disabled leaked into buffer: %q", back)
+	}
+
+	lg.SetEnabled(true)
+	if _, err := lg.Write([]byte("enabled2")); err != nil {
+		t.Fatal(err)
+	}
+	if back, _ := buf.TryReadLine(); !strings.Contains(string(back), "enabled2") {
+		t.Errorf("write after re-enable not buffered; got %q", back)
+	}
+}
+
+func TestAppendMetadata(t *testing.T) {
+	var lg Logger
+	lg.clock = tstest.NewClock(tstest.ClockOpts{Start: time.Date(2000, 01, 01, 0, 0, 0, 0, time.UTC)})
+	lg.metricsDelta = func() string { return "metrics" }
+
+	for _, tt := range []struct {
+		skipClientTime bool
+		skipMetrics    bool
+		procID         uint32
+		procSeq        uint64
+		errDetail      string
+		errData        jsontext.Value
+		level          int
+		want           string
+	}{
+		{want: `"logtail":{"client_time":"2000-01-01T00:00:00Z"},"metrics":"metrics",`},
+		{skipClientTime: true, want: `"metrics":"metrics",`},
+		{skipMetrics: true, want: `"logtail":{"client_time":"2000-01-01T00:00:00Z"},`},
+		{skipClientTime: true, skipMetrics: true, want: ``},
+		{skipClientTime: true, skipMetrics: true, procID: 1, want: `"logtail":{"proc_id":1},`},
+		{skipClientTime: true, skipMetrics: true, procSeq: 2, want: `"logtail":{"proc_seq":2},`},
+		{skipClientTime: true, skipMetrics: true, procID: 1, procSeq: 2, want: `"logtail":{"proc_id":1,"proc_seq":2},`},
+		{skipMetrics: true, procID: 1, procSeq: 2, want: `"logtail":{"client_time":"2000-01-01T00:00:00Z","proc_id":1,"proc_seq":2},`},
+		{skipClientTime: true, skipMetrics: true, errDetail: "error", want: `"logtail":{"error":{"detail":"error"}},`},
+		{skipClientTime: true, skipMetrics: true, errData: jsontext.Value("null"), want: `"logtail":{"error":{"bad_data":null}},`},
+		{skipClientTime: true, skipMetrics: true, level: 5, want: `"v":5,`},
+		{procID: 1, procSeq: 2, errDetail: "error", errData: jsontext.Value(`["something","bad","happened"]`), level: 2,
+			want: `"logtail":{"client_time":"2000-01-01T00:00:00Z","proc_id":1,"proc_seq":2,"error":{"detail":"error","bad_data":["something","bad","happened"]}},"metrics":"metrics","v":2,`},
+	} {
+		got := string(lg.appendMetadata(nil, tt.skipClientTime, tt.skipMetrics, tt.procID, tt.procSeq, tt.errDetail, tt.errData, tt.level))
+		if got != tt.want {
+			t.Errorf("appendMetadata(%v, %v, %v, %v, %v, %v, %v):\n\tgot  %s\n\twant %s", tt.skipClientTime, tt.skipMetrics, tt.procID, tt.procSeq, tt.errDetail, tt.errData, tt.level, got, tt.want)
+		}
+		gotObj := "{" + strings.TrimSuffix(got, ",") + "}"
+		if !jsontext.Value(gotObj).IsValid() {
+			t.Errorf("`%s`.IsValid() = false, want true", gotObj)
+		}
+	}
+}
+
+func TestAppendText(t *testing.T) {
+	var lg Logger
+	lg.clock = tstest.NewClock(tstest.ClockOpts{Start: time.Date(2000, 01, 01, 0, 0, 0, 0, time.UTC)})
+	lg.metricsDelta = func() string { return "metrics" }
+	lg.lowMem = true
+
+	for _, tt := range []struct {
+		text           string
+		skipClientTime bool
+		procID         uint32
+		procSeq        uint64
+		level          int
+		want           string
+	}{
+		{want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z"},"metrics":"metrics"}`},
+		{skipClientTime: true, want: `{"metrics":"metrics"}`},
+		{skipClientTime: true, procID: 1, procSeq: 2, want: `{"logtail":{"proc_id":1,"proc_seq":2},"metrics":"metrics"}`},
+		{text: "fizz buzz", want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z"},"metrics":"metrics","text":"fizz buzz"}`},
+		{text: "\b\f\n\r\t\"\\", want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z"},"metrics":"metrics","text":"\b\f\n\r\t\"\\"}`},
+		{text: "x" + strings.Repeat("😐", maxSize), want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z"},"metrics":"metrics","text":"x` + strings.Repeat("😐", 1023) + `…+1044484"}`},
+	} {
+		got := string(lg.appendText(nil, []byte(tt.text), tt.skipClientTime, tt.procID, tt.procSeq, tt.level))
+		if !strings.HasSuffix(got, "\n") {
+			t.Errorf("`%s` does not end with a newline", got)
+		}
+		got = got[:len(got)-1]
+		if got != tt.want {
+			t.Errorf("appendText(%v, %v, %v, %v, %v):\n\tgot  %s\n\twant %s", tt.text[:min(len(tt.text), 256)], tt.skipClientTime, tt.procID, tt.procSeq, tt.level, got, tt.want)
+		}
+		if !jsontext.Value(got).IsValid() {
+			t.Errorf("`%s`.IsValid() = false, want true", got)
+		}
+	}
+}
+
+func TestAppendTextOrJSON(t *testing.T) {
+	var lg Logger
+	lg.clock = tstest.NewClock(tstest.ClockOpts{Start: time.Date(2000, 01, 01, 0, 0, 0, 0, time.UTC)})
+	lg.metricsDelta = func() string { return "metrics" }
+	lg.lowMem = true
+
+	for _, tt := range []struct {
+		in    string
+		level int
+		want  string
+	}{
+		{want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z"},"metrics":"metrics"}`},
+		{in: "[]", want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z"},"metrics":"metrics","text":"[]"}`},
+		{level: 1, want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z"},"metrics":"metrics","v":1}`},
+		{in: `{}`, want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z"}}`},
+		{in: `{}{}`, want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z"},"metrics":"metrics","text":"{}{}"}`},
+		{in: "{\n\"fizz\"\n:\n\"buzz\"\n}", want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z"},"fizz":"buzz"}`},
+		{in: `{ "logtail" : "duplicate" }`, want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z","error":{"detail":"duplicate logtail member","bad_data":"duplicate"}}}`},
+		{in: `{ "fizz" : "buzz" , "logtail" : "duplicate" }`, want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z","error":{"detail":"duplicate logtail member","bad_data":"duplicate"}}, "fizz" : "buzz"}`},
+		{in: `{ "logtail" : "duplicate" , "fizz" : "buzz" }`, want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z","error":{"detail":"duplicate logtail member","bad_data":"duplicate"}} , "fizz" : "buzz"}`},
+		{in: `{ "fizz" : "buzz" , "logtail" : "duplicate" , "wizz" : "wuzz" }`, want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z","error":{"detail":"duplicate logtail member","bad_data":"duplicate"}}, "fizz" : "buzz" , "wizz" : "wuzz"}`},
+		{in: `{"long":"` + strings.Repeat("a", maxSize) + `"}`, want: `{"logtail":{"client_time":"2000-01-01T00:00:00Z","error":{"detail":"entry too large: 262155 bytes","bad_data":"{\"long\":\"` + strings.Repeat("a", 43681) + `…+218465"}}}`},
+	} {
+		got := string(lg.appendTextOrJSONLocked(nil, []byte(tt.in), tt.level))
+		if !strings.HasSuffix(got, "\n") {
+			t.Errorf("`%s` does not end with a newline", got)
+		}
+		got = got[:len(got)-1]
+		if got != tt.want {
+			t.Errorf("appendTextOrJSON(%v, %v):\n\tgot  %s\n\twant %s", tt.in[:min(len(tt.in), 256)], tt.level, got, tt.want)
+		}
+		if !jsontext.Value(got).IsValid() {
+			t.Errorf("`%s`.IsValid() = false, want true", got)
+		}
+	}
+}
+
+var sink []byte
+
+func TestAppendTextAllocs(t *testing.T) {
+	lg := &Logger{clock: tstime.StdClock{}}
+	inBuf := []byte("some text to encode")
+	procID := uint32(0x24d32ee9)
+	procSequence := uint64(0x12346)
+	must.Do(tstest.MinAllocsPerRun(t, 0, func() {
+		sink = lg.appendText(sink[:0], inBuf, false, procID, procSequence, 0)
+	}))
+}
+
+func TestAppendJSONAllocs(t *testing.T) {
+	lg := &Logger{clock: tstime.StdClock{}}
+	inBuf := []byte(`{"fizz":"buzz"}`)
+	must.Do(tstest.MinAllocsPerRun(t, 1, func() {
+		sink = lg.appendTextOrJSONLocked(sink[:0], inBuf, 0)
+	}))
+}
+
+type discardBuffer struct{ Buffer }
+
+func (discardBuffer) Write(p []byte) (n int, err error) { return n, nil }
+
+var testdataTextLog = []byte(`netcheck: report: udp=true v6=false v6os=true mapvarydest=false hair=false portmap= v4a=174.xxx.xxx.xxx:18168 derp=2 derpdist=1v4:82ms,2v4:18ms,3v4:214ms,4v4:171ms,5v4:196ms,7v4:124ms,8v4:149ms,9v4:56ms,10v4:32ms,11v4:196ms,12v4:71ms,13v4:48ms,14v4:166ms,16v4:85ms,17v4:25ms,18v4:153ms,19v4:176ms,20v4:193ms,21v4:84ms,22v4:182ms,24v4:73ms`)
+var testdataJSONLog = []byte(`{"end":"2024-04-08T21:39:15.715291586Z","nodeId":"nQRJBE7CNTRL","physicalTraffic":[{"dst":"127.x.x.x:2","src":"100.x.x.x:0","txBytes":148,"txPkts":1},{"dst":"127.x.x.x:2","src":"100.x.x.x:0","txBytes":148,"txPkts":1},{"dst":"98.x.x.x:1025","rxBytes":640,"rxPkts":5,"src":"100.x.x.x:0","txBytes":640,"txPkts":5},{"dst":"24.x.x.x:49973","rxBytes":640,"rxPkts":5,"src":"100.x.x.x:0","txBytes":640,"txPkts":5},{"dst":"73.x.x.x:41641","rxBytes":732,"rxPkts":6,"src":"100.x.x.x:0","txBytes":820,"txPkts":7},{"dst":"75.x.x.x:1025","rxBytes":640,"rxPkts":5,"src":"100.x.x.x:0","txBytes":640,"txPkts":5},{"dst":"75.x.x.x:41641","rxBytes":640,"rxPkts":5,"src":"100.x.x.x:0","txBytes":640,"txPkts":5},{"dst":"174.x.x.x:35497","rxBytes":13008,"rxPkts":98,"src":"100.x.x.x:0","txBytes":26688,"txPkts":150},{"dst":"47.x.x.x:41641","rxBytes":640,"rxPkts":5,"src":"100.x.x.x:0","txBytes":640,"txPkts":5},{"dst":"64.x.x.x:41641","rxBytes":640,"rxPkts":5,"src":"100.x.x.x:0","txBytes":640,"txPkts":5}],"start":"2024-04-08T21:39:11.099495616Z","virtualTraffic":[{"dst":"100.x.x.x:33008","proto":6,"src":"100.x.x.x:22","txBytes":1260,"txPkts":10},{"dst":"100.x.x.x:0","proto":1,"rxBytes":420,"rxPkts":5,"src":"100.x.x.x:0","txBytes":420,"txPkts":5},{"dst":"100.x.x.x:32984","proto":6,"src":"100.x.x.x:22","txBytes":1340,"txPkts":10},{"dst":"100.x.x.x:32998","proto":6,"src":"100.x.x.x:22","txBytes":1020,"txPkts":10},{"dst":"100.x.x.x:32994","proto":6,"src":"100.x.x.x:22","txBytes":1260,"txPkts":10},{"dst":"100.x.x.x:32980","proto":6,"src":"100.x.x.x:22","txBytes":1260,"txPkts":10},{"dst":"100.x.x.x:0","proto":1,"rxBytes":420,"rxPkts":5,"src":"100.x.x.x:0","txBytes":420,"txPkts":5},{"dst":"100.x.x.x:0","proto":1,"rxBytes":420,"rxPkts":5,"src":"100.x.x.x:0","txBytes":420,"txPkts":5},{"dst":"100.x.x.x:32950","proto":6,"src":"100.x.x.x:22","txBytes":1340,"txPkts":10},{"dst":"100.x.x.x:22","proto":6,"src":"100.x.x.x:53332","txBytes":60,"txPkts":1},{"dst":"100.x.x.x:0","proto":1,"src":"100.x.x.x:0","txBytes":420,"txPkts":5},{"dst":"100.x.x.x:0","proto":1,"rxBytes":420,"rxPkts":5,"src":"100.x.x.x:0","txBytes":420,"txPkts":5},{"dst":"100.x.x.x:32966","proto":6,"src":"100.x.x.x:22","txBytes":1260,"txPkts":10},{"dst":"100.x.x.x:22","proto":6,"src":"100.x.x.x:57882","txBytes":60,"txPkts":1},{"dst":"100.x.x.x:22","proto":6,"src":"100.x.x.x:53326","txBytes":60,"txPkts":1},{"dst":"100.x.x.x:22","proto":6,"src":"100.x.x.x:57892","txBytes":60,"txPkts":1},{"dst":"100.x.x.x:32934","proto":6,"src":"100.x.x.x:22","txBytes":8712,"txPkts":55},{"dst":"100.x.x.x:0","proto":1,"rxBytes":420,"rxPkts":5,"src":"100.x.x.x:0","txBytes":420,"txPkts":5},{"dst":"100.x.x.x:32942","proto":6,"src":"100.x.x.x:22","txBytes":1260,"txPkts":10},{"dst":"100.x.x.x:0","proto":1,"rxBytes":420,"rxPkts":5,"src":"100.x.x.x:0","txBytes":420,"txPkts":5},{"dst":"100.x.x.x:32964","proto":6,"src":"100.x.x.x:22","txBytes":1260,"txPkts":10},{"dst":"100.x.x.x:0","proto":1,"rxBytes":420,"rxPkts":5,"src":"100.x.x.x:0","txBytes":420,"txPkts":5},{"dst":"100.x.x.x:0","proto":1,"rxBytes":420,"rxPkts":5,"src":"100.x.x.x:0","txBytes":420,"txPkts":5},{"dst":"100.x.x.x:22","proto":6,"src":"100.x.x.x:37238","txBytes":60,"txPkts":1},{"dst":"100.x.x.x:22","proto":6,"src":"100.x.x.x:37252","txBytes":60,"txPkts":1}]}`)
+
+func BenchmarkWriteText(b *testing.B) {
+	var lg Logger
+	lg.clock = tstime.StdClock{}
+	lg.buffer = discardBuffer{}
+	b.ReportAllocs()
+	for range b.N {
+		must.Get(lg.Write(testdataTextLog))
+	}
+}
+
+func BenchmarkWriteJSON(b *testing.B) {
+	var lg Logger
+	lg.clock = tstime.StdClock{}
+	lg.buffer = discardBuffer{}
+	b.ReportAllocs()
+	for range b.N {
+		must.Get(lg.Write(testdataJSONLog))
+	}
+}

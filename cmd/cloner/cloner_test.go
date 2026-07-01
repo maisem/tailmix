@@ -1,0 +1,285 @@
+// Copyright (c) Tailscale Inc & contributors
+// SPDX-License-Identifier: BSD-3-Clause
+
+package main
+
+import (
+	"reflect"
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"tailscale.com/cmd/cloner/clonerex"
+)
+
+func TestSliceContainer(t *testing.T) {
+	num := 5
+	examples := []struct {
+		name string
+		in   *clonerex.SliceContainer
+	}{
+		{
+			name: "nil",
+			in:   nil,
+		},
+		{
+			name: "zero",
+			in:   &clonerex.SliceContainer{},
+		},
+		{
+			name: "empty",
+			in: &clonerex.SliceContainer{
+				Slice: []*int{},
+			},
+		},
+		{
+			name: "nils",
+			in: &clonerex.SliceContainer{
+				Slice: []*int{nil, nil, nil, nil, nil},
+			},
+		},
+		{
+			name: "one",
+			in: &clonerex.SliceContainer{
+				Slice: []*int{&num},
+			},
+		},
+		{
+			name: "several",
+			in: &clonerex.SliceContainer{
+				Slice: []*int{&num, &num, &num, &num, &num},
+			},
+		},
+	}
+
+	for _, ex := range examples {
+		t.Run(ex.name, func(t *testing.T) {
+			out := ex.in.Clone()
+			if !reflect.DeepEqual(ex.in, out) {
+				t.Errorf("Clone() = %v, want %v", out, ex.in)
+			}
+		})
+	}
+}
+
+func TestInterfaceContainer(t *testing.T) {
+	examples := []struct {
+		name string
+		in   *clonerex.InterfaceContainer
+	}{
+		{
+			name: "nil",
+			in:   nil,
+		},
+		{
+			name: "zero",
+			in:   &clonerex.InterfaceContainer{},
+		},
+		{
+			name: "with_interface",
+			in: &clonerex.InterfaceContainer{
+				Interface: &clonerex.CloneableImpl{Value: 42},
+			},
+		},
+		{
+			name: "with_nil_interface",
+			in: &clonerex.InterfaceContainer{
+				Interface: nil,
+			},
+		},
+	}
+
+	for _, ex := range examples {
+		t.Run(ex.name, func(t *testing.T) {
+			out := ex.in.Clone()
+			if !reflect.DeepEqual(ex.in, out) {
+				t.Errorf("Clone() = %v, want %v", out, ex.in)
+			}
+
+			// Verify no aliasing: modifying the clone should not affect the original
+			if ex.in != nil && ex.in.Interface != nil {
+				if impl, ok := out.Interface.(*clonerex.CloneableImpl); ok {
+					impl.Value = 999
+					if origImpl, ok := ex.in.Interface.(*clonerex.CloneableImpl); ok {
+						if origImpl.Value == 999 {
+							t.Errorf("Clone() aliased memory with original")
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestMapWithPointers(t *testing.T) {
+	num1, num2 := 42, 100
+	orig := &clonerex.MapWithPointers{
+		Nested: map[string]*int{
+			"foo": &num1,
+			"bar": &num2,
+		},
+		WithCloneMethod: map[string]*clonerex.SliceContainer{
+			"container1": {Slice: []*int{&num1, &num2}},
+			"container2": {Slice: []*int{&num1}},
+		},
+		CloneInterface: map[string]clonerex.Cloneable{
+			"impl1": &clonerex.CloneableImpl{Value: 123},
+			"impl2": &clonerex.CloneableImpl{Value: 456},
+		},
+	}
+
+	cloned := orig.Clone()
+	if !reflect.DeepEqual(orig, cloned) {
+		t.Errorf("Clone() = %v, want %v", cloned, orig)
+	}
+
+	// Mutate cloned.Nested pointer values
+	*cloned.Nested["foo"] = 999
+	if *orig.Nested["foo"] == 999 {
+		t.Errorf("Clone() aliased memory in Nested: original was modified")
+	}
+
+	// Mutate cloned.WithCloneMethod slice values
+	*cloned.WithCloneMethod["container1"].Slice[0] = 888
+	if *orig.WithCloneMethod["container1"].Slice[0] == 888 {
+		t.Errorf("Clone() aliased memory in WithCloneMethod: original was modified")
+	}
+
+	// Mutate cloned.CloneInterface values
+	if impl, ok := cloned.CloneInterface["impl1"].(*clonerex.CloneableImpl); ok {
+		impl.Value = 777
+		if origImpl, ok := orig.CloneInterface["impl1"].(*clonerex.CloneableImpl); ok {
+			if origImpl.Value == 777 {
+				t.Errorf("Clone() aliased memory in CloneInterface: original was modified")
+			}
+		}
+	}
+}
+
+func TestNamedMapContainer(t *testing.T) {
+	orig := &clonerex.NamedMapContainer{
+		Attrs: clonerex.NamedMap{
+			"str":  "hello",
+			"num":  int64(42),
+			"bool": true,
+		},
+	}
+
+	cloned := orig.Clone()
+	if !reflect.DeepEqual(orig, cloned) {
+		t.Errorf("Clone() = %v, want %v", cloned, orig)
+	}
+
+	// Mutate the cloned map to verify no aliasing.
+	cloned.Attrs["str"] = "modified"
+	if orig.Attrs["str"] == "modified" {
+		t.Errorf("Clone() aliased memory in Attrs: original was modified")
+	}
+
+	// Verify nil handling.
+	nilContainer := &clonerex.NamedMapContainer{}
+	nilClone := nilContainer.Clone()
+	if !reflect.DeepEqual(nilContainer, nilClone) {
+		t.Errorf("Clone() of nil Attrs = %v, want %v", nilClone, nilContainer)
+	}
+}
+
+func TestMapSlicePointerContainer(t *testing.T) {
+	num := 42
+	orig := &clonerex.MapSlicePointerContainer{
+		Routes: map[string][]*clonerex.SliceContainer{
+			"route1": {
+				{Slice: []*int{&num}},
+				{Slice: []*int{&num, &num}},
+			},
+			"route2": {
+				{Slice: []*int{&num}},
+			},
+		},
+	}
+
+	cloned := orig.Clone()
+	if !reflect.DeepEqual(orig, cloned) {
+		t.Errorf("Clone() = %v, want %v", cloned, orig)
+	}
+
+	// Mutate cloned.Routes pointer values
+	*cloned.Routes["route1"][0].Slice[0] = 999
+	if *orig.Routes["route1"][0].Slice[0] == 999 {
+		t.Errorf("Clone() aliased memory in Routes: original was modified")
+	}
+}
+
+func TestMapSlicePointerContainerNilValue(t *testing.T) {
+	num := 7
+	orig := &clonerex.MapSlicePointerContainer{
+		Routes: map[string][]*clonerex.SliceContainer{
+			"nil-value": nil,
+			"non-nil":   {{Slice: []*int{&num}}},
+		},
+	}
+	cloned := orig.Clone()
+	if diff := cmp.Diff(orig.Routes, cloned.Routes); diff != "" {
+		t.Errorf("Clone() Routes mismatch (-orig +cloned):\n%s", diff)
+	}
+}
+
+func TestDeeplyNestedMap(t *testing.T) {
+	num := 123
+	orig := &clonerex.DeeplyNestedMap{
+		ThreeLevels: map[string]map[string]map[string]int{
+			"a": {
+				"b": {"c": 1, "d": 2},
+				"e": {"f": 3},
+			},
+			"g": {
+				"h": {"i": 4},
+			},
+		},
+		FourLevels: map[string]map[string]map[string]map[string]*clonerex.SliceContainer{
+			"l1a": {
+				"l2a": {
+					"l3a": {
+						"l4a": {Slice: []*int{&num}},
+						"l4b": {Slice: []*int{&num, &num}},
+					},
+				},
+			},
+		},
+	}
+
+	cloned := orig.Clone()
+	if !reflect.DeepEqual(orig, cloned) {
+		t.Errorf("Clone() = %v, want %v", cloned, orig)
+	}
+
+	// Mutate the clone's ThreeLevels map
+	cloned.ThreeLevels["a"]["b"]["c"] = 777
+	if orig.ThreeLevels["a"]["b"]["c"] == 777 {
+		t.Errorf("Clone() aliased memory in ThreeLevels: original was modified")
+	}
+
+	// Mutate the clone's FourLevels map at the deepest pointer level
+	*cloned.FourLevels["l1a"]["l2a"]["l3a"]["l4a"].Slice[0] = 666
+	if *orig.FourLevels["l1a"]["l2a"]["l3a"]["l4a"].Slice[0] == 666 {
+		t.Errorf("Clone() aliased memory in FourLevels: original was modified")
+	}
+
+	// Add a new top-level key to the clone's FourLevels map
+	newNum := 999
+	cloned.FourLevels["l1b"] = map[string]map[string]map[string]*clonerex.SliceContainer{
+		"l2b": {
+			"l3b": {
+				"l4c": {Slice: []*int{&newNum}},
+			},
+		},
+	}
+	if _, exists := orig.FourLevels["l1b"]; exists {
+		t.Errorf("Clone() aliased FourLevels map: new top-level key appeared in original")
+	}
+
+	// Add a new nested key to the clone's FourLevels map
+	cloned.FourLevels["l1a"]["l2a"]["l3a"]["l4c"] = &clonerex.SliceContainer{Slice: []*int{&newNum}}
+	if _, exists := orig.FourLevels["l1a"]["l2a"]["l3a"]["l4c"]; exists {
+		t.Errorf("Clone() aliased FourLevels map: new nested key appeared in original")
+	}
+}

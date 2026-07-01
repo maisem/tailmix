@@ -1,0 +1,46 @@
+// Copyright (c) Tailscale Inc & contributors
+// SPDX-License-Identifier: BSD-3-Clause
+
+package words
+
+import (
+	"slices"
+	"strings"
+	"testing"
+)
+
+var nopes = []string{
+	"chub", "bangus", "hellbender",
+}
+
+func TestWords(t *testing.T) {
+	test := func(t *testing.T, words []string) {
+		t.Helper()
+		if len(words) == 0 {
+			t.Error("no words")
+		}
+		seen := map[string]bool{}
+		for _, w := range words {
+			if seen[w] {
+				t.Errorf("dup word %q", w)
+			}
+			seen[w] = true
+			if w == "" || strings.IndexFunc(w, nonASCIILower) != -1 {
+				t.Errorf("malformed word %q", w)
+			}
+			if slices.Contains(nopes, w) {
+				t.Errorf("word %q has been previously rejected/removed and should not be added", w)
+			}
+		}
+	}
+	t.Run("tails", func(t *testing.T) { test(t, Tails()) })
+	t.Run("scales", func(t *testing.T) { test(t, Scales()) })
+	t.Logf("%v tails * %v scales = %v beautiful combinations", len(Tails()), len(Scales()), len(Tails())*len(Scales()))
+}
+
+func nonASCIILower(r rune) bool {
+	if 'a' <= r && r <= 'z' {
+		return false
+	}
+	return true
+}
