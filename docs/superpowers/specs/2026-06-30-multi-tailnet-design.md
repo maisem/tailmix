@@ -23,6 +23,8 @@ Host administrators can still forward, NAT, bridge, or proxy traffic with normal
 
 The system is one daemon with a shared host-facing TUN and one forked `tsnet` profile engine per active tailnet.
 
+The first runnable milestone uses userspace networking instead of a host TUN. In that mode, the daemon runs one `tsnet` profile engine per active tailnet and exposes one aggregate local SOCKS5 listener for outbound TCP. The aggregate SOCKS listener chooses a profile per request and then dials through that profile's `tsnet.Server.Dial`. This validates simultaneous multi-profile login and outbound reachability before OS route installation, shared TUN injection, and packet-level effective-IP translation are enabled.
+
 We fork `tsnet` and add a packet-facing API that lets the multi-tailnet daemon provide or connect the packet/TUN interface used by a profile engine. This keeps `tsnet` responsible for tailnet identity, control-plane state, peer crypto, DERP/magicsock behavior, and netmap handling, while the new daemon owns the host-wide multi-tailnet policy.
 
 The daemon owns:
@@ -155,6 +157,14 @@ host@tailnet-alias
 ```
 
 Those selectors are CLI/API conveniences, not OS search-domain behavior.
+
+In the userspace SOCKS milestone, SOCKS destinations are intentionally stricter:
+
+- MagicDNS FQDNs are allowed and select the profile whose running tailnet reports that MagicDNS suffix.
+- Synthetic effective IP literals are allowed when they appear in the local effective-IP lease table.
+- Canonical Tailscale IP literals are rejected, even when a canonical IP is unique.
+- Unqualified names are rejected.
+- UDP ASSOCIATE is out of scope for the first SOCKS milestone.
 
 ## Routing And Exit Nodes
 

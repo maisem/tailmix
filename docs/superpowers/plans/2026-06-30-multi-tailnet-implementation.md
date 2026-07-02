@@ -1711,4 +1711,6 @@ Expected: one focused integration-test commit.
 
 ## Follow-Up Plan Boundary
 
-This plan gets the fork to a tested local multi-profile/mux foundation. A separate plan should cover live two-tailnet control-plane tests, OS TUN creation, route installation, daemon LocalAPI, per-profile shields-up wiring, exit-node selection, and a real forked-tsnet API if `tsnet.Server.Tun` proves insufficient under live packet tests.
+This plan got the fork to a tested local multi-profile/mux foundation. The next implementation slice is userspace networking with one aggregate SOCKS5 listener before TUN mode. That slice should start `tsnet` profile engines without a provided TUN, learn each profile's MagicDNS suffix after login, and route aggregate SOCKS TCP CONNECT requests by MagicDNS FQDN or synthetic effective IP. It should reject canonical IP literals, unqualified names, and UDP ASSOCIATE for now.
+
+A later plan should cover live two-tailnet control-plane tests, OS TUN creation, route installation, daemon LocalAPI, per-profile shields-up wiring, exit-node selection, and a real forked-tsnet API if `tsnet.Server.Tun` proves insufficient under live packet tests.
