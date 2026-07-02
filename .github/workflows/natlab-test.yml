@@ -53,7 +53,7 @@ jobs:
       # SHAs), so it survives across workflow runs and is invalidated only
       # when a new image source is added.
       - name: Cache cloud VM images
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/tailscale/vmtest/images
           key: natlab-vmimages-${{ hashFiles('tstest/natlab/vmtest/images.go') }}
@@ -64,7 +64,7 @@ jobs:
       # also get the cache.
       - name: Cache gokrazy VM image
         id: gokrazy-cache
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: gokrazy/natlabapp.qcow2
           key: natlab-gokrazy-${{ github.sha }}
