@@ -12,12 +12,14 @@ type Status struct {
 }
 
 type Profile struct {
-	ID        string   `json:"id"`
-	Alias     string   `json:"alias"`
-	SelfNode  string   `json:"selfNode"`
-	SelfIPs   []IPPair `json:"selfIps"`
-	PeerCount int      `json:"peerCount"`
-	ShieldsUp bool     `json:"shieldsUp"`
+	ID             string   `json:"id"`
+	Alias          string   `json:"alias"`
+	MagicDNSSuffix string   `json:"magicDnsSuffix,omitempty"`
+	BackendState   string   `json:"backendState,omitempty"`
+	SelfNode       string   `json:"selfNode"`
+	SelfIPs        []IPPair `json:"selfIps"`
+	PeerCount      int      `json:"peerCount"`
+	ShieldsUp      bool     `json:"shieldsUp"`
 }
 
 type IPPair struct {
@@ -33,11 +35,13 @@ func Project(profiles []profile.Status, leases []effectiveip.Lease) Status {
 	out := Status{}
 	for _, p := range profiles {
 		proj := Profile{
-			ID:        p.ProfileID,
-			Alias:     p.Alias,
-			SelfNode:  p.SelfNodeID,
-			PeerCount: p.PeerCount,
-			ShieldsUp: p.ShieldsUp,
+			ID:             p.ProfileID,
+			Alias:          p.Alias,
+			MagicDNSSuffix: p.MagicDNSSuffix,
+			BackendState:   p.BackendState,
+			SelfNode:       p.SelfNodeID,
+			PeerCount:      p.PeerCount,
+			ShieldsUp:      p.ShieldsUp,
 		}
 		for _, canonical := range p.SelfIPs {
 			effective := canonical

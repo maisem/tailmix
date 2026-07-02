@@ -2,6 +2,7 @@ package profile
 
 import (
 	"context"
+	"net"
 	"net/netip"
 	"testing"
 )
@@ -20,6 +21,10 @@ func (f *fakeEngine) Start(context.Context) error {
 func (f *fakeEngine) Close() error {
 	f.started = false
 	return nil
+}
+
+func (f *fakeEngine) Dial(context.Context, string, string) (net.Conn, error) {
+	return nil, nil
 }
 
 func (f *fakeEngine) Status(context.Context) (Status, error) {

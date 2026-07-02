@@ -10,9 +10,12 @@ type State struct {
 }
 
 type Profile struct {
-	ID       string `json:"id"`
-	Alias    string `json:"alias"`
-	StateDir string `json:"stateDir"`
+	ID             string `json:"id"`
+	Alias          string `json:"alias"`
+	StateDir       string `json:"stateDir"`
+	Hostname       string `json:"hostname,omitempty"`
+	ControlURL     string `json:"controlUrl,omitempty"`
+	MagicDNSSuffix string `json:"magicDnsSuffix,omitempty"`
 }
 
 type EffectiveLease struct {
