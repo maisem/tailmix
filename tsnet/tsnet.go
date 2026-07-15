@@ -28,7 +28,7 @@
 //
 // # Usage
 //
-//	import "tailscale.com/tsnet"
+//	import "github.com/maisem/tailmix/tsnet"
 //
 //	s := &tsnet.Server{
 //		Hostname: "my-service",
@@ -56,20 +56,7 @@
 //
 //  3. The TS_AUTH_KEY environment variable.
 //
-//  4. An OAuth client secret ([Server.ClientSecret] or TS_CLIENT_SECRET),
-//     used to mint an auth key.
-//
-//  5. Workload identity federation ([Server.ClientID] plus
-//     [Server.IDToken] or [Server.Audience]). Available only if the
-//     program imports the feature:
-//
-//     import _ "tailscale.com/feature/identityfederation"
-//
-//     The feature is not linked by default to keep the AWS SDK and
-//     other cloud-provider dependencies out of programs that don't
-//     use workload identity federation.
-//
-//  6. An interactive login URL printed to [Server.UserLogf].
+//  4. An interactive login URL printed to [Server.UserLogf].
 //
 // If the node is already enrolled (state found in [Server.Store]), the
 // auth key is ignored unless TSNET_FORCE_LOGIN=1 is set.
@@ -149,6 +136,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -163,12 +151,10 @@ import (
 	"tailscale.com/control/controlclient"
 	"tailscale.com/envknob"
 	_ "tailscale.com/feature/c2n"
-	_ "tailscale.com/feature/condregister/oauthkey"
 	_ "tailscale.com/feature/condregister/portmapper"
 	_ "tailscale.com/feature/condregister/useproxy"
 	"tailscale.com/health"
 	"tailscale.com/hostinfo"
-	"tailscale.com/internal/client/tailscale"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnauth"
 	"tailscale.com/ipn/ipnlocal"
@@ -220,9 +206,6 @@ type Server struct {
 	// If nil, a new FileStore is initialized at `Dir/tailscaled.state`.
 	// See tailscale.com/ipn/store for supported stores.
 	//
-	// Logs will automatically be uploaded to log.tailscale.com,
-	// where the configuration file for logging will be saved at
-	// `Dir/tailscaled.log.conf`.
 	Store ipn.StateStore
 
 	// Hostname is the hostname to present to the control server.
@@ -239,6 +222,15 @@ type Server struct {
 	// If unset, logs are discarded.
 	Logf logger.Logf
 
+	// LogUpload enables remote logtail uploads. Uploads are disabled by
+	// default. When enabled, the log configuration and buffer are stored in
+	// Dir.
+	LogUpload bool
+
+	// LogUploadURL is the base URL for remote logtail uploads. It is used only
+	// when LogUpload is true. If empty, Tailscale's default log server is used.
+	LogUploadURL string
+
 	// Ephemeral, if true, specifies that the instance should register
 	// as an Ephemeral node (https://tailscale.com/s/ephemeral-nodes).
 	Ephemeral bool
@@ -249,37 +241,6 @@ type Server struct {
 	// previously stored in Store), then this field is not
 	// used.
 	AuthKey string
-
-	// ClientSecret, if non-empty, is the OAuth client secret
-	// that will be used to generate authkeys via OAuth. It
-	// will be preferred over the TS_CLIENT_SECRET environment
-	// variable. If the node is already created (from state
-	// previously stored in Store), then this field is not
-	// used.
-	ClientSecret string
-
-	// ClientID, if non-empty, is the client ID used to generate
-	// authkeys via workload identity federation. It will be
-	// preferred over the TS_CLIENT_ID environment variable.
-	// If the node is already created (from state previously
-	// stored in Store), then this field is not used.
-	ClientID string
-
-	// IDToken, if non-empty, is the ID token from the identity
-	// provider to exchange with the control server for workload
-	// identity federation. It will be preferred over the
-	// TS_ID_TOKEN environment variable. If the node is already
-	// created (from state previously stored in Store), then this
-	// field is not used.
-	IDToken string
-
-	// Audience, if non-empty, is the audience to use when requesting
-	// an ID token from a well-known identity provider to exchange
-	// with the control server for workload identity federation. It
-	// will be preferred over the TS_AUDIENCE environment variable. If
-	// the node is already created (from state previously stored in Store),
-	// then this field is not used.
-	Audience string
 
 	// ControlURL optionally specifies the coordination server URL.
 	// If empty, the Tailscale default is used.
@@ -735,34 +696,6 @@ func (s *Server) getControlURL() string {
 	return os.Getenv("TS_CONTROL_URL")
 }
 
-func (s *Server) getClientSecret() string {
-	if v := s.ClientSecret; v != "" {
-		return v
-	}
-	return os.Getenv("TS_CLIENT_SECRET")
-}
-
-func (s *Server) getClientID() string {
-	if v := s.ClientID; v != "" {
-		return v
-	}
-	return os.Getenv("TS_CLIENT_ID")
-}
-
-func (s *Server) getIDToken() string {
-	if v := s.IDToken; v != "" {
-		return v
-	}
-	return os.Getenv("TS_ID_TOKEN")
-}
-
-func (s *Server) getAudience() string {
-	if v := s.Audience; v != "" {
-		return v
-	}
-	return os.Getenv("TS_AUDIENCE")
-}
-
 func (s *Server) start() (reterr error) {
 	var closePool closeOnErrorPool
 	defer closePool.closeAllIfError(&reterr)
@@ -833,15 +766,16 @@ func (s *Server) start() (reterr error) {
 
 	sys := tsd.NewSystem()
 	s.sys = sys
-	if err := s.startLogger(&closePool, sys.HealthTracker.Get(), tsLogf); err != nil {
-		return err
-	}
-
 	s.netMon, err = netmon.New(sys.Bus.Get(), tsLogf)
 	if err != nil {
 		return err
 	}
 	closePool.add(s.netMon)
+	if s.LogUpload {
+		if err := s.startLogger(&closePool, sys.HealthTracker.Get(), tsLogf); err != nil {
+			return err
+		}
+	}
 
 	s.dialer = &tsdial.Dialer{Logf: tsLogf} // mutated below (before used)
 	s.dialer.SetBus(sys.Bus.Get())
@@ -945,10 +879,7 @@ func (s *Server) start() (reterr error) {
 	prefs.ControlURL = s.getControlURL()
 	prefs.RunWebClient = s.RunWebClient
 	prefs.AdvertiseTags = s.AdvertiseTags
-	authKey, err := s.resolveAuthKey()
-	if err != nil {
-		return fmt.Errorf("error resolving auth key: %w", err)
-	}
+	authKey := s.getAuthKey()
 	err = lb.Start(ipn.Options{
 		UpdatePrefs: prefs,
 		AuthKey:     authKey,
@@ -994,52 +925,16 @@ func (s *Server) start() (reterr error) {
 	return nil
 }
 
-func (s *Server) resolveAuthKey() (string, error) {
-	authKey := s.getAuthKey()
-	var err error
-	// Try to use an OAuth secret to generate an auth key if that functionality
-	// is available.
-	resolveViaOAuth, oauthOk := tailscale.HookResolveAuthKey.GetOk()
-	if oauthOk {
-		clientSecret := authKey
-		if authKey == "" {
-			clientSecret = s.getClientSecret()
-		}
-		authKey, err = resolveViaOAuth(s.shutdownCtx, clientSecret, s.AdvertiseTags)
-		if err != nil {
-			return "", err
-		}
-	}
-	// Try to resolve the auth key via workload identity federation if that functionality
-	// is available and no auth key is yet determined.
-	resolveViaWIF, wifOk := tailscale.HookResolveAuthKeyViaWIF.GetOk()
-	if wifOk && authKey == "" {
-		clientID := s.getClientID()
-		idToken := s.getIDToken()
-		audience := s.getAudience()
-		if clientID != "" && idToken == "" && audience == "" {
-			return "", fmt.Errorf("client ID for workload identity federation found, but ID token and audience are empty")
-		}
-		if idToken != "" && audience != "" {
-			return "", fmt.Errorf("only one of ID token and audience should be for workload identity federation")
-		}
-		if clientID == "" {
-			if idToken != "" {
-				return "", fmt.Errorf("ID token for workload identity federation found, but client ID is empty")
-			}
-			if audience != "" {
-				return "", fmt.Errorf("audience for workload identity federation found, but client ID is empty")
-			}
-		}
-		authKey, err = resolveViaWIF(s.shutdownCtx, s.getControlURL(), clientID, idToken, audience, s.AdvertiseTags)
-		if err != nil {
-			return "", err
-		}
-	}
-	return authKey, nil
-}
-
 func (s *Server) startLogger(closePool *closeOnErrorPool, health *health.Tracker, tsLogf logger.Logf) error {
+	baseURL := strings.TrimRight(s.LogUploadURL, "/")
+	logHost := logtail.DefaultHost
+	if baseURL != "" {
+		u, err := url.Parse(baseURL)
+		if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+			return fmt.Errorf("invalid log upload URL %q", s.LogUploadURL)
+		}
+		logHost = u.Host
+	}
 	if testenv.InTest() {
 		return nil
 	}
@@ -1067,11 +962,17 @@ func (s *Server) startLogger(closePool *closeOnErrorPool, health *health.Tracker
 	c := logtail.Config{
 		Collection:   lpc.Collection,
 		PrivateID:    lpc.PrivateID,
+		BaseURL:      baseURL,
 		Stderr:       io.Discard, // log everything to Buffer
 		Buffer:       s.logbuffer,
 		CompressLogs: true,
 		Bus:          s.sys.Bus.Get(),
-		HTTPC:        &http.Client{Transport: logpolicy.NewLogtailTransport(logtail.DefaultHost, s.netMon, health, tsLogf)},
+		HTTPC: &http.Client{Transport: logpolicy.TransportOptions{
+			Host:   logHost,
+			NetMon: s.netMon,
+			Health: health,
+			Logf:   tsLogf,
+		}.New()},
 		MetricsDelta: clientmetric.EncodeLogTailMetricsDelta,
 	}
 	s.logtail = logtail.NewLogger(c, tsLogf)
@@ -1520,7 +1421,7 @@ func (s *Server) ListenFunnel(network, addr string, opts ...FunnelOption) (net.L
 		srvConfig = &ipn.ServeConfig{}
 	}
 	if len(st.CertDomains) == 0 {
-		return nil, errors.New("Funnel not available; HTTPS must be enabled. See https://tailscale.com/s/https")
+		return nil, errors.New("funnel not available; HTTPS must be enabled; see https://tailscale.com/s/https")
 	}
 	domain := st.CertDomains[0]
 	hp := ipn.HostPort(domain + ":" + portStr)
@@ -2235,6 +2136,17 @@ func (s *Server) CapturePcap(ctx context.Context, pcapFile string) error {
 // This is not a stable API, nor are the APIs of the returned subsystems.
 func (s *Server) Sys() *tsd.System {
 	return s.sys
+}
+
+// LocalBackend returns the backend backing s.
+//
+// This is not a stable API. It exists so tailmix can serve Tailscale's native
+// LocalAPI with ipnserver and its per-connection credential checks.
+func (s *Server) LocalBackend() (*ipnlocal.LocalBackend, error) {
+	if err := s.Start(); err != nil {
+		return nil, err
+	}
+	return s.lb, nil
 }
 
 type listenKey struct {
