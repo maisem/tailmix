@@ -91,5 +91,6 @@ routes would overlap tailmix's.
 
 tailmix's original code is available under the BSD 3-Clause License. See
 [LICENSE](LICENSE). The copied tsnet source retains Tailscale's copyright and
-license in [tsnet/LICENSE](tsnet/LICENSE). Notices for copied and linked
-third-party code are collected in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
+license in [tsnet/LICENSE](tsnet/LICENSE). The linked Go dependency license
+report is generated with `go-licenses`; see [licenses/tailmix.md](licenses/tailmix.md)
+and [licenses/README.md](licenses/README.md).
