@@ -54,8 +54,9 @@ when setting or changing the pool. `-synthetic-pool-v6` provides the equivalent
 IPv6 setting. Changing either pool retires that family's leases and NAT address.
 MagicDNS remains at `100.100.100.100`.
 
-See [docs/darwin-testing.md](docs/darwin-testing.md) for verification steps and
-[docs/design.md](docs/design.md) for the architecture and semantics.
+See [docs/darwin-testing.md](docs/darwin-testing.md) for verification steps,
+[docs/architecture.html](docs/architecture.html) for the implementation
+architecture, and [docs/design.md](docs/design.md) for the design semantics.
 
 ## Run on Linux
 
