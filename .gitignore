@@ -1,0 +1,4 @@
+/tailmix
+/tailmixd
+*.test
+.DS_Store
