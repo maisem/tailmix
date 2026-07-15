@@ -71,6 +71,75 @@ func TestResolveProfilesMergesFlagsWithPersistentState(t *testing.T) {
 	}
 }
 
+func TestConfigureSyntheticPoolsUsesPersistedValuesAndDefaults(t *testing.T) {
+	st := state.State{SyntheticPool: "10.42.1.7/16"}
+	if err := configureSyntheticPools(&st, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if st.SyntheticPool != "10.42.0.0/16" {
+		t.Fatalf("IPv4 pool = %q, want normalized persisted pool", st.SyntheticPool)
+	}
+	if st.SyntheticPoolV6 != defaultSyntheticPoolV6 {
+		t.Fatalf("IPv6 pool = %q, want default %q", st.SyntheticPoolV6, defaultSyntheticPoolV6)
+	}
+}
+
+func TestConfigureSyntheticPoolsOverrideDiscardsOnlyChangedFamilySyntheticLeases(t *testing.T) {
+	canonicalV4 := state.EffectiveLease{
+		ProfileID:   "work",
+		NodeID:      "unique-v4",
+		CanonicalIP: netip.MustParseAddr("100.64.0.1"),
+		EffectiveIP: netip.MustParseAddr("100.64.0.1"),
+	}
+	syntheticV4 := state.EffectiveLease{
+		ProfileID:   "home",
+		NodeID:      "colliding-v4",
+		CanonicalIP: netip.MustParseAddr("100.64.0.1"),
+		EffectiveIP: netip.MustParseAddr("100.127.0.1"),
+	}
+	syntheticV6 := state.EffectiveLease{
+		ProfileID:   "home",
+		NodeID:      "colliding-v6",
+		CanonicalIP: netip.MustParseAddr("fd7a:115c:a1e0::1"),
+		EffectiveIP: netip.MustParseAddr("fd6d:6e65:7400::1"),
+	}
+	st := state.State{
+		SyntheticPool:   defaultSyntheticPool,
+		SyntheticPoolV6: defaultSyntheticPoolV6,
+		Leases:          []state.EffectiveLease{canonicalV4, syntheticV4, syntheticV6},
+	}
+	if err := configureSyntheticPools(&st, "10.250.1.9/16", ""); err != nil {
+		t.Fatal(err)
+	}
+	if st.SyntheticPool != "10.250.0.0/16" {
+		t.Fatalf("IPv4 pool = %q, want 10.250.0.0/16", st.SyntheticPool)
+	}
+	if len(st.Leases) != 2 || st.Leases[0] != canonicalV4 || st.Leases[1] != syntheticV6 {
+		t.Fatalf("leases after IPv4 pool change = %+v, want canonical IPv4 and synthetic IPv6", st.Leases)
+	}
+}
+
+func TestConfigureSyntheticPoolsRejectsInvalidOverrides(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		ipv4 string
+		ipv6 string
+	}{
+		{name: "invalid", ipv4: "not-a-prefix"},
+		{name: "wrong-family-v4", ipv4: "fd00::/64"},
+		{name: "wrong-family-v6", ipv6: "10.0.0.0/8"},
+		{name: "non-unicast", ipv4: "224.0.0.0/24"},
+		{name: "magic-dns-overlap", ipv4: "100.64.0.0/10"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			st := state.State{}
+			if err := configureSyntheticPools(&st, test.ipv4, test.ipv6); err == nil {
+				t.Fatalf("configureSyntheticPools(%q, %q) succeeded", test.ipv4, test.ipv6)
+			}
+		})
+	}
+}
+
 func TestLeaseNodesIncludesSelfAndPeersInStableOrder(t *testing.T) {
 	statuses := []tailmixprofile.Status{{
 		ProfileID:  "work",

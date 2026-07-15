@@ -82,6 +82,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	mode := fs.String("mode", "tun", "networking mode: tun or socks")
 	tunName := fs.String("tun-name", "utun", "Darwin TUN name (utun chooses the next free device)")
 	socksAddr := fs.String("socks", "127.0.0.1:1080", "aggregate SOCKS5 listen address")
+	syntheticPool := fs.String("synthetic-pool", "", "IPv4 CIDR for colliding effective addresses (persisted; default "+defaultSyntheticPool+")")
+	syntheticPoolV6 := fs.String("synthetic-pool-v6", "", "IPv6 CIDR for colliding effective addresses (persisted; default "+defaultSyntheticPoolV6+")")
 	verbose := fs.Bool("verbose", false, "enable verbose per-profile tsnet logs")
 	fs.Var(&profiles, "profile", "profile config: id=work,dir=/path,hostname=tailmix-work[,control-url=URL][,suffix=tailnet.ts.net][,auth-key-env=ENV]")
 	if err := fs.Parse(args); err != nil {
@@ -108,11 +110,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if st.SyntheticPool == "" {
-		st.SyntheticPool = defaultSyntheticPool
-	}
-	if st.SyntheticPoolV6 == "" {
-		st.SyntheticPoolV6 = defaultSyntheticPoolV6
+	if err := configureSyntheticPools(&st, *syntheticPool, *syntheticPoolV6); err != nil {
+		return err
 	}
 	runtimeProfiles, err := resolveProfiles(st, profiles, *statePath)
 	if err != nil {
@@ -128,6 +127,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err := store.Save(st); err != nil {
 		return err
 	}
+	fmt.Fprintf(stderr, "effective IP pools: IPv4 %s, IPv6 %s\n", st.SyntheticPool, st.SyntheticPoolV6)
 
 	mgr := tailmixprofile.NewManager()
 	for i := range runtimeProfiles {
@@ -189,6 +189,74 @@ func defaultStatePath() string {
 		return filepath.Join(".", "tailmix-state.json")
 	}
 	return filepath.Join(dir, "tailmix", "state.json")
+}
+
+func configureSyntheticPools(st *state.State, ipv4Override, ipv6Override string) error {
+	type familyConfig struct {
+		name         string
+		override     string
+		current      *string
+		defaultValue string
+		ipv6         bool
+	}
+	for _, family := range []familyConfig{
+		{name: "IPv4", override: ipv4Override, current: &st.SyntheticPool, defaultValue: defaultSyntheticPool},
+		{name: "IPv6", override: ipv6Override, current: &st.SyntheticPoolV6, defaultValue: defaultSyntheticPoolV6, ipv6: true},
+	} {
+		oldValue := *family.current
+		selected := strings.TrimSpace(family.override)
+		if selected == "" {
+			selected = oldValue
+		}
+		if selected == "" {
+			selected = family.defaultValue
+		}
+		normalized, err := normalizeSyntheticPool(family.name, selected, family.ipv6)
+		if err != nil {
+			return err
+		}
+
+		oldNormalized := ""
+		if oldValue != "" {
+			if oldPool, err := normalizeSyntheticPool(family.name, oldValue, family.ipv6); err == nil {
+				oldNormalized = oldPool
+			}
+		}
+		if strings.TrimSpace(family.override) != "" && oldNormalized != normalized {
+			st.Leases = discardSyntheticLeases(st.Leases, family.ipv6)
+		}
+		*family.current = normalized
+	}
+	return nil
+}
+
+func normalizeSyntheticPool(name, raw string, ipv6 bool) (string, error) {
+	pool, err := netip.ParsePrefix(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("parse synthetic %s pool %q: %w", name, raw, err)
+	}
+	if pool.Addr().Is4In6() || pool.Addr().Is6() != ipv6 {
+		return "", fmt.Errorf("synthetic %s pool has wrong address family: %v", name, pool)
+	}
+	pool = pool.Masked()
+	if !pool.Addr().IsGlobalUnicast() {
+		return "", fmt.Errorf("synthetic %s pool must contain unicast addresses: %v", name, pool)
+	}
+	if !ipv6 && pool.Contains(tailmixdns.ServiceIP()) {
+		return "", fmt.Errorf("synthetic IPv4 pool %v contains MagicDNS service address %v", pool, tailmixdns.ServiceIP())
+	}
+	return pool.String(), nil
+}
+
+func discardSyntheticLeases(leases []state.EffectiveLease, ipv6 bool) []state.EffectiveLease {
+	out := make([]state.EffectiveLease, 0, len(leases))
+	for _, lease := range leases {
+		if lease.EffectiveIP.IsValid() && lease.EffectiveIP.Is6() == ipv6 && lease.EffectiveIP != lease.CanonicalIP {
+			continue
+		}
+		out = append(out, lease)
+	}
+	return out
 }
 
 func parseProfileSpec(raw string) (profileSpec, error) {

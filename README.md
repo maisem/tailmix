@@ -38,6 +38,7 @@ unset TS_AUTHKEY TS_AUTH_KEY
 
 sudo /tmp/tailmixd \
   -state /var/db/tailmix/state.json \
+  -synthetic-pool 10.250.0.0/16 \
   -profile id=work \
   -profile id=home
 ```
@@ -45,6 +46,13 @@ sudo /tmp/tailmixd \
 Open each interactive login URL as it appears. Existing profiles reuse their
 persisted login state. For unattended login, configure a distinct
 `auth-key-env` for each profile.
+
+`-synthetic-pool` selects the IPv4 CIDR used only when canonical addresses
+collide between profiles. Choose a range that does not overlap local routes.
+The value is persisted in daemon state, so it only needs to be supplied when
+setting or changing the pool. `-synthetic-pool-v6` provides the equivalent IPv6
+setting. Changing either pool retires that family's old synthetic leases and
+allocates replacements at startup. MagicDNS remains at `100.100.100.100`.
 
 See [docs/darwin-testing.md](docs/darwin-testing.md) for verification steps and
 [docs/design.md](docs/design.md) for the architecture and semantics.

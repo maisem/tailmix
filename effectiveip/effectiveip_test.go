@@ -45,6 +45,29 @@ func TestAllocatorPreservesExistingLeases(t *testing.T) {
 	}
 }
 
+func TestAllocatorDoesNotReuseSyntheticLeaseOutsidePool(t *testing.T) {
+	canonical := netip.MustParseAddr("100.64.0.1")
+	key := NodeKey{ProfileID: "work", NodeID: "node-a", CanonicalIP: canonical}
+	allocator := NewAllocator(netip.MustParsePrefix("10.250.0.0/24"), []Lease{{
+		NodeKey:     key,
+		EffectiveIP: netip.MustParseAddr("100.127.0.1"),
+	}})
+	plan, err := allocator.Assign([]Node{{
+		ProfileID: "work", NodeID: "node-a", CanonicalIP: canonical,
+	}, {
+		ProfileID: "home", NodeID: "node-b", CanonicalIP: canonical,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := netip.MustParsePrefix("10.250.0.0/24")
+	for _, lease := range plan.Leases {
+		if !pool.Contains(lease.EffectiveIP) {
+			t.Fatalf("effective IP %v is outside configured pool %v", lease.EffectiveIP, pool)
+		}
+	}
+}
+
 func TestAllocatorReportsPoolExhaustion(t *testing.T) {
 	a := NewAllocator(netip.MustParsePrefix("100.127.0.0/32"), nil)
 	_, err := a.Assign([]Node{

@@ -26,6 +26,7 @@ unset TS_AUTHKEY TS_AUTH_KEY
 
 sudo /tmp/tailmixd \
   -state "$HOME/Library/Application Support/tailmix/state.json" \
+  -synthetic-pool 10.250.0.0/16 \
   -profile id=work \
   -profile id=home
 ```
@@ -37,12 +38,18 @@ profiles do not need their auth key again after initial enrollment. Pass
 `-verbose` to include the per-profile tsnet logs. Use `-mode socks` to run the
 previous userspace SOCKS milestone instead.
 
+The synthetic IPv4 pool is persisted in daemon state; omit the flag on later
+runs to reuse it. Choose a CIDR that does not overlap LAN, VPN, or other host
+routes. Changing the flag retires old synthetic IPv4 leases and allocates new
+ones. The corresponding IPv6 flag is `-synthetic-pool-v6`. These flags do not
+change MagicDNS's Tailscale-defined service address, `100.100.100.100`.
+
 At startup, tailmixd prints the allocated interface and every active peer route:
 
 ```text
 TUN utun7 configured with 4 local address(es) and 12 peer route(s)
 MagicDNS serving 100.100.100.100:53 inside the TUN for home.ts.net, work.ts.net
-route profile=home name=db.example.ts.net effective=100.127.0.3 canonical=100.64.0.1
+route profile=home name=db.example.ts.net effective=10.250.0.3 canonical=100.64.0.1
 ```
 
 Use each peer's fully-qualified MagicDNS name or the effective address shown in
@@ -55,12 +62,12 @@ without taking over the source tailnet's entire DNS suffix.
 ## First checks
 
 ```sh
-route -n get 100.127.0.3
+route -n get 10.250.0.3
 scutil --dns | grep -A8 'home.ts.net'
 dig @100.100.100.100 db.home.ts.net
 dscacheutil -q host -a name db.home.ts.net
-ping 100.127.0.3
-nc -vz 100.127.0.3 22
+ping 10.250.0.3
+nc -vz 10.250.0.3 22
 ```
 
 `route -n get` should show the tailmix `utun` and the effective self address for

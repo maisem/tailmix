@@ -35,6 +35,7 @@ type Plan struct {
 }
 
 func NewAllocator(pool netip.Prefix, existing []Lease) *Allocator {
+	pool = pool.Masked()
 	a := &Allocator{
 		pool:   pool,
 		leases: map[NodeKey]netip.Addr{},
@@ -45,6 +46,9 @@ func NewAllocator(pool netip.Prefix, existing []Lease) *Allocator {
 			continue
 		}
 		if l.NodeKey.CanonicalIP.Is6() != l.EffectiveIP.Is6() {
+			continue
+		}
+		if l.EffectiveIP != l.NodeKey.CanonicalIP && !pool.Contains(l.EffectiveIP) {
 			continue
 		}
 		a.leases[l.NodeKey] = l.EffectiveIP

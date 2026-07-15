@@ -99,6 +99,11 @@ Effective IPs are:
 - Never serialized as peer identity in WireGuard traffic.
 - Never used as ACL subjects.
 
+Synthetic IPv4 and IPv6 addresses come from daemon-configurable pools. Pool
+selection is persisted alongside the leases. Changing a pool retires the old
+synthetic leases for that address family and allocates replacements; canonical
+addresses that were already unique are unaffected.
+
 Effective IPs map to canonical tailnet identity:
 
 ```text
