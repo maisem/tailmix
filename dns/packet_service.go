@@ -24,8 +24,8 @@ import (
 
 const (
 	dnsNICID     tcpip.NICID = 1
-	dnsQueueSize             = 512
-	dnsMTU                   = 1280
+	dnsQueueSize int         = 512
+	dnsMTU       uint32      = 1280
 )
 
 // packetService terminates the Tailscale service IP in a small gVisor stack.

@@ -36,7 +36,7 @@ type darwinHost struct {
 
 func Open(cfg OpenConfig) (Host, error) {
 	if os.Geteuid() != 0 {
-		return nil, errors.New("Darwin TUN mode requires root; run tailmixd with sudo")
+		return nil, errors.New("darwin TUN mode requires root; run tailmixd with sudo")
 	}
 	if cfg.Name == "" {
 		cfg.Name = "utun"
@@ -75,7 +75,7 @@ func (h *darwinHost) Configure(cfg Config) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return errors.New("Darwin host TUN is closed")
+		return errors.New("darwin host TUN is closed")
 	}
 
 	wantAddrs := make(map[netip.Addr]netip.Prefix, len(localAddrs))

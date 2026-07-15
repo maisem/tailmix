@@ -78,7 +78,7 @@ func (a *Allocator) Assign(nodes []Node) (*Plan, error) {
 	}
 	out := &Plan{byKey: map[NodeKey]netip.Addr{}}
 	for _, n := range nodes {
-		key := NodeKey{ProfileID: n.ProfileID, NodeID: n.NodeID, CanonicalIP: n.CanonicalIP}
+		key := NodeKey(n)
 		if existing, ok := a.leases[key]; ok {
 			out.add(key, existing)
 			continue

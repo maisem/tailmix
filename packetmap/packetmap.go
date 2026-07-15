@@ -3,7 +3,6 @@ package packetmap
 import (
 	"fmt"
 	"net/netip"
-	"slices"
 
 	"github.com/gaissmai/bart"
 	"tailscale.com/net/packet"
@@ -46,8 +45,7 @@ func New(table Table) *Mapper {
 
 func (m *Mapper) Outbound(pkt []byte) ([]byte, Route, error) {
 	var p packet.Parsed
-	out := slices.Clone(pkt)
-	p.Decode(out)
+	p.Decode(pkt)
 	if p.IPVersion == 0 {
 		return nil, Route{}, fmt.Errorf("unsupported packet")
 	}
@@ -69,13 +67,12 @@ func (m *Mapper) Outbound(pkt []byte) ([]byte, Route, error) {
 	// address before the packet enters that profile's tsnet engine.
 	checksum.UpdateSrcAddr(&p, src.CanonicalIP)
 	checksum.UpdateDstAddr(&p, dst.CanonicalIP)
-	return out, Route{ProfileID: dst.ProfileID, CanonicalIP: dst.CanonicalIP}, nil
+	return pkt, Route(dst), nil
 }
 
 func (m *Mapper) Inbound(profileID string, pkt []byte) ([]byte, error) {
 	var p packet.Parsed
-	out := slices.Clone(pkt)
-	p.Decode(out)
+	p.Decode(pkt)
 	if p.IPVersion == 0 {
 		return nil, fmt.Errorf("unsupported packet")
 	}
@@ -98,7 +95,7 @@ func (m *Mapper) Inbound(profileID string, pkt []byte) ([]byte, error) {
 	// DNAT the profile's canonical self address back to the one address the
 	// host owns on the shared TUN.
 	checksum.UpdateDstAddr(&p, src.HostIP)
-	return out, nil
+	return pkt, nil
 }
 
 func sourceKey(profileID string, ip netip.Addr) SourceKey {

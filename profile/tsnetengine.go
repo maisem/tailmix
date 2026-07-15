@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 
@@ -125,15 +126,10 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	var ips []netip.Addr
-	for _, ip := range st.TailscaleIPs {
-		ips = append(ips, ip)
-	}
+	ips := slices.Clone(st.TailscaleIPs)
 	suffix := e.cfg.MagicDNSSuffix
 	if st.CurrentTailnet != nil && st.CurrentTailnet.MagicDNSSuffix != "" {
 		suffix = st.CurrentTailnet.MagicDNSSuffix
-	} else if st.MagicDNSSuffix != "" {
-		suffix = st.MagicDNSSuffix
 	}
 	selfNode := ""
 	selfDNSName := ""

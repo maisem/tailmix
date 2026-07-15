@@ -64,7 +64,7 @@ func (h *linuxHost) Configure(cfg Config) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return errors.New("Linux host TUN is closed")
+		return errors.New("linux host TUN is closed")
 	}
 
 	wantAddrs := make(map[netip.Addr]netip.Prefix, len(localAddrs))
