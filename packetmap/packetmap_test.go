@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/gaissmai/bart"
 	"tailscale.com/net/packet"
 )
 
@@ -26,17 +27,17 @@ func udp6(src, dst netip.Addr, sport, dport uint16) []byte {
 func TestOutboundMapsEffectiveDestinationToCanonicalProfile(t *testing.T) {
 	effectiveDst := netip.MustParseAddr("100.127.0.1")
 	canonicalDst := netip.MustParseAddr("100.64.0.1")
-	effectiveSrc := netip.MustParseAddr("100.127.0.10")
+	hostNAT := netip.MustParseAddr("10.250.0.10")
 	canonicalSrc := netip.MustParseAddr("100.65.0.10")
-	mapper := New(Table{
-		Destinations: map[netip.Addr]Destination{
-			effectiveDst: {ProfileID: "work", CanonicalIP: canonicalDst},
-		},
+	table := Table{
+		Destinations: new(bart.Table[Destination]),
 		Sources: map[SourceKey]Source{
-			{ProfileID: "work"}: {EffectiveIP: effectiveSrc, CanonicalIP: canonicalSrc},
+			{ProfileID: "work"}: {HostIP: hostNAT, CanonicalIP: canonicalSrc},
 		},
-	})
-	translated, route, err := mapper.Outbound(udp4(effectiveSrc, effectiveDst, 1111, 2222))
+	}
+	table.Destinations.Insert(netip.PrefixFrom(effectiveDst, 32), Destination{ProfileID: "work", CanonicalIP: canonicalDst})
+	mapper := New(table)
+	translated, route, err := mapper.Outbound(udp4(hostNAT, effectiveDst, 1111, 2222))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,11 +54,13 @@ func TestOutboundMapsEffectiveDestinationToCanonicalProfile(t *testing.T) {
 func TestInboundMapsCanonicalAddressesToEffective(t *testing.T) {
 	effectivePeer := netip.MustParseAddr("100.127.0.1")
 	canonicalPeer := netip.MustParseAddr("100.64.0.1")
-	effectiveSelf := netip.MustParseAddr("100.127.0.10")
+	hostNAT := netip.MustParseAddr("10.250.0.10")
 	canonicalSelf := netip.MustParseAddr("100.65.0.10")
+	inbound := new(bart.Table[netip.Addr])
+	inbound.Insert(netip.PrefixFrom(canonicalPeer, 32), effectivePeer)
 	mapper := New(Table{
-		InboundPeers: map[InboundKey]netip.Addr{{ProfileID: "work", CanonicalIP: canonicalPeer}: effectivePeer},
-		Sources:      map[SourceKey]Source{{ProfileID: "work"}: {EffectiveIP: effectiveSelf, CanonicalIP: canonicalSelf}},
+		InboundPeers: map[string]*bart.Table[netip.Addr]{"work": inbound},
+		Sources:      map[SourceKey]Source{{ProfileID: "work"}: {HostIP: hostNAT, CanonicalIP: canonicalSelf}},
 	})
 	translated, err := mapper.Inbound("work", udp4(canonicalPeer, canonicalSelf, 2222, 1111))
 	if err != nil {
@@ -65,8 +68,8 @@ func TestInboundMapsCanonicalAddressesToEffective(t *testing.T) {
 	}
 	var p packet.Parsed
 	p.Decode(translated)
-	if p.Src.Addr() != effectivePeer || p.Dst.Addr() != effectiveSelf {
-		t.Fatalf("translated packet = %v > %v, want %v > %v", p.Src.Addr(), p.Dst.Addr(), effectivePeer, effectiveSelf)
+	if p.Src.Addr() != effectivePeer || p.Dst.Addr() != hostNAT {
+		t.Fatalf("translated packet = %v > %v, want %v > %v", p.Src.Addr(), p.Dst.Addr(), effectivePeer, hostNAT)
 	}
 }
 
@@ -81,17 +84,17 @@ func TestOutboundUnknownEffectiveDestinationIsRejected(t *testing.T) {
 func TestIPv6UsesIPv6ProfileSource(t *testing.T) {
 	effectiveDst := netip.MustParseAddr("fd6d:6e65:7400::20")
 	canonicalDst := netip.MustParseAddr("fd7a:115c:a1e0::20")
-	effectiveSrc := netip.MustParseAddr("fd6d:6e65:7400::10")
+	hostNAT := netip.MustParseAddr("fd6d:6e65:7400::10")
 	canonicalSrc := netip.MustParseAddr("fd7a:115c:a1e0::10")
-	mapper := New(Table{
-		Destinations: map[netip.Addr]Destination{
-			effectiveDst: {ProfileID: "work", CanonicalIP: canonicalDst},
-		},
+	table := Table{
+		Destinations: new(bart.Table[Destination]),
 		Sources: map[SourceKey]Source{
-			{ProfileID: "work", IPv6: true}: {EffectiveIP: effectiveSrc, CanonicalIP: canonicalSrc},
+			{ProfileID: "work", IPv6: true}: {HostIP: hostNAT, CanonicalIP: canonicalSrc},
 		},
-	})
-	translated, _, err := mapper.Outbound(udp6(effectiveSrc, effectiveDst, 1111, 2222))
+	}
+	table.Destinations.Insert(netip.PrefixFrom(effectiveDst, 128), Destination{ProfileID: "work", CanonicalIP: canonicalDst})
+	mapper := New(table)
+	translated, _, err := mapper.Outbound(udp6(hostNAT, effectiveDst, 1111, 2222))
 	if err != nil {
 		t.Fatal(err)
 	}

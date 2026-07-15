@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gaissmai/bart"
 	"github.com/maisem/tailmix/packetmap"
 	"tailscale.com/net/packet"
 )
@@ -21,22 +22,22 @@ func testUDP(src, dst netip.Addr) []byte {
 func TestMuxRoutesOutboundPacketToSelectedProfileTun(t *testing.T) {
 	host := NewChanTUN("host")
 	work := NewChanTUN("work")
-	effectiveSelf := netip.MustParseAddr("100.127.0.10")
+	hostNAT := netip.MustParseAddr("10.250.0.10")
 	effectivePeer := netip.MustParseAddr("100.127.0.1")
 	canonicalSelf := netip.MustParseAddr("100.65.0.10")
 	canonicalPeer := netip.MustParseAddr("100.64.0.1")
-	mux := NewMux(host, map[string]*ChanTUN{"work": work}, packetmap.New(packetmap.Table{
-		Destinations: map[netip.Addr]packetmap.Destination{
-			effectivePeer: {ProfileID: "work", CanonicalIP: canonicalPeer},
-		},
+	table := packetmap.Table{
+		Destinations: new(bart.Table[packetmap.Destination]),
 		Sources: map[packetmap.SourceKey]packetmap.Source{
-			{ProfileID: "work"}: {EffectiveIP: effectiveSelf, CanonicalIP: canonicalSelf},
+			{ProfileID: "work"}: {HostIP: hostNAT, CanonicalIP: canonicalSelf},
 		},
-	}), nil)
+	}
+	table.Destinations.Insert(netip.PrefixFrom(effectivePeer, 32), packetmap.Destination{ProfileID: "work", CanonicalIP: canonicalPeer})
+	mux := NewMux(host, map[string]*ChanTUN{"work": work}, packetmap.New(table), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go mux.Run(ctx)
-	host.Outbound <- testUDP(effectiveSelf, effectivePeer)
+	host.Outbound <- testUDP(hostNAT, effectivePeer)
 	select {
 	case got := <-work.Outbound:
 		var p packet.Parsed
@@ -52,16 +53,16 @@ func TestMuxRoutesOutboundPacketToSelectedProfileTun(t *testing.T) {
 func TestMuxRoutesInboundPacketToHostTun(t *testing.T) {
 	host := NewChanTUN("host")
 	work := NewChanTUN("work")
-	effectiveSelf := netip.MustParseAddr("100.127.0.10")
+	hostNAT := netip.MustParseAddr("10.250.0.10")
 	effectivePeer := netip.MustParseAddr("100.127.0.1")
 	canonicalSelf := netip.MustParseAddr("100.65.0.10")
 	canonicalPeer := netip.MustParseAddr("100.64.0.1")
+	inbound := new(bart.Table[netip.Addr])
+	inbound.Insert(netip.PrefixFrom(canonicalPeer, 32), effectivePeer)
 	mux := NewMux(host, map[string]*ChanTUN{"work": work}, packetmap.New(packetmap.Table{
-		InboundPeers: map[packetmap.InboundKey]netip.Addr{
-			{ProfileID: "work", CanonicalIP: canonicalPeer}: effectivePeer,
-		},
+		InboundPeers: map[string]*bart.Table[netip.Addr]{"work": inbound},
 		Sources: map[packetmap.SourceKey]packetmap.Source{
-			{ProfileID: "work"}: {EffectiveIP: effectiveSelf, CanonicalIP: canonicalSelf},
+			{ProfileID: "work"}: {HostIP: hostNAT, CanonicalIP: canonicalSelf},
 		},
 	}), nil)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -72,8 +73,8 @@ func TestMuxRoutesInboundPacketToHostTun(t *testing.T) {
 	case got := <-host.Inbound:
 		var p packet.Parsed
 		p.Decode(got)
-		if p.Src.Addr() != effectivePeer || p.Dst.Addr() != effectiveSelf {
-			t.Fatalf("host packet = %v > %v, want %v > %v", p.Src.Addr(), p.Dst.Addr(), effectivePeer, effectiveSelf)
+		if p.Src.Addr() != effectivePeer || p.Dst.Addr() != hostNAT {
+			t.Fatalf("host packet = %v > %v, want %v > %v", p.Src.Addr(), p.Dst.Addr(), effectivePeer, hostNAT)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for inbound host packet")

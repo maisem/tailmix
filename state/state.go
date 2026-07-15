@@ -5,6 +5,8 @@ import "net/netip"
 type State struct {
 	SyntheticPool   string           `json:"syntheticPool"`
 	SyntheticPoolV6 string           `json:"syntheticPoolV6,omitempty"`
+	NATIP           netip.Addr       `json:"natIp,omitempty"`
+	NATIPv6         netip.Addr       `json:"natIpV6,omitempty"`
 	Profiles        []Profile        `json:"profiles"`
 	Leases          []EffectiveLease `json:"leases"`
 	ExitNode        *ExitNode        `json:"exitNode,omitempty"`

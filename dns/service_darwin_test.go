@@ -121,4 +121,54 @@ func TestManagerUsesNativeSplitDNSAndAnswersEffectiveIP(t *testing.T) {
 	if got := netip.AddrFrom4(answer.A); got != wantIP {
 		t.Fatalf("MagicDNS answer = %v, want effective IP %v", got, wantIP)
 	}
+
+	const addedName = "peer.home.example"
+	addedIP := netip.MustParseAddr("10.250.0.7")
+	service := &osService{manager: manager}
+	if err := service.Configure(
+		[]Domain{{ProfileID: "home", Suffix: "home.example"}},
+		[]Record{{ProfileAlias: "home", Name: addedName, EffectiveIP: addedIP}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.config.MatchDomains) != 1 || capture.config.MatchDomains[0] != wantDomain {
+		t.Fatalf("updated OS match domains = %v, want [%v]", capture.config.MatchDomains, wantDomain)
+	}
+
+	builder = dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: 2, RecursionDesired: true})
+	if err := builder.StartQuestions(); err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.Question(dnsmessage.Question{
+		Name:  dnsmessage.MustNewName(addedName + "."),
+		Type:  dnsmessage.TypeA,
+		Class: dnsmessage.ClassINET,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	query, err = builder.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err = manager.Query(context.Background(), query, "udp", netip.MustParseAddrPort("127.0.0.1:12345"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.Start(response); err != nil {
+		t.Fatal(err)
+	}
+	if err := parser.SkipAllQuestions(); err != nil {
+		t.Fatal(err)
+	}
+	header, err = parser.AnswerHeader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer, err = parser.AResource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := netip.AddrFrom4(answer.A); got != addedIP {
+		t.Fatalf("updated MagicDNS answer = %v, want %v", got, addedIP)
+	}
 }

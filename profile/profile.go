@@ -11,6 +11,12 @@ type Engine interface {
 	Close() error
 	Dial(context.Context, string, string) (net.Conn, error)
 	Status(context.Context) (Status, error)
+	WatchUpdates(context.Context, func()) error
+}
+
+type Update struct {
+	ProfileID string
+	Err       error
 }
 
 type Status struct {

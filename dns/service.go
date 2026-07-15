@@ -26,6 +26,7 @@ type ServiceConfig struct {
 
 type Service interface {
 	Addr() netip.AddrPort
+	Configure([]Domain, []Record) error
 	HandlePacket([]byte) bool
 	Outbound() <-chan []byte
 	Err() error

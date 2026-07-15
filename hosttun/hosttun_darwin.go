@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 
@@ -26,9 +25,11 @@ type darwinHost struct {
 	name       string
 	logf       logger.Logf
 	run        commandRunner
+	mu         sync.Mutex
 	localAddrs []netip.Prefix
 	routes     []Route
 	configured bool
+	closed     bool
 	closeOnce  sync.Once
 	closeErr   error
 }
@@ -67,79 +68,92 @@ func (h *darwinHost) Device() tun.Device { return h.dev }
 func (h *darwinHost) Name() string       { return h.name }
 
 func (h *darwinHost) Configure(cfg Config) error {
-	if h.configured {
-		return errors.New("Darwin host TUN is already configured")
-	}
 	localAddrs, routes, err := normalizeConfig(cfg)
 	if err != nil {
 		return err
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return errors.New("Darwin host TUN is closed")
+	}
+
+	wantAddrs := make(map[netip.Addr]netip.Prefix, len(localAddrs))
 	for _, addr := range localAddrs {
+		wantAddrs[addr.Addr()] = addr
+	}
+	currentAddrs := make(map[netip.Addr]bool, len(h.localAddrs))
+	for _, addr := range h.localAddrs {
+		currentAddrs[addr.Addr()] = true
+	}
+	for _, addr := range localAddrs {
+		if currentAddrs[addr.Addr()] {
+			continue
+		}
 		if err := h.command(addressAddCommand(h.name, addr)...); err != nil {
-			_ = h.clear()
 			return err
 		}
 		h.localAddrs = append(h.localAddrs, addr)
 	}
+
+	wantRoutes := make(map[netip.Prefix]Route, len(routes))
 	for _, route := range routes {
+		wantRoutes[route.Destination] = route
+	}
+	for _, route := range slices.Clone(h.routes) {
+		want, ok := wantRoutes[route.Destination]
+		if ok && want == route {
+			continue
+		}
+		if err := h.command(routeDeleteCommand(h.name, route)...); err != nil {
+			return err
+		}
+		h.routes = slices.DeleteFunc(h.routes, func(candidate Route) bool {
+			return candidate.Destination == route.Destination
+		})
+	}
+	currentRoutes := make(map[netip.Prefix]Route, len(h.routes))
+	for _, route := range h.routes {
+		currentRoutes[route.Destination] = route
+	}
+	for _, route := range routes {
+		if current, ok := currentRoutes[route.Destination]; ok && current == route {
+			continue
+		}
 		if err := h.command(routeAddCommand(h.name, route)...); err != nil {
-			_ = h.clear()
 			return err
 		}
 		h.routes = append(h.routes, route)
 	}
+	for _, addr := range slices.Clone(h.localAddrs) {
+		if _, ok := wantAddrs[addr.Addr()]; ok {
+			continue
+		}
+		if err := h.command(addressDeleteCommand(h.name, addr)...); err != nil {
+			return err
+		}
+		h.localAddrs = slices.DeleteFunc(h.localAddrs, func(candidate netip.Prefix) bool {
+			return candidate.Addr() == addr.Addr()
+		})
+	}
+	h.localAddrs = localAddrs
+	h.routes = routes
 	h.configured = true
 	return nil
 }
 
-func normalizeConfig(cfg Config) ([]netip.Prefix, []Route, error) {
-	localSet := map[netip.Addr]netip.Prefix{}
-	for _, prefix := range cfg.LocalAddrs {
-		if !prefix.IsValid() || prefix.Bits() != prefix.Addr().BitLen() {
-			return nil, nil, fmt.Errorf("local TUN address must be a host prefix: %v", prefix)
-		}
-		localSet[prefix.Addr()] = prefix
-	}
-	localAddrs := make([]netip.Prefix, 0, len(localSet))
-	for _, prefix := range localSet {
-		localAddrs = append(localAddrs, prefix)
-	}
-	sort.Slice(localAddrs, func(i, j int) bool { return localAddrs[i].Addr().Compare(localAddrs[j].Addr()) < 0 })
-
-	routeSet := map[netip.Prefix]Route{}
-	for _, route := range cfg.Routes {
-		if !route.Destination.IsValid() || route.Destination.Bits() != route.Destination.Addr().BitLen() {
-			return nil, nil, fmt.Errorf("TUN route must be a host prefix: %v", route.Destination)
-		}
-		if !route.Source.IsValid() || route.Source.Is6() != route.Destination.Addr().Is6() {
-			return nil, nil, fmt.Errorf("route %v has invalid source %v", route.Destination, route.Source)
-		}
-		if _, ok := localSet[route.Source]; !ok {
-			return nil, nil, fmt.Errorf("route %v source %v is not a local TUN address", route.Destination, route.Source)
-		}
-		if existing, ok := routeSet[route.Destination]; ok && existing.Source != route.Source {
-			return nil, nil, fmt.Errorf("route %v has conflicting sources %v and %v", route.Destination, existing.Source, route.Source)
-		}
-		routeSet[route.Destination] = route
-	}
-	routes := make([]Route, 0, len(routeSet))
-	for _, route := range routeSet {
-		routes = append(routes, route)
-	}
-	sort.Slice(routes, func(i, j int) bool {
-		return routes[i].Destination.Addr().Compare(routes[j].Destination.Addr()) < 0
-	})
-	return localAddrs, routes, nil
-}
-
 func (h *darwinHost) Close() error {
 	h.closeOnce.Do(func() {
-		h.closeErr = errors.Join(h.clear(), h.dev.Close())
+		h.mu.Lock()
+		clearErr := h.clearLocked()
+		h.closed = true
+		h.mu.Unlock()
+		h.closeErr = errors.Join(clearErr, h.dev.Close())
 	})
 	return h.closeErr
 }
 
-func (h *darwinHost) clear() error {
+func (h *darwinHost) clearLocked() error {
 	var errs []error
 	for _, route := range slices.Backward(h.routes) {
 		if err := h.command(routeDeleteCommand(h.name, route)...); err != nil {
@@ -178,7 +192,7 @@ func addressDeleteCommand(name string, prefix netip.Prefix) []string {
 }
 
 func routeAddCommand(name string, route Route) []string {
-	return []string{"/sbin/route", "-q", "-n", "add", "-" + inet(route.Destination.Addr()), route.Destination.String(), "-iface", name, "-ifa", route.Source.String()}
+	return []string{"/sbin/route", "-q", "-n", "add", "-" + inet(route.Destination.Addr()), route.Destination.String(), "-iface", name}
 }
 
 func routeDeleteCommand(name string, route Route) []string {

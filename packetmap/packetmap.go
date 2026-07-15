@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"slices"
 
+	"github.com/gaissmai/bart"
 	"tailscale.com/net/packet"
 	"tailscale.com/net/packet/checksum"
 )
@@ -15,7 +16,7 @@ type Destination struct {
 }
 
 type Source struct {
-	EffectiveIP netip.Addr
+	HostIP      netip.Addr
 	CanonicalIP netip.Addr
 }
 
@@ -24,15 +25,10 @@ type SourceKey struct {
 	IPv6      bool
 }
 
-type InboundKey struct {
-	ProfileID   string
-	CanonicalIP netip.Addr
-}
-
 type Table struct {
-	Destinations map[netip.Addr]Destination
+	Destinations *bart.Table[Destination]
 	Sources      map[SourceKey]Source
-	InboundPeers map[InboundKey]netip.Addr
+	InboundPeers map[string]*bart.Table[netip.Addr]
 }
 
 type Route struct {
@@ -55,7 +51,10 @@ func (m *Mapper) Outbound(pkt []byte) ([]byte, Route, error) {
 	if p.IPVersion == 0 {
 		return nil, Route{}, fmt.Errorf("unsupported packet")
 	}
-	dst, ok := m.table.Destinations[p.Dst.Addr()]
+	if m.table.Destinations == nil {
+		return nil, Route{}, fmt.Errorf("no destination routes")
+	}
+	dst, ok := m.table.Destinations.Lookup(p.Dst.Addr())
 	if !ok {
 		return nil, Route{}, fmt.Errorf("no profile route for effective destination %v", p.Dst.Addr())
 	}
@@ -63,9 +62,11 @@ func (m *Mapper) Outbound(pkt []byte) ([]byte, Route, error) {
 	if !ok {
 		return nil, Route{}, fmt.Errorf("no %s source mapping for profile %q", addressFamily(p.Src.Addr()), dst.ProfileID)
 	}
-	if src.CanonicalIP.Is6() != p.Src.Addr().Is6() || dst.CanonicalIP.Is6() != p.Dst.Addr().Is6() {
+	if src.HostIP.Is6() != p.Src.Addr().Is6() || src.CanonicalIP.Is6() != p.Src.Addr().Is6() || dst.CanonicalIP.Is6() != p.Dst.Addr().Is6() {
 		return nil, Route{}, fmt.Errorf("address family mismatch for profile %q", dst.ProfileID)
 	}
+	// SNAT the shared host address to the selected profile's canonical self
+	// address before the packet enters that profile's tsnet engine.
 	checksum.UpdateSrcAddr(&p, src.CanonicalIP)
 	checksum.UpdateDstAddr(&p, dst.CanonicalIP)
 	return out, Route{ProfileID: dst.ProfileID, CanonicalIP: dst.CanonicalIP}, nil
@@ -78,7 +79,11 @@ func (m *Mapper) Inbound(profileID string, pkt []byte) ([]byte, error) {
 	if p.IPVersion == 0 {
 		return nil, fmt.Errorf("unsupported packet")
 	}
-	effectivePeer, ok := m.table.InboundPeers[InboundKey{ProfileID: profileID, CanonicalIP: p.Src.Addr()}]
+	inbound := m.table.InboundPeers[profileID]
+	if inbound == nil {
+		return nil, fmt.Errorf("no inbound routes for profile=%q", profileID)
+	}
+	effectivePeer, ok := inbound.Lookup(p.Src.Addr())
 	if !ok {
 		return nil, fmt.Errorf("no inbound peer mapping for profile=%q canonical=%v", profileID, p.Src.Addr())
 	}
@@ -86,11 +91,13 @@ func (m *Mapper) Inbound(profileID string, pkt []byte) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("no %s source mapping for profile %q", addressFamily(p.Dst.Addr()), profileID)
 	}
-	if effectivePeer.Is6() != p.Src.Addr().Is6() || src.EffectiveIP.Is6() != p.Dst.Addr().Is6() {
+	if effectivePeer.Is6() != p.Src.Addr().Is6() || src.HostIP.Is6() != p.Dst.Addr().Is6() {
 		return nil, fmt.Errorf("address family mismatch for profile %q", profileID)
 	}
 	checksum.UpdateSrcAddr(&p, effectivePeer)
-	checksum.UpdateDstAddr(&p, src.EffectiveIP)
+	// DNAT the profile's canonical self address back to the one address the
+	// host owns on the shared TUN.
+	checksum.UpdateDstAddr(&p, src.HostIP)
 	return out, nil
 }
 

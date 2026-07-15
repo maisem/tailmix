@@ -7,7 +7,6 @@ import (
 
 	tailmixdns "github.com/maisem/tailmix/dns"
 	"github.com/maisem/tailmix/effectiveip"
-	"github.com/maisem/tailmix/packetmap"
 	tailmixprofile "github.com/maisem/tailmix/profile"
 	"github.com/maisem/tailmix/state"
 )
@@ -84,7 +83,7 @@ func TestConfigureSyntheticPoolsUsesPersistedValuesAndDefaults(t *testing.T) {
 	}
 }
 
-func TestConfigureSyntheticPoolsOverrideDiscardsOnlyChangedFamilySyntheticLeases(t *testing.T) {
+func TestConfigureSyntheticPoolsOverrideDiscardsChangedFamilyLeasesAndNAT(t *testing.T) {
 	canonicalV4 := state.EffectiveLease{
 		ProfileID:   "work",
 		NodeID:      "unique-v4",
@@ -106,6 +105,8 @@ func TestConfigureSyntheticPoolsOverrideDiscardsOnlyChangedFamilySyntheticLeases
 	st := state.State{
 		SyntheticPool:   defaultSyntheticPool,
 		SyntheticPoolV6: defaultSyntheticPoolV6,
+		NATIP:           netip.MustParseAddr("100.127.0.2"),
+		NATIPv6:         netip.MustParseAddr("fd6d:6e65:7400::2"),
 		Leases:          []state.EffectiveLease{canonicalV4, syntheticV4, syntheticV6},
 	}
 	if err := configureSyntheticPools(&st, "10.250.1.9/16", ""); err != nil {
@@ -114,8 +115,11 @@ func TestConfigureSyntheticPoolsOverrideDiscardsOnlyChangedFamilySyntheticLeases
 	if st.SyntheticPool != "10.250.0.0/16" {
 		t.Fatalf("IPv4 pool = %q, want 10.250.0.0/16", st.SyntheticPool)
 	}
-	if len(st.Leases) != 2 || st.Leases[0] != canonicalV4 || st.Leases[1] != syntheticV6 {
-		t.Fatalf("leases after IPv4 pool change = %+v, want canonical IPv4 and synthetic IPv6", st.Leases)
+	if len(st.Leases) != 1 || st.Leases[0] != syntheticV6 {
+		t.Fatalf("leases after IPv4 pool change = %+v, want only IPv6 lease", st.Leases)
+	}
+	if st.NATIP.IsValid() || st.NATIPv6 != netip.MustParseAddr("fd6d:6e65:7400::2") {
+		t.Fatalf("NAT addresses after IPv4 pool change = %v, %v", st.NATIP, st.NATIPv6)
 	}
 }
 
@@ -140,7 +144,7 @@ func TestConfigureSyntheticPoolsRejectsInvalidOverrides(t *testing.T) {
 	}
 }
 
-func TestLeaseNodesIncludesSelfAndPeersInStableOrder(t *testing.T) {
+func TestLeaseNodesIncludesPeersInStableOrder(t *testing.T) {
 	statuses := []tailmixprofile.Status{{
 		ProfileID:  "work",
 		SelfNodeID: "self",
@@ -157,7 +161,6 @@ func TestLeaseNodesIncludesSelfAndPeersInStableOrder(t *testing.T) {
 	want := []effectiveip.Node{
 		{ProfileID: "work", NodeID: "peer-a", CanonicalIP: netip.MustParseAddr("100.64.0.1")},
 		{ProfileID: "work", NodeID: "peer-b", CanonicalIP: netip.MustParseAddr("100.64.0.2")},
-		{ProfileID: "work", NodeID: "self", CanonicalIP: netip.MustParseAddr("100.64.0.10")},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("node count = %d, want %d: %+v", len(got), len(want), got)
@@ -205,8 +208,8 @@ func TestAssignEffectiveIPsPreservesDormantLeases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(active) != 1 {
-		t.Fatalf("active leases = %d, want 1", len(active))
+	if len(active) != 0 {
+		t.Fatalf("active leases = %d, want none without peers", len(active))
 	}
 	wantDormant := leasesFromState([]state.EffectiveLease{dormant})[0]
 	found := false
@@ -225,11 +228,17 @@ func TestAssignEffectiveIPsSynthesizesIPv6CollisionsFromIPv6Pool(t *testing.T) {
 	statuses := []tailmixprofile.Status{{
 		ProfileID:  "home",
 		SelfNodeID: "home-self",
-		SelfIPs:    []netip.Addr{canonical},
+		SelfIPs:    []netip.Addr{netip.MustParseAddr("fd7a:115c:a1e0::1")},
+		Peers: []tailmixprofile.PeerStatus{{
+			NodeID: "home-peer", TailscaleIPs: []netip.Addr{canonical},
+		}},
 	}, {
 		ProfileID:  "work",
 		SelfNodeID: "work-self",
-		SelfIPs:    []netip.Addr{canonical},
+		SelfIPs:    []netip.Addr{netip.MustParseAddr("fd7a:115c:a1e0::2")},
+		Peers: []tailmixprofile.PeerStatus{{
+			NodeID: "work-peer", TailscaleIPs: []netip.Addr{canonical},
+		}},
 	}}
 	active, _, err := assignEffectiveIPs(state.State{
 		SyntheticPool:   "100.127.0.0/24",
@@ -243,7 +252,7 @@ func TestAssignEffectiveIPsSynthesizesIPv6CollisionsFromIPv6Pool(t *testing.T) {
 	}
 }
 
-func TestTunConfigBuildsPerProfileSourceSelectedRoutes(t *testing.T) {
+func TestTunConfigUsesSharedNATWithoutRouteSourceSelection(t *testing.T) {
 	canonicalSelf := netip.MustParseAddr("100.64.0.10")
 	canonicalPeer := netip.MustParseAddr("100.64.0.20")
 	statuses := []tailmixprofile.Status{{
@@ -263,35 +272,39 @@ func TestTunConfigBuildsPerProfileSourceSelectedRoutes(t *testing.T) {
 			TailscaleIPs: []netip.Addr{canonicalPeer},
 		}},
 	}}
-	leases, _, err := assignEffectiveIPs(state.State{
+	st := state.State{
 		SyntheticPool:   "100.127.0.0/24",
 		SyntheticPoolV6: "fd6d:6e65:7400::/120",
-	}, statuses)
+	}
+	if err := ensureNATIPs(&st); err != nil {
+		t.Fatal(err)
+	}
+	leases, _, err := assignEffectiveIPs(st, statuses)
 	if err != nil {
 		t.Fatal(err)
 	}
-	table, hostCfg, err := tunConfig(statuses, leases)
+	table, hostCfg, err := tunConfig(st, statuses, leases)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(table.Sources) != 2 || len(table.Destinations) != 2 || len(hostCfg.LocalAddrs) != 3 || len(hostCfg.Routes) != 2 {
-		t.Fatalf("TUN config sizes: sources=%d destinations=%d local=%d routes=%d", len(table.Sources), len(table.Destinations), len(hostCfg.LocalAddrs), len(hostCfg.Routes))
+	if len(table.Sources) != 2 || table.Destinations.Size() != 2 || len(hostCfg.LocalAddrs) != 1 || len(hostCfg.Routes) != 3 {
+		t.Fatalf("TUN config sizes: sources=%d destinations=%d local=%d routes=%d", len(table.Sources), table.Destinations.Size(), len(hostCfg.LocalAddrs), len(hostCfg.Routes))
 	}
-	foundDNSServiceIP := false
-	for _, prefix := range hostCfg.LocalAddrs {
-		if prefix.Addr() == tailmixdns.ServiceIP() {
-			foundDNSServiceIP = true
-		}
+	if hostCfg.LocalAddrs[0].Addr() != st.NATIP {
+		t.Fatalf("local TUN addresses = %v, want only NAT IP %v", hostCfg.LocalAddrs, st.NATIP)
 	}
-	if !foundDNSServiceIP {
-		t.Fatalf("local TUN addresses %v do not include MagicDNS service IP %v", hostCfg.LocalAddrs, tailmixdns.ServiceIP())
-	}
+	foundDNSRoute := false
 	for _, route := range hostCfg.Routes {
-		if route.Source == route.Destination.Addr() {
-			t.Fatalf("peer route unexpectedly uses peer address as source: %+v", route)
+		if route.Destination.Addr() == tailmixdns.ServiceIP() {
+			foundDNSRoute = true
 		}
-		if source := table.Sources[packetmap.SourceKey{ProfileID: table.Destinations[route.Destination.Addr()].ProfileID}]; source.EffectiveIP != route.Source {
-			t.Fatalf("route %+v does not use profile source %+v", route, source)
+	}
+	if !foundDNSRoute {
+		t.Fatalf("host routes %v do not route MagicDNS through the TUN", hostCfg.Routes)
+	}
+	for key, source := range table.Sources {
+		if source.HostIP != st.NATIP || source.CanonicalIP != canonicalSelf {
+			t.Fatalf("profile source %v = %+v, want host NAT %v and canonical %v", key, source, st.NATIP, canonicalSelf)
 		}
 	}
 }
@@ -322,14 +335,18 @@ func TestTunDNSConfigUsesEffectiveAddresses(t *testing.T) {
 			TailscaleIPs: []netip.Addr{canonicalPeer},
 		}},
 	}}
-	leases, _, err := assignEffectiveIPs(state.State{
+	st := state.State{
 		SyntheticPool:   "100.127.0.0/24",
 		SyntheticPoolV6: "fd6d:6e65:7400::/120",
-	}, statuses)
+	}
+	if err := ensureNATIPs(&st); err != nil {
+		t.Fatal(err)
+	}
+	leases, _, err := assignEffectiveIPs(st, statuses)
 	if err != nil {
 		t.Fatal(err)
 	}
-	domains, records, err := tunDNSConfig(statuses, leases)
+	domains, records, err := tunDNSConfig(st, statuses, leases)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,4 +378,106 @@ func TestTunDNSConfigUsesEffectiveAddresses(t *testing.T) {
 	if len(wantByName) != 0 {
 		t.Fatalf("missing peer MagicDNS records: %v", wantByName)
 	}
+	if !hasDNSRecord(records, "tailmix.home.ts.net", st.NATIP) || !hasDNSRecord(records, "tailmix.work.ts.net", st.NATIP) {
+		t.Fatalf("self MagicDNS records do not point at shared NAT IP %v: %v", st.NATIP, records)
+	}
+}
+
+func TestTUNPlanTracksPeerAddAndRemoveAcrossNetmapUpdates(t *testing.T) {
+	baseState := state.State{
+		SyntheticPool:   "10.250.0.0/16",
+		SyntheticPoolV6: "fd6d:6e65:7400::/120",
+		Profiles:        []state.Profile{{ID: "home", Alias: "home"}},
+		Leases: []state.EffectiveLease{{
+			ProfileID:   "home",
+			NodeID:      "peer-node",
+			CanonicalIP: netip.MustParseAddr("100.64.0.2"),
+			EffectiveIP: netip.MustParseAddr("100.64.0.2"),
+		}, {
+			ProfileID:   "home",
+			NodeID:      "peer-node",
+			CanonicalIP: netip.MustParseAddr("fd7a:115c:a1e0::2"),
+			EffectiveIP: netip.MustParseAddr("fd7a:115c:a1e0::2"),
+		}},
+	}
+	baseStatus := tailmixprofile.Status{
+		ProfileID:      "home",
+		MagicDNSSuffix: "home.example",
+		SelfNodeID:     "home-self",
+		SelfDNSName:    "tailmix-home.home.example",
+		SelfIPs: []netip.Addr{
+			netip.MustParseAddr("100.64.0.1"),
+			netip.MustParseAddr("fd7a:115c:a1e0::1"),
+		},
+	}
+
+	initial, err := buildTUNPlan(baseState, []tailmixprofile.Status{baseStatus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.Table.Destinations.Size() != 0 || len(initial.HostConfig.Routes) != 1 {
+		t.Fatalf("initial config = destinations %v routes %v, want only MagicDNS route", initial.Table.Destinations, initial.HostConfig.Routes)
+	}
+
+	withPeer := baseStatus
+	withPeer.Peers = []tailmixprofile.PeerStatus{{
+		NodeID:  "peer-node",
+		DNSName: "peer.home.example",
+		TailscaleIPs: []netip.Addr{
+			netip.MustParseAddr("100.64.0.2"),
+			netip.MustParseAddr("fd7a:115c:a1e0::2"),
+		},
+	}}
+	added, err := buildTUNPlan(initial.State, []tailmixprofile.Status{withPeer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added.Table.Destinations.Size() != 2 || len(added.HostConfig.Routes) != 3 {
+		t.Fatalf("config after add = destinations %v routes %v, want peer plus MagicDNS", added.Table.Destinations, added.HostConfig.Routes)
+	}
+	effectiveByCanonical := map[netip.Addr]netip.Addr{}
+	for prefix, destination := range added.Table.Destinations.All() {
+		if destination.ProfileID == "home" {
+			effectiveByCanonical[destination.CanonicalIP] = prefix.Addr()
+		}
+	}
+	canonicalV4 := netip.MustParseAddr("100.64.0.2")
+	canonicalV6 := netip.MustParseAddr("fd7a:115c:a1e0::2")
+	peerV4 := effectiveByCanonical[canonicalV4]
+	peerV6 := effectiveByCanonical[canonicalV6]
+	if !netip.MustParsePrefix("10.250.0.0/16").Contains(peerV4) || peerV4 == canonicalV4 {
+		t.Fatalf("peer IPv4 effective IP = %v, want address from configured pool", peerV4)
+	}
+	if !netip.MustParsePrefix("fd6d:6e65:7400::/120").Contains(peerV6) || peerV6 == canonicalV6 {
+		t.Fatalf("peer IPv6 effective IP = %v, want address from configured pool", peerV6)
+	}
+	if !hasDNSRecord(added.Records, "peer.home.example", peerV4) || !hasDNSRecord(added.Records, "peer.home.example", peerV6) {
+		t.Fatalf("MagicDNS records after add = %v, want peer -> [%v, %v]", added.Records, peerV4, peerV6)
+	}
+
+	removed, err := buildTUNPlan(added.State, []tailmixprofile.Status{baseStatus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed.Table.Destinations.Size() != 0 || len(removed.HostConfig.Routes) != 1 || hasDNSRecord(removed.Records, "peer.home.example", peerV4) || hasDNSRecord(removed.Records, "peer.home.example", peerV6) {
+		t.Fatalf("peer remained active after removal: routes=%v records=%v", removed.HostConfig.Routes, removed.Records)
+	}
+	foundDormantLeases := 0
+	for _, lease := range removed.State.Leases {
+		if lease.ProfileID == "home" && lease.NodeID == "peer-node" && (lease.EffectiveIP == peerV4 || lease.EffectiveIP == peerV6) {
+			foundDormantLeases++
+		}
+	}
+	if foundDormantLeases != 2 {
+		t.Fatalf("peer lease was not preserved for stable reuse: %v", removed.State.Leases)
+	}
+}
+
+func hasDNSRecord(records []tailmixdns.Record, name string, ip netip.Addr) bool {
+	for _, record := range records {
+		if record.Name == name && record.EffectiveIP == ip {
+			return true
+		}
+	}
+	return false
 }

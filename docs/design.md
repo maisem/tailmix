@@ -51,15 +51,15 @@ Outbound packet flow:
 
 1. A local process sends traffic to an effective IP.
 2. The OS routes that traffic to the shared daemon-owned TUN.
-3. The daemon maps the effective destination IP to one `(profile, canonical peer IP)`.
-4. The daemon translates the local effective source/destination addresses to the canonical addresses expected by that profile engine.
+3. A BART longest-prefix-match table maps the effective destination IP to one `(profile, canonical peer IP)`.
+4. The daemon SNATs the shared host NAT address to that profile's canonical self address and translates the effective destination to the canonical peer address.
 5. The packet enters the selected `tsnet` engine's packet path.
 6. The selected profile engine sends the packet through its normal Tailscale transport.
 
 Inbound packet flow:
 
 1. A profile engine receives canonical tailnet traffic for its local profile identity.
-2. The daemon maps canonical source/destination addresses to stable local effective addresses for that profile.
+2. A per-profile BART table maps the canonical peer source to its stable effective address, and the daemon DNATs the canonical self destination to the shared host NAT address.
 3. The packet is injected toward the host through the shared TUN/listener path.
 4. Local OS firewall and listener behavior apply normally.
 
@@ -89,7 +89,10 @@ Login, logout, removal, reauth, expiry, and approval are profile operations. Rem
 
 Each node keeps its canonical Tailscale IPs exactly as assigned by its own tailnet. The multi-tailnet daemon adds a local-only effective IP layer.
 
-Every local profile identity and every visible peer across all active profiles gets a locally unique effective IP. If a canonical IP has no conflict, the effective IP may equal the canonical IP. If two identities from different profiles share a canonical IP, one or both get synthetic effective IPs.
+Every visible peer across all active profiles gets a locally unique effective IP
+from the configured pool. Canonical CGNAT and Tailscale ULA addresses are never
+used as host dial targets, even when they are unique across profiles. The shared
+TUN has one separately reserved host NAT address per active address family.
 
 Effective IPs are:
 
@@ -99,10 +102,10 @@ Effective IPs are:
 - Never serialized as peer identity in WireGuard traffic.
 - Never used as ACL subjects.
 
-Synthetic IPv4 and IPv6 addresses come from daemon-configurable pools. Pool
-selection is persisted alongside the leases. Changing a pool retires the old
-synthetic leases for that address family and allocates replacements; canonical
-addresses that were already unique are unaffected.
+Effective IPv4 and IPv6 addresses and the host NAT addresses come from
+daemon-configurable pools. Pool selection is persisted alongside the leases.
+Changing a pool retires the old leases and host NAT address for that family and
+allocates replacements.
 
 Effective IPs map to canonical tailnet identity:
 
@@ -110,7 +113,11 @@ Effective IPs map to canonical tailnet identity:
 (tailnet stable ID, node stable ID, canonical Tailscale IP) -> effective IP
 ```
 
-The mapping applies to remote peers and to this host's local profile identities. The self mapping is required so local processes have stable per-profile local addresses and inbound packets can be delivered without collapsing separate tailnet identities into one address.
+The mapping applies to remote peers. Each profile's canonical self address is a
+NAT translation target, not an address assigned to the host TUN. All profiles
+DNAT inbound traffic to the shared host NAT address, allowing the host OS to
+manage one ordinary local address rather than selecting among per-profile
+sources.
 
 Persistence rules:
 
@@ -216,7 +223,7 @@ Core objects:
 
 - Profile: one local login/device identity for one tailnet.
 - Peer: one visible node inside one profile's netmap.
-- Effective IP: local address assigned to a profile identity or peer.
+- Effective IP: local dial address assigned to a visible peer.
 - Canonical IP: tailnet-assigned node address.
 - Tailnet alias: local user-friendly name for selecting a profile.
 - Host identity group: optional local grouping showing that several profiles live in one daemon.
@@ -268,6 +275,7 @@ Core contract tests:
 
 - Two profile engines can be active simultaneously with independent machine keys and node keys.
 - Devices in both tailnets are reachable at the same time without switching.
+- Every peer receives a stable address from the configured effective pool.
 - Same canonical node IPs in different tailnets receive stable, distinct effective IPs.
 - Effective IPs survive daemon restart.
 - Effective IPs do not leak into profile engine identity, peer identity, netmap, or ACL-visible packet metadata.
@@ -293,6 +301,7 @@ Manual/system tests:
 
 The design depends on the upstream `tsnet.Server.Tun` packet-facing hook. The pinned Tailscale module version must continue to expose that boundary so the daemon can provide the shared TUN/multiplexer while keeping each profile engine's control-plane and transport responsibilities intact.
 
-The synthetic effective-IP allocator must choose an address space that avoids collisions with canonical Tailscale addresses, host routes, and ordinary LAN routes. That allocator policy is part of implementation planning, not this semantic spec.
-
-Inbound delivery through one shared TUN may require careful source/destination translation for local self effective IPs so host applications see stable per-profile addresses while profile engines still see canonical tailnet addresses.
+The effective-IP allocator must choose an address space that avoids collisions
+with canonical Tailscale addresses, host routes, and ordinary LAN routes. One
+address in each pool is reserved for host-side SNAT/DNAT and cannot be leased to
+a peer.

@@ -12,6 +12,7 @@ func TestStoreRoundTripPreservesEffectiveLeases(t *testing.T) {
 	store := NewJSONStore(path)
 	want := State{
 		SyntheticPool: "100.127.0.0/24",
+		NATIP:         netip.MustParseAddr("100.127.0.2"),
 		Profiles:      []Profile{{ID: "work", Alias: "work", StateDir: "profiles/work"}},
 		Leases: []EffectiveLease{{
 			ProfileID:   "work",
@@ -29,6 +30,9 @@ func TestStoreRoundTripPreservesEffectiveLeases(t *testing.T) {
 	}
 	if got.Leases[0].EffectiveIP != want.Leases[0].EffectiveIP {
 		t.Fatalf("effective IP did not round trip: got %v want %v", got.Leases[0].EffectiveIP, want.Leases[0].EffectiveIP)
+	}
+	if got.NATIP != want.NATIP {
+		t.Fatalf("host NAT IP did not round trip: got %v want %v", got.NATIP, want.NATIP)
 	}
 }
 

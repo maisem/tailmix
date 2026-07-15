@@ -2,6 +2,7 @@ package profile
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"sort"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/tailscale/wireguard-go/tun"
 
+	"tailscale.com/ipn"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 	"tailscale.com/types/logger"
@@ -70,6 +72,49 @@ func (e *TSNetEngine) Dial(ctx context.Context, network, addr string) (net.Conn,
 		}
 	}
 	return e.server.Dial(ctx, network, addr)
+}
+
+func (e *TSNetEngine) WatchUpdates(ctx context.Context, notify func()) error {
+	if notify == nil {
+		return fmt.Errorf("nil update callback")
+	}
+	if e.server == nil {
+		if err := e.Start(ctx); err != nil {
+			return err
+		}
+	}
+	lc, err := e.server.LocalClient()
+	if err != nil {
+		return err
+	}
+	watcher, err := lc.WatchIPNBus(ctx,
+		ipn.NotifyInitialStatus|
+			ipn.NotifyPeerChanges|
+			ipn.NotifyPeerPatches|
+			ipn.NotifyNoNetMap)
+	if err != nil {
+		return err
+	}
+	defer watcher.Close()
+	for {
+		n, err := watcher.Next()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		if n.ErrMessage != nil {
+			return fmt.Errorf("backend: %s", *n.ErrMessage)
+		}
+		changed := n.InitialStatus != nil || n.SelfChange != nil || len(n.PeersChanged) != 0 || len(n.PeersRemoved) != 0
+		if n.State != nil && *n.State == ipn.Running {
+			changed = true
+		}
+		if changed {
+			notify()
+		}
+	}
 }
 
 func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {

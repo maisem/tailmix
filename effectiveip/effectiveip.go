@@ -24,9 +24,10 @@ type Lease struct {
 }
 
 type Allocator struct {
-	pool   netip.Prefix
-	leases map[NodeKey]netip.Addr
-	used   map[netip.Addr]NodeKey
+	pool     netip.Prefix
+	leases   map[NodeKey]netip.Addr
+	used     map[netip.Addr]NodeKey
+	reserved map[netip.Addr]bool
 }
 
 type Plan struct {
@@ -34,12 +35,18 @@ type Plan struct {
 	byKey  map[NodeKey]netip.Addr
 }
 
-func NewAllocator(pool netip.Prefix, existing []Lease) *Allocator {
+func NewAllocator(pool netip.Prefix, existing []Lease, reserved ...netip.Addr) *Allocator {
 	pool = pool.Masked()
 	a := &Allocator{
-		pool:   pool,
-		leases: map[NodeKey]netip.Addr{},
-		used:   map[netip.Addr]NodeKey{},
+		pool:     pool,
+		leases:   map[NodeKey]netip.Addr{},
+		used:     map[netip.Addr]NodeKey{},
+		reserved: map[netip.Addr]bool{},
+	}
+	for _, ip := range reserved {
+		if ip.IsValid() && ip.Is6() == pool.Addr().Is6() && pool.Contains(ip) {
+			a.reserved[ip] = true
+		}
 	}
 	for _, l := range existing {
 		if !l.NodeKey.CanonicalIP.IsValid() || !l.EffectiveIP.IsValid() {
@@ -48,7 +55,10 @@ func NewAllocator(pool netip.Prefix, existing []Lease) *Allocator {
 		if l.NodeKey.CanonicalIP.Is6() != l.EffectiveIP.Is6() {
 			continue
 		}
-		if l.EffectiveIP != l.NodeKey.CanonicalIP && !pool.Contains(l.EffectiveIP) {
+		if !pool.Contains(l.EffectiveIP) {
+			continue
+		}
+		if a.reserved[l.EffectiveIP] {
 			continue
 		}
 		a.leases[l.NodeKey] = l.EffectiveIP
@@ -58,12 +68,13 @@ func NewAllocator(pool netip.Prefix, existing []Lease) *Allocator {
 }
 
 func (a *Allocator) Assign(nodes []Node) (*Plan, error) {
-	canonicalCount := map[netip.Addr]int{}
 	for _, n := range nodes {
 		if !n.CanonicalIP.IsValid() {
 			return nil, fmt.Errorf("invalid canonical IP for profile=%q node=%q", n.ProfileID, n.NodeID)
 		}
-		canonicalCount[n.CanonicalIP]++
+		if !a.pool.IsValid() || a.pool.Addr().Is6() != n.CanonicalIP.Is6() {
+			return nil, fmt.Errorf("effective IP pool %v cannot allocate for canonical address %v", a.pool, n.CanonicalIP)
+		}
 	}
 	out := &Plan{byKey: map[NodeKey]netip.Addr{}}
 	for _, n := range nodes {
@@ -72,16 +83,9 @@ func (a *Allocator) Assign(nodes []Node) (*Plan, error) {
 			out.add(key, existing)
 			continue
 		}
-		effective := n.CanonicalIP
-		if canonicalCount[n.CanonicalIP] > 1 || a.claimedByOther(key, effective) {
-			if !a.pool.IsValid() || a.pool.Addr().Is6() != n.CanonicalIP.Is6() {
-				return nil, fmt.Errorf("effective IP pool %v cannot allocate for canonical address %v", a.pool, n.CanonicalIP)
-			}
-			var err error
-			effective, err = a.nextSynthetic(key)
-			if err != nil {
-				return nil, err
-			}
+		effective, err := a.nextSynthetic(key)
+		if err != nil {
+			return nil, err
 		}
 		a.leases[key] = effective
 		a.used[effective] = key
@@ -97,15 +101,13 @@ func (a *Allocator) Assign(nodes []Node) (*Plan, error) {
 	return out, nil
 }
 
-func (a *Allocator) claimedByOther(key NodeKey, ip netip.Addr) bool {
-	owner, ok := a.used[ip]
-	return ok && owner != key
-}
-
 func (a *Allocator) nextSynthetic(key NodeKey) (netip.Addr, error) {
 	for ip := a.pool.Addr(); a.pool.Contains(ip); ip = ip.Next() {
 		if !ip.IsValid() {
 			break
+		}
+		if a.reserved[ip] {
+			continue
 		}
 		if owner, used := a.used[ip]; !used || owner == key {
 			return ip, nil

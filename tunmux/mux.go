@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync/atomic"
 
 	"github.com/tailscale/wireguard-go/device"
 	"github.com/tailscale/wireguard-go/tun"
@@ -15,7 +16,7 @@ import (
 type Mux struct {
 	host     tun.Device
 	profiles map[string]*ChanTUN
-	mapper   *packetmap.Mapper
+	mapper   atomic.Pointer[packetmap.Mapper]
 	local    LocalPacketHandler
 	logf     logger.Logf
 }
@@ -32,7 +33,21 @@ func NewMux(host tun.Device, profiles map[string]*ChanTUN, mapper *packetmap.Map
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Mux{host: host, profiles: profiles, mapper: mapper, logf: logf}
+	if mapper == nil {
+		mapper = packetmap.New(packetmap.Table{})
+	}
+	m := &Mux{host: host, profiles: profiles, logf: logf}
+	m.mapper.Store(mapper)
+	return m
+}
+
+// SetMapper atomically replaces the packet mapping used for subsequent
+// packets. In-flight packets finish with the previous immutable mapper.
+func (m *Mux) SetMapper(mapper *packetmap.Mapper) {
+	if mapper == nil {
+		panic("nil packet mapper")
+	}
+	m.mapper.Store(mapper)
 }
 
 // SetLocalPacketHandler installs h. It must be called before Run.
@@ -94,7 +109,7 @@ func (m *Mux) runHostToProfiles(ctx context.Context) error {
 			if m.local != nil && m.local.HandlePacket(pkt) {
 				continue
 			}
-			translated, route, err := m.mapper.Outbound(pkt)
+			translated, route, err := m.mapper.Load().Outbound(pkt)
 			if err != nil {
 				m.logf("drop outbound packet: %v", err)
 				continue
@@ -149,7 +164,7 @@ func (m *Mux) runProfileToHost(ctx context.Context, profileID string, profileTun
 		case <-ctx.Done():
 			return nil
 		case pkt := <-profileTun.Inbound:
-			translated, err := m.mapper.Inbound(profileID, pkt)
+			translated, err := m.mapper.Load().Inbound(profileID, pkt)
 			if err != nil {
 				m.logf("drop inbound packet from profile %q: %v", profileID, err)
 				continue

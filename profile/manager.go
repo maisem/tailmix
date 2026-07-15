@@ -4,10 +4,42 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 )
 
 type Manager struct {
 	engines map[string]Engine
+}
+
+// WatchUpdates reports profile changes that can affect addressing, routes, or
+// DNS. Events are coalesced because every event causes the daemon to fetch a
+// fresh aggregate status for all profiles.
+func (m *Manager) WatchUpdates(ctx context.Context) <-chan Update {
+	updates := make(chan Update, max(1, len(m.engines)))
+	var wg sync.WaitGroup
+	for id, engine := range m.engines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := engine.WatchUpdates(ctx, func() {
+				select {
+				case updates <- Update{ProfileID: id}:
+				default:
+				}
+			})
+			if err != nil && ctx.Err() == nil {
+				select {
+				case updates <- Update{ProfileID: id, Err: fmt.Errorf("watch profile %q: %w", id, err)}:
+				case <-ctx.Done():
+				}
+			}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(updates)
+	}()
+	return updates
 }
 
 func NewManager() *Manager {

@@ -3,10 +3,10 @@
 tailmix connects one host to multiple Tailscale tailnets at the same time.
 
 It runs one independent `tsnet.Server` per profile and exposes them through a
-shared host TUN. When tailnets reuse the same canonical Tailscale address, tailmix
-assigns stable local effective addresses and translates packets at the profile
-boundary. MagicDNS is served at `100.100.100.100` inside the shared TUN using
-Tailscale's DNS manager and resolver.
+shared host TUN. tailmix assigns every visible peer a stable local effective
+address and translates packets at the profile boundary. MagicDNS is served at
+`100.100.100.100` inside the shared TUN using Tailscale's DNS manager and
+resolver.
 
 The repository contains only tailmix code. It depends directly on the published
 [`tailscale.com`](https://pkg.go.dev/tailscale.com) Go module; it does not vendor
@@ -14,11 +14,11 @@ or patch the Tailscale repository.
 
 ## Status
 
-The current TUN implementation targets macOS. Direct node routes, IPv4/IPv6
+The TUN implementation supports macOS and Linux. Direct node routes, IPv4/IPv6
 effective addresses, interactive login, auth-key login, shared-node FQDNs, and
-MagicDNS are implemented. The route and DNS tables are startup snapshots;
-restart tailmix after the visible peer set changes. Subnet routes and exit nodes
-are not yet supported.
+MagicDNS are implemented. tailmix watches every profile for netmap updates and
+reconciles host routes, packet mappings, and DNS records when peers appear,
+change, or disappear. Subnet routes and exit nodes are not yet supported.
 
 ## Build
 
@@ -47,15 +47,24 @@ Open each interactive login URL as it appears. Existing profiles reuse their
 persisted login state. For unattended login, configure a distinct
 `auth-key-env` for each profile.
 
-`-synthetic-pool` selects the IPv4 CIDR used only when canonical addresses
-collide between profiles. Choose a range that does not overlap local routes.
-The value is persisted in daemon state, so it only needs to be supplied when
-setting or changing the pool. `-synthetic-pool-v6` provides the equivalent IPv6
-setting. Changing either pool retires that family's old synthetic leases and
-allocates replacements at startup. MagicDNS remains at `100.100.100.100`.
+`-synthetic-pool` selects the IPv4 CIDR used for every peer's effective address
+and the shared host-side NAT address. Choose a range that does not overlap local
+routes. The value is persisted in daemon state, so it only needs to be supplied
+when setting or changing the pool. `-synthetic-pool-v6` provides the equivalent
+IPv6 setting. Changing either pool retires that family's leases and NAT address.
+MagicDNS remains at `100.100.100.100`.
 
 See [docs/darwin-testing.md](docs/darwin-testing.md) for verification steps and
 [docs/design.md](docs/design.md) for the architecture and semantics.
+
+## Run on Linux
+
+Build and invoke tailmixd with the same flags shown above. The default interface
+name is `tailmix0`; creating it and installing routes requires root or
+`CAP_NET_ADMIN`. MagicDNS uses Tailscale's native Linux DNS configurator, which
+selects the host's systemd-resolved, NetworkManager, resolvconf, or direct
+`resolv.conf` integration. Disconnect a regular Tailscale client first if its
+routes would overlap tailmix's.
 
 ## License
 

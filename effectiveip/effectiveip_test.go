@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func TestAllocatorKeepsCanonicalForUniqueAndSynthesizesConflicts(t *testing.T) {
-	pool := netip.MustParsePrefix("100.127.0.0/30")
+func TestAllocatorAssignsEveryNodeFromEffectivePool(t *testing.T) {
+	pool := netip.MustParsePrefix("100.127.0.0/29")
 	a := NewAllocator(pool, nil)
 	nodes := []Node{
 		{ProfileID: "work", NodeID: "node-a", CanonicalIP: netip.MustParseAddr("100.64.0.1")},
@@ -23,11 +23,13 @@ func TestAllocatorKeepsCanonicalForUniqueAndSynthesizesConflicts(t *testing.T) {
 	if gotA == gotB {
 		t.Fatalf("conflicting canonical IPs received same effective IP: %v", gotA)
 	}
-	if gotC != nodes[2].CanonicalIP {
-		t.Fatalf("unique canonical IP remapped: got %v want %v", gotC, nodes[2].CanonicalIP)
+	for _, got := range []netip.Addr{gotA, gotB, gotC} {
+		if !pool.Contains(got) {
+			t.Fatalf("effective IP %v is outside pool %v", got, pool)
+		}
 	}
-	if !pool.Contains(gotA) && !pool.Contains(gotB) {
-		t.Fatalf("neither conflicting node used the synthetic pool: %v %v", gotA, gotB)
+	if gotA == gotC || gotB == gotC {
+		t.Fatalf("effective IPs are not unique: %v %v %v", gotA, gotB, gotC)
 	}
 }
 
@@ -77,6 +79,19 @@ func TestAllocatorReportsPoolExhaustion(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected pool exhaustion error")
+	}
+}
+
+func TestAllocatorDoesNotAssignReservedNATAddress(t *testing.T) {
+	pool := netip.MustParsePrefix("10.250.0.0/30")
+	natIP := netip.MustParseAddr("10.250.0.0")
+	a := NewAllocator(pool, nil, natIP)
+	plan, err := a.Assign([]Node{{ProfileID: "work", NodeID: "peer", CanonicalIP: netip.MustParseAddr("100.64.0.42")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.Leases[0].EffectiveIP; got == natIP || !pool.Contains(got) {
+		t.Fatalf("peer effective IP = %v, want non-NAT address in %v", got, pool)
 	}
 }
 
