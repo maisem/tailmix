@@ -9,11 +9,12 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/maisem/tailmix/tsnet"
 	"github.com/tailscale/wireguard-go/tun"
 
 	"tailscale.com/ipn"
+	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/tailcfg"
-	"tailscale.com/tsnet"
 	"tailscale.com/types/logger"
 )
 
@@ -27,6 +28,8 @@ type TSNetConfig struct {
 	MagicDNSSuffix string
 	UserLogf       logger.Logf
 	Logf           logger.Logf
+	LogUpload      bool
+	LogUploadURL   string
 	Tun            tun.Device
 }
 
@@ -44,13 +47,15 @@ func (e *TSNetEngine) Start(ctx context.Context) error {
 		return err
 	}
 	s := &tsnet.Server{
-		Dir:        e.cfg.Dir,
-		Hostname:   e.cfg.Hostname,
-		UserLogf:   e.cfg.UserLogf,
-		Logf:       e.cfg.Logf,
-		AuthKey:    e.cfg.AuthKey,
-		ControlURL: e.cfg.ControlURL,
-		Tun:        e.cfg.Tun,
+		Dir:          e.cfg.Dir,
+		Hostname:     e.cfg.Hostname,
+		UserLogf:     e.cfg.UserLogf,
+		Logf:         e.cfg.Logf,
+		LogUpload:    e.cfg.LogUpload,
+		LogUploadURL: e.cfg.LogUploadURL,
+		AuthKey:      e.cfg.AuthKey,
+		ControlURL:   e.cfg.ControlURL,
+		Tun:          e.cfg.Tun,
 	}
 	if err := s.Start(); err != nil {
 		return err
@@ -73,6 +78,13 @@ func (e *TSNetEngine) Dial(ctx context.Context, network, addr string) (net.Conn,
 		}
 	}
 	return e.server.Dial(ctx, network, addr)
+}
+
+func (e *TSNetEngine) LocalBackend() (*ipnlocal.LocalBackend, error) {
+	if e.server == nil {
+		return nil, fmt.Errorf("tsnet server is not started")
+	}
+	return e.server.LocalBackend()
 }
 
 func (e *TSNetEngine) WatchUpdates(ctx context.Context, notify func()) error {

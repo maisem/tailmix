@@ -23,6 +23,7 @@ import (
 	"github.com/maisem/tailmix/hosttun"
 	"github.com/maisem/tailmix/packetmap"
 	tailmixprofile "github.com/maisem/tailmix/profile"
+	"github.com/maisem/tailmix/profilesocket"
 	"github.com/maisem/tailmix/socksproxy"
 	"github.com/maisem/tailmix/state"
 	"github.com/maisem/tailmix/tunmux"
@@ -84,10 +85,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	statePath := fs.String("state", defaultStatePath(), "path to tailmix daemon state")
 	mode := fs.String("mode", "tun", "networking mode: tun or socks")
 	tunName := fs.String("tun-name", defaultTUNName(), "host TUN interface name")
+	socketDir := fs.String("socket-dir", profilesocket.DefaultDir(), "directory for per-profile LocalAPI sockets")
 	socksAddr := fs.String("socks", "127.0.0.1:1080", "aggregate SOCKS5 listen address")
 	syntheticPool := fs.String("synthetic-pool", "", "IPv4 CIDR for effective peer and host NAT addresses (persisted; default "+defaultSyntheticPool+")")
 	syntheticPoolV6 := fs.String("synthetic-pool-v6", "", "IPv6 CIDR for effective peer and host NAT addresses (persisted; default "+defaultSyntheticPoolV6+")")
 	verbose := fs.Bool("verbose", false, "enable verbose per-profile tsnet logs")
+	logUpload := fs.Bool("log-upload", false, "opt in to remote per-profile logtail uploads")
+	logUploadURL := fs.String("log-upload-url", "", "replace the remote logtail upload base URL (requires -log-upload)")
 	fs.Var(&profiles, "profile", "profile config: id=work,dir=/path,hostname=tailmix-work[,control-url=URL][,suffix=tailnet.ts.net][,auth-key-env=ENV]")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -100,6 +104,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	if *mode == "tun" && *tunName == "" {
 		return fmt.Errorf("TUN name is required in tun mode")
+	}
+	if *socketDir == "" {
+		return fmt.Errorf("profile socket directory is required")
+	}
+	if *logUploadURL != "" && !*logUpload {
+		return fmt.Errorf("log upload URL requires -log-upload")
 	}
 	if *mode == "socks" && *socksAddr == "" {
 		return fmt.Errorf("socks listen address is required")
@@ -138,7 +148,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if *mode == "tun" {
 			rp.Tun = tunmux.NewChanTUN("tailmix-" + dnsLabel(rp.State.ID))
 		}
-		cfg, err := tsnetConfig(*rp, stderr, *verbose)
+		cfg, err := tsnetConfig(*rp, stderr, *verbose, *logUpload, *logUploadURL)
 		if err != nil {
 			return err
 		}
@@ -149,6 +159,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer mgr.Close()
+	profileAPIs, err := startProfileAPIs(ctx, *socketDir, runtimeProfiles, stderr)
+	if err != nil {
+		return err
+	}
+	defer profileAPIs.Close()
 
 	fmt.Fprintf(stderr, "started %d profile(s); waiting for tailnet state\n", len(runtimeProfiles))
 	statuses, err := mgr.Status(ctx)
@@ -163,7 +178,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if err := store.Save(plan.State); err != nil {
 			return err
 		}
-		return runTUN(ctx, *tunName, runtimeProfiles, mgr, store, plan, stderr)
+		return runTUN(ctx, *tunName, runtimeProfiles, mgr, store, plan, profileAPIs.Errors(), stderr)
 	}
 
 	updateProfileMetadata(&st, statuses)
@@ -190,7 +205,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stderr, "SOCKS listening on %s\n", ln.Addr())
 	_ = stdout
-	return socksproxy.Serve(ctx, ln, router, prefixedLogf(stderr, "socks"))
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- socksproxy.Serve(ctx, ln, router, prefixedLogf(stderr, "socks")) }()
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-profileAPIs.Errors():
+		return err
+	case err := <-serveErr:
+		return err
+	}
 }
 
 func defaultStatePath() string {
@@ -461,7 +485,7 @@ func validateAuthKeyEnv(profiles []runtimeProfile) error {
 	return nil
 }
 
-func tsnetConfig(rp runtimeProfile, stderr io.Writer, verbose bool) (tailmixprofile.TSNetConfig, error) {
+func tsnetConfig(rp runtimeProfile, stderr io.Writer, verbose, logUpload bool, logUploadURL string) (tailmixprofile.TSNetConfig, error) {
 	authKey := ""
 	if rp.AuthKeyEnv != "" {
 		authKey = os.Getenv(rp.AuthKeyEnv)
@@ -478,6 +502,8 @@ func tsnetConfig(rp runtimeProfile, stderr io.Writer, verbose bool) (tailmixprof
 		ControlURL:     rp.State.ControlURL,
 		MagicDNSSuffix: rp.State.MagicDNSSuffix,
 		UserLogf:       prefixedLogf(stderr, rp.State.ID),
+		LogUpload:      logUpload,
+		LogUploadURL:   logUploadURL,
 		Tun:            rp.Tun,
 	}
 	if verbose {
@@ -666,7 +692,7 @@ func buildTUNPlan(st state.State, statuses []tailmixprofile.Status) (tunPlan, er
 	}, nil
 }
 
-func runTUN(ctx context.Context, tunName string, profiles []runtimeProfile, mgr *tailmixprofile.Manager, store *state.JSONStore, plan tunPlan, stderr io.Writer) error {
+func runTUN(ctx context.Context, tunName string, profiles []runtimeProfile, mgr *tailmixprofile.Manager, store *state.JSONStore, plan tunPlan, profileAPIErrs <-chan error, stderr io.Writer) error {
 	logf := prefixedLogf(stderr, "tun")
 	host, err := hosttun.Open(hosttun.OpenConfig{Name: tunName, Logf: logf})
 	if err != nil {
@@ -707,6 +733,8 @@ func runTUN(ctx context.Context, tunName string, profiles []runtimeProfile, mgr 
 		case <-ctx.Done():
 			return nil
 		case err := <-muxErr:
+			return err
+		case err := <-profileAPIErrs:
 			return err
 		case update, ok := <-updates:
 			if !ok {

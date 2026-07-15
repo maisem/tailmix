@@ -23,6 +23,7 @@ inside the shared TUN; tailmix does not open a kernel DNS listener.
 
 ```sh
 go build -o /tmp/tailmixd ./cmd/tailmixd
+go build -o /tmp/tailmix ./cmd/tailmix
 
 unset TS_AUTHKEY TS_AUTH_KEY
 
@@ -39,6 +40,10 @@ for every other profile); preserve those variables through `sudo`. Persisted
 profiles do not need their auth key again after initial enrollment. Pass
 `-verbose` to include the per-profile tsnet logs. Use `-mode socks` to run the
 previous userspace SOCKS milestone instead.
+
+Remote logtail upload is separate from `-verbose` and is disabled by default.
+Pass `-log-upload` to opt in, optionally with `-log-upload-url URL` to replace
+the upload endpoint.
 
 The effective IPv4 pool is persisted in daemon state; omit the flag on later
 runs to reuse it. Every peer and the host NAT receive an address from this
@@ -64,6 +69,8 @@ for each one without taking over the source tailnet's entire DNS suffix.
 ## First checks
 
 ```sh
+/tmp/tailmix work status
+/tmp/tailmix home status
 route -n get 10.250.0.3
 scutil --dns | grep -A8 'home.ts.net'
 dig @100.100.100.100 db.home.ts.net
@@ -71,6 +78,12 @@ dscacheutil -q host -a name db.home.ts.net
 ping 10.250.0.3
 nc -vz 10.250.0.3 22
 ```
+
+The profile commands use Tailscale's upstream CLI against the selected
+profile's `ipnserver` socket. The socket applies normal Unix peer credentials
+and Tailscale operator permissions; use `sudo /tmp/tailmix ...` for write commands
+unless your user is a local administrator or the profile's configured
+operator.
 
 `route -n get` should show the tailmix `utun`; it should not contain a
 profile-specific preferred source. Test one peer in each tailnet without

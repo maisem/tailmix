@@ -8,9 +8,10 @@ address and translates packets at the profile boundary. MagicDNS is served at
 `100.100.100.100` inside the shared TUN using Tailscale's DNS manager and
 resolver.
 
-The repository contains only tailmix code. It depends directly on the published
-[`tailscale.com`](https://pkg.go.dev/tailscale.com) Go module; it does not vendor
-or patch the Tailscale repository.
+Most Tailscale functionality comes directly from the published
+[`tailscale.com`](https://pkg.go.dev/tailscale.com) Go module. The repository
+contains a focused [tsnet fork](tsnet/README.md) so tailmix can attach Tailscale's
+native `ipnserver` to each embedded profile.
 
 ## Status
 
@@ -26,6 +27,7 @@ Go 1.26.4 or newer is required.
 
 ```sh
 go build -o /tmp/tailmixd ./cmd/tailmixd
+go build -o /tmp/tailmix ./cmd/tailmix
 ```
 
 ## Run on macOS
@@ -47,12 +49,30 @@ Open each interactive login URL as it appears. Existing profiles reuse their
 persisted login state. For unattended login, configure a distinct
 `auth-key-env` for each profile.
 
+Each profile also gets a credential-authenticated LocalAPI socket. The `tailmix`
+CLI selects one and delegates the remaining arguments to Tailscale's upstream
+CLI implementation:
+
+```sh
+/tmp/tailmix work status
+/tmp/tailmix home ping peer.home.example
+/tmp/tailmix work set --shields-up
+```
+
+The sockets default to `/var/run/tailmix`. If `tailmixd` uses `-socket-dir`, set
+`TAILMIX_SOCKET_DIR` to the same directory when invoking `tailmix`. Access uses
+Tailscale's normal peer-credential and operator permission checks.
+
 `-synthetic-pool` selects the IPv4 CIDR used for every peer's effective address
 and the shared host-side NAT address. Choose a range that does not overlap local
 routes. The value is persisted in daemon state, so it only needs to be supplied
 when setting or changing the pool. `-synthetic-pool-v6` provides the equivalent
 IPv6 setting. Changing either pool retires that family's leases and NAT address.
 MagicDNS remains at `100.100.100.100`.
+
+Remote logtail upload is disabled by default in tailmix's tsnet fork. Pass
+`-log-upload` to opt in. `-log-upload-url URL` replaces the default upload base
+URL and requires `-log-upload`; local user and verbose logging are unaffected.
 
 See [docs/darwin-testing.md](docs/darwin-testing.md) for verification steps,
 [docs/architecture.html](docs/architecture.html) for the implementation
@@ -69,6 +89,7 @@ routes would overlap tailmix's.
 
 ## License
 
-tailmix is available under the BSD 3-Clause License. See [LICENSE](LICENSE).
-Notices for third-party modules linked into distributed binaries are collected
-in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
+tailmix's original code is available under the BSD 3-Clause License. See
+[LICENSE](LICENSE). The copied tsnet source retains Tailscale's copyright and
+license in [tsnet/LICENSE](tsnet/LICENSE). Notices for copied and linked
+third-party code are collected in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).

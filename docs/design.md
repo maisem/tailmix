@@ -13,7 +13,7 @@ The core contract is that there is no active-tailnet switch. If three tailnets a
 - Do not support overlapping advertised subnet route remapping.
 - Do not define app connector route conflict semantics unless they reduce to direct node reachability.
 - Do not add tailnets as OS search domains.
-- Do not preserve upstream single-tailnet CLI compatibility.
+- Do not expose an unqualified, ambiguous single-tailnet CLI target.
 - Do not install anti-bridging firewall rules.
 - Do not build a Tailscale-managed cross-tailnet router feature.
 
@@ -21,11 +21,11 @@ Host administrators can still forward, NAT, bridge, or proxy traffic with normal
 
 ## Architecture
 
-The system is one daemon with a shared host-facing TUN and one upstream `tsnet` profile engine per active tailnet.
+The system is one daemon with a shared host-facing TUN and one locally forked `tsnet` profile engine per active tailnet.
 
 The first runnable milestone uses userspace networking instead of a host TUN. In that mode, the daemon runs one `tsnet` profile engine per active tailnet and exposes one aggregate local SOCKS5 listener for outbound TCP. The aggregate SOCKS listener chooses a profile per request and then dials through that profile's `tsnet.Server.Dial`. This validates simultaneous multi-profile login and outbound reachability before OS route installation, shared TUN injection, and packet-level effective-IP translation are enabled.
 
-The daemon uses the upstream `tsnet.Server.Tun` hook to provide the packet/TUN interface for each profile engine. This keeps `tsnet` responsible for tailnet identity, control-plane state, peer crypto, DERP/magicsock behavior, and netmap handling, while the daemon owns the host-wide multi-tailnet policy.
+The daemon uses `tsnet.Server.Tun` to provide the packet/TUN interface for each profile engine. The local fork also exposes `LocalBackend` so the daemon can attach Tailscale's native `ipnserver` to a per-profile Unix socket. This keeps `tsnet` responsible for tailnet identity, control-plane state, peer crypto, DERP/magicsock behavior, and netmap handling, while the daemon owns the host-wide multi-tailnet policy.
 
 The daemon owns:
 
@@ -34,7 +34,7 @@ The daemon owns:
 - Effective IP allocation and persistence.
 - Effective-IP-to-profile packet routing.
 - Explicit DNS resolution behavior.
-- New multi-tailnet-native CLI/API.
+- Profile selection and per-profile LocalAPI socket orchestration.
 - Exit-node/default-route selection.
 
 Each `tsnet` profile engine owns:
@@ -46,6 +46,7 @@ Each `tsnet` profile engine owns:
 - One netmap and peer set.
 - Profile-local Tailscale preferences and policy inputs.
 - Tailnet transport behavior for that profile.
+- Native LocalAPI behavior, credentials, and operator permissions.
 
 Outbound packet flow:
 
@@ -217,7 +218,21 @@ Higher-level features such as Tailscale SSH, Serve, and Funnel are configured pe
 
 ## CLI And API Surface
 
-There is no CLI compatibility mode. The daemon exposes a multi-tailnet-native CLI/API instead of preserving upstream single-tailnet command semantics.
+Profile-scoped commands use:
+
+```text
+tailmix <profile> <tailscale-subcommand> [arguments]
+```
+
+`tailmix` selects that profile's LocalAPI socket and delegates the remaining
+arguments to `tailscale.com/cmd/tailscale/cli`. Command behavior and output are
+therefore upstream Tailscale behavior; the required profile prefix removes the
+single-tailnet ambiguity. The daemon serves each socket through `ipnserver`, so
+peer credentials and `OperatorUser` permissions are evaluated in the same
+request path as `tailscaled`.
+
+Future aggregate commands may use a separate multi-profile API, but must not
+silently pick one profile.
 
 Core objects:
 
@@ -231,12 +246,11 @@ Core objects:
 Required behavior:
 
 - Commands that act on one tailnet require a profile selector.
-- Commands that show global state return structured multi-profile output.
-- Status shows profile state, peer canonical IPs, effective IPs, DNS names, shields-up state, and conflicts.
+- Future commands that show global state return structured multi-profile output.
+- Future aggregate status shows profile state, peer canonical IPs, effective IPs, DNS names, shields-up state, and conflicts.
 - Login, logout, add, remove, and reauth are profile operations.
 - Exit-node selection requires a profile and peer selector.
 - Effective-IP mapping and cleanup are explicit inspectable operations.
-- Output does not mimic upstream `tailscale status`.
 
 ## Persistent State
 
@@ -299,7 +313,11 @@ Manual/system tests:
 
 ## Open Implementation Risks
 
-The design depends on the upstream `tsnet.Server.Tun` packet-facing hook. The pinned Tailscale module version must continue to expose that boundary so the daemon can provide the shared TUN/multiplexer while keeping each profile engine's control-plane and transport responsibilities intact.
+The design carries a small fork of `tailscale.com/tsnet` pinned to the module
+version in `go.mod`. The fork retains the packet-facing `Server.Tun` hook,
+exposes `Server.LocalBackend` for `ipnserver`, and makes remote log upload
+opt-in with a replaceable endpoint. Updating Tailscale requires reconciling the
+fork against upstream while preserving those three boundaries.
 
 The effective-IP allocator must choose an address space that avoids collisions
 with canonical Tailscale addresses, host routes, and ordinary LAN routes. One

@@ -4,6 +4,8 @@ import (
 	"context"
 	"net"
 	"net/netip"
+
+	"tailscale.com/ipn/ipnlocal"
 )
 
 type Engine interface {
@@ -12,6 +14,10 @@ type Engine interface {
 	Dial(context.Context, string, string) (net.Conn, error)
 	Status(context.Context) (Status, error)
 	WatchUpdates(context.Context, func()) error
+}
+
+type LocalBackendProvider interface {
+	LocalBackend() (*ipnlocal.LocalBackend, error)
 }
 
 type Update struct {

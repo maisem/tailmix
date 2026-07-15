@@ -603,9 +603,10 @@
         <p class="eyebrow">02 · Ownership boundaries</p>
         <h2>tailmix chooses the path; Tailscale secures it</h2>
         <p class="section-intro">
-          The design depends on the upstream <code>tsnet.Server.Tun</code> hook.
-          tailmix substitutes a channel-backed TUN for each server, but otherwise
-          uses the published Tailscale modules directly.
+          tailmix carries a focused <code>tsnet</code> fork. It substitutes a
+          channel-backed <code>Server.Tun</code> and exposes
+          <code>Server.LocalBackend</code>; the daemon then uses the published
+          Tailscale modules for the engine, LocalAPI, and credential checks.
         </p>
         <table>
           <thead><tr><th>Concern</th><th>tailmix owns</th><th>Profile engine / upstream Tailscale owns</th></tr></thead>
@@ -613,6 +614,7 @@
             <tr><td>Host networking</td><td>Shared TUN, host addresses, peer host routes</td><td>No direct host interface</td></tr>
             <tr><td>Addressing</td><td>Effective leases, host NAT addresses, profile selection, SNAT/DNAT</td><td>Canonical self and peer addresses from the netmap</td></tr>
             <tr><td>Control plane</td><td>Profile orchestration and aggregate reconciliation</td><td>Login, coordination, netmap, peer updates, preferences</td></tr>
+            <tr><td>LocalAPI</td><td>Profile selection and one socket per profile</td><td><code>ipnserver</code>, peer credentials, operator read/write permissions</td></tr>
             <tr><td>Transport</td><td>Injection into the selected profile TUN</td><td>WireGuard, endpoint discovery, direct links, DERP, encryption</td></tr>
             <tr><td>DNS</td><td>Aggregate effective-IP host records and split-DNS routes</td><td>Tailscale DNS manager/configurator/resolver machinery</td></tr>
             <tr><td>Policy</td><td>No new authorization namespace</td><td>Tailnet ACLs, grants, device approval, Tailnet Lock, shields-up</td></tr>
@@ -926,6 +928,13 @@
               login URL. Unattended enrollment uses distinct
               <code>auth-key-env</code> variables.</p>
           </article>
+          <article class="card accent-violet">
+            <p class="kicker">Remote logging</p>
+            <h3>Explicit opt-in</h3>
+            <p>The local <code>tsnet</code> fork does not upload logtail data by
+              default. <code>-log-upload</code> enables uploads, and
+              <code>-log-upload-url</code> replaces their base URL.</p>
+          </article>
         </div>
         <div class="callout">
           tailmix rejects a global <code>TS_AUTHKEY</code> or
@@ -943,6 +952,7 @@
           <tbody>
             <tr><td>TUN creation</td><td>Tailscale <code>tstun</code>, dynamic <code>utun*</code></td><td>Tailscale <code>tstun</code>, default <code>tailmix0</code></td></tr>
             <tr><td>Privileges</td><td>Root required</td><td>Root or <code>CAP_NET_ADMIN</code></td></tr>
+            <tr><td>Profile LocalAPI</td><td colspan="2">Unix sockets served by <code>ipnserver</code> with native peer-credential and operator checks</td></tr>
             <tr><td>Address / route apply</td><td><code>ifconfig</code> and <code>route</code></td><td>Netlink</td></tr>
             <tr><td>DNS</td><td>Native split-DNS configurator</td><td>Upstream Linux configurator selection</td></tr>
             <tr><td>Cleanup</td><td>Routes and aliases removed before TUN close</td><td>Routes and addresses removed before TUN close</td></tr>
@@ -975,7 +985,10 @@
           <thead><tr><th>Path</th><th>Responsibility</th></tr></thead>
           <tbody>
             <tr><td><a href="../cmd/tailmixd/main.go">cmd/tailmixd</a></td><td>Composition root, flags, startup, plan construction, reconciliation loop</td></tr>
+            <tr><td><a href="../cmd/tailmix/main.go">cmd/tailmix</a></td><td>Profile selector and delegation to Tailscale's upstream CLI package</td></tr>
             <tr><td><a href="../profile/manager.go">profile</a></td><td>Engine abstraction, lifecycle, aggregate status, IPN update watchers, tsnet adapter</td></tr>
+            <tr><td><a href="../profilesocket/path.go">profilesocket</a></td><td>Stable per-profile LocalAPI socket paths shared by daemon and CLI</td></tr>
+            <tr><td><a href="../tsnet/tsnet.go">tsnet</a></td><td>Upstream-derived embedded node with LocalBackend access and opt-in remote logging</td></tr>
             <tr><td><a href="../hosttun/hosttun.go">hosttun</a></td><td>Shared host interface abstraction and Darwin/Linux route reconciliation</td></tr>
             <tr><td><a href="../tunmux/mux.go">tunmux</a></td><td>Bidirectional packet pumps, profile channel TUNs, local service dispatch</td></tr>
             <tr><td><a href="../packetmap/packetmap.go">packetmap</a></td><td>BART lookup structures and in-place address/checksum translation</td></tr>
@@ -1001,6 +1014,7 @@
               <li>Dynamic peer, route, mapping, and DNS reconciliation</li>
               <li>MagicDNS FQDNs, including exact routes for shared-in names</li>
               <li>Interactive and per-profile auth-key login</li>
+              <li>Profile-scoped upstream Tailscale CLI commands through native <code>ipnserver</code></li>
               <li>Darwin and Linux host TUN implementations</li>
             </ul>
           </article>
@@ -1012,7 +1026,7 @@
               <li>Short-name resolution or tailnet search domains</li>
               <li>Automatic cross-tailnet forwarding or anti-bridging firewall rules</li>
               <li>Per-profile failure isolation in the daemon reconciliation loop</li>
-              <li>A complete operational control/status CLI</li>
+              <li>Aggregate multi-profile status and control commands</li>
             </ul>
           </article>
         </div>

@@ -2,27 +2,43 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io"
+	"slices"
 	"testing"
+
+	"github.com/maisem/tailmix/profilesocket"
 )
 
-func TestStatusRequiresJSONFlagForMachineReadableOutput(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"status", "--json"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("exit code = %d stderr=%s", code, stderr.String())
+func TestProfileSelectsLocalAPISocketForUpstreamCLI(t *testing.T) {
+	socketDir := t.TempDir()
+	t.Setenv(profilesocket.EnvDir, socketDir)
+	var gotArgs []string
+	runner := func(_ context.Context, args []string) error {
+		gotArgs = slices.Clone(args)
+		return nil
 	}
-	if !bytes.Contains(stdout.Bytes(), []byte(`"profiles"`)) {
-		t.Fatalf("status JSON missing profiles: %s", stdout.String())
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"work", "status", "--json"}, &stdout, &stderr, runner); code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	wantSocket, err := profilesocket.Path(socketDir, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--socket=" + wantSocket, "status", "--json"}
+	if !slices.Equal(gotArgs, want) {
+		t.Fatalf("upstream CLI args = %q, want %q", gotArgs, want)
 	}
 }
 
-func TestShortDNSLookupIsRejected(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"resolve", "db"}, &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("expected short-name resolve to fail")
-	}
-	if !bytes.Contains(stderr.Bytes(), []byte("unqualified")) {
-		t.Fatalf("stderr = %s", stderr.String())
+func TestProfileCLIRejectsSocketOverride(t *testing.T) {
+	var stderr bytes.Buffer
+	code := run(context.Background(), []string{"work", "--socket=/tmp/other", "status"}, io.Discard, &stderr, func(context.Context, []string) error {
+		t.Fatal("upstream CLI unexpectedly called")
+		return nil
+	})
+	if code != 2 || !bytes.Contains(stderr.Bytes(), []byte("managed by tailmix")) {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
 	}
 }
