@@ -166,7 +166,7 @@ host.tailnet-name.ts.net
 The CLI/API may also expose non-DNS selectors such as:
 
 ```text
-host@tailnet-alias
+host@profile-name
 ```
 
 Those selectors are CLI/API conveniences, not OS search-domain behavior.
@@ -224,18 +224,19 @@ in [profile-management.md](profile-management.md).
 Profile-scoped commands use:
 
 ```text
-tailmix <profile> <tailscale-subcommand> [arguments]
+tailmix tailscale --profile <name> <tailscale-subcommand> [arguments]
 ```
 
 `tailmix` selects that profile's LocalAPI socket and delegates the remaining
 arguments to `tailscale.com/cmd/tailscale/cli`. Command behavior and output are
-therefore upstream Tailscale behavior; the required profile prefix removes the
-single-tailnet ambiguity. The daemon serves each socket through `ipnserver`, so
-peer credentials and `OperatorUser` permissions are evaluated in the same
-request path as `tailscaled`.
+therefore upstream Tailscale behavior. The explicit command namespace and
+profile option keep CLI command names and local profile names in separate
+naming domains. The daemon serves each socket through `ipnserver`, so peer
+credentials and `OperatorUser` permissions are evaluated in the same request
+path as `tailscaled`.
 
-Future aggregate commands may use a separate multi-profile API, but must not
-silently pick one profile.
+Aggregate lifecycle commands use `tailmix profiles ...` and a separate
+multi-profile API. They must not silently pick one profile.
 
 Core objects:
 
@@ -243,7 +244,10 @@ Core objects:
 - Peer: one visible node inside one profile's netmap.
 - Effective IP: local dial address assigned to a visible peer.
 - Canonical IP: tailnet-assigned node address.
-- Tailnet alias: local user-friendly name for selecting a profile.
+- Profile ID: stable daemon-generated key for runtime state, identity storage,
+  and effective-IP leases; it is not a CLI selector.
+- Profile name: local user-friendly handle for selecting a profile; it is
+  distinct from the tailnet hostname and DNS suffix.
 - Host identity group: optional local grouping showing that several profiles live in one daemon.
 
 Required behavior:
@@ -261,7 +265,7 @@ The daemon persists multi-tailnet state as first-class data, while each `tsnet` 
 
 Persistent daemon state includes:
 
-- Profile list and tailnet aliases.
+- Profile definitions and local profile names.
 - Effective-IP leases and allocator metadata.
 - DNS/profile metadata for explicit resolution.
 - Exit-node/default-route selection.
