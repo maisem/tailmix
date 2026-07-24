@@ -1,0 +1,35 @@
+name: homebrew
+
+on:
+  pull_request:
+    paths:
+      - Formula/**
+      - go.mod
+      - go.sum
+      - "**/*.go"
+      - .github/workflows/homebrew.yml
+  push:
+    branches: [main]
+    paths:
+      - Formula/**
+      - go.mod
+      - go.sum
+      - "**/*.go"
+      - .github/workflows/homebrew.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - run: brew tap maisem/tailmix "$GITHUB_WORKSPACE"
+      - run: brew audit --strict --formula maisem/tailmix/tailmix
+      - run: brew install --HEAD maisem/tailmix/tailmix
+      - run: brew test --HEAD maisem/tailmix/tailmix

@@ -35,6 +35,26 @@ go build -o /tmp/tailmix ./cmd/tailmix
 
 ## Install
 
+### Homebrew
+
+Until the first versioned release, install the current `main` branch from this
+repository as a head-only tap:
+
+```sh
+brew tap maisem/tailmix git@github.com:maisem/tailmix.git
+brew install --HEAD maisem/tailmix/tailmix
+```
+
+The repository is currently private, so this requires GitHub access and a
+working SSH key. This installs both `tailmix` and `tailmixd`. Future updates are
+installed with:
+
+```sh
+brew upgrade --fetch-HEAD maisem/tailmix/tailmix
+```
+
+### Make
+
 Install both `tailmix` and `tailmixd` under `/usr/local/bin`:
 
 ```sh
