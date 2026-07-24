@@ -24,18 +24,32 @@ overrides of profile-wide accept-all imports. tailmix watches every profile
 for netmap updates and reconciles host routes, packet mappings, and DNS state
 when peers or advertised routes change. Exit nodes are not yet supported.
 
-## Build
+## How it works
 
-Go 1.26.4 or newer is required.
+`tailmixd` runs one independent embedded Tailscale node for each profile. Every
+profile has its own identity, login state, preferences, netmap, and
+credential-authenticated LocalAPI socket.
 
-```sh
-go build -o /tmp/tailmixd ./cmd/tailmixd
-go build -o /tmp/tailmix ./cmd/tailmix
-```
+- A shared host TUN presents all selected peers and subnet routes to the
+  operating system at once.
+- Stable effective addresses prevent overlapping Tailscale CGNAT and ULA
+  addresses from colliding across profiles. Packets are translated to and from
+  each profile's canonical addresses at its boundary.
+- Explicit route and DNS bindings choose a profile. Profile-wide accept-all
+  settings import everything else advertised by that profile, while explicit
+  bindings remain overrides.
+- The DNS service merges the selected split-DNS routes and search domains, then
+  forwards each query through the profile chosen for that suffix.
+- `tailmix` updates desired profile and routing policy through a local control
+  socket. The daemon reconciles those changes and live netmap updates without
+  restarting unrelated profiles.
 
 ## Install
 
 ### Homebrew
+
+Disconnect the regular Tailscale client before starting the service so its
+routes and DNS configuration do not overlap Tailmix.
 
 Until the first versioned release, install the current `main` branch and start
 `tailmixd` automatically at system startup with:
@@ -66,49 +80,24 @@ sudo brew services restart maisem/tailmix/tailmix
 sudo brew services stop maisem/tailmix/tailmix
 ```
 
-### Make
-
-Install both `tailmix` and `tailmixd` under `/usr/local/bin`:
-
-```sh
-sudo make install
-```
-
-For an unprivileged installation, choose a prefix already on your `PATH`:
-
-```sh
-make install PREFIX="$HOME/.local"
-```
-
-`PREFIX`, `BINDIR`, and `DESTDIR` are configurable for packaging.
+For source builds and local installation, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Run on macOS
 
-Disconnect the regular Tailscale client first, then run tailmix as root. Zero
-profiles is a valid starting state:
+The daemon can run with zero profiles. Add profiles through the live CLI, then
+use the profile-local Tailscale namespace for interactive login:
 
 ```sh
-unset TS_AUTHKEY TS_AUTH_KEY
-
-sudo /tmp/tailmixd \
-  -state /var/db/tailmix/state.json \
-  -synthetic-pool 10.250.0.0/16
-```
-
-Add profiles through the live CLI, then use the profile-local Tailscale
-namespace for interactive login:
-
-```sh
-sudo /tmp/tailmix profiles add work
-sudo /tmp/tailmix profiles add home
-sudo /tmp/tailmix ts --profile work up
-sudo /tmp/tailmix ts --profile home up
+sudo tailmix profiles add work
+sudo tailmix profiles add home
+sudo tailmix ts --profile work up
+sudo tailmix ts --profile home up
 ```
 
 For a non-default coordination server, use Tailscale's native login option:
 
 ```sh
-sudo /tmp/tailmix ts --profile work login \
+sudo tailmix ts --profile work login \
   --login-server=https://headscale.example.com
 ```
 
@@ -124,26 +113,26 @@ CLI selects one and delegates the remaining arguments to Tailscale's upstream
 CLI implementation:
 
 ```sh
-sudo /tmp/tailmix ts --profile work status
-sudo /tmp/tailmix ts --profile home ping peer.home.example
-sudo /tmp/tailmix ts --profile work set --shields-up
+sudo tailmix ts --profile work status
+sudo tailmix ts --profile home ping peer.home.example
+sudo tailmix ts --profile work set --shields-up
 ```
 
 Route policy is managed separately from profile names and delegated Tailscale
 commands:
 
 ```sh
-sudo /tmp/tailmix routes bind --profile work 10.20.0.0/16
-sudo /tmp/tailmix routes set --profile home --accept-all=true
-sudo /tmp/tailmix dns routes bind --profile work corp.example.com
-sudo /tmp/tailmix dns search set corp.example.com
+sudo tailmix routes bind --profile work 10.20.0.0/16
+sudo tailmix routes set --profile home --accept-all=true
+sudo tailmix dns routes bind --profile work corp.example.com
+sudo tailmix dns search set corp.example.com
 ```
 
 Use `tailmix help` for the complete subcommand space. Route listings use one
 state column: `✓` marks enabled entries, while waiting, ambiguous, and
 overridden entries retain diagnostic details.
 
-Use `sudo /tmp/tailmix status` for a concise list of active profiles and their
+Use `sudo tailmix status` for a concise list of active profiles and their
 runtime health. Add `--json` for structured output.
 
 The sockets default to `/var/run/tailmix`. If `tailmixd` uses `-socket-dir`, set
@@ -169,9 +158,9 @@ lifecycle CLI and daemon control API.
 
 ## Run on Linux
 
-Build and invoke tailmixd with the same flags shown above. The default interface
-name is `tailmix0`; creating it and installing routes requires root or
-`CAP_NET_ADMIN`. MagicDNS uses Tailscale's native Linux DNS configurator, which
+Run `tailmixd` as root or with `CAP_NET_ADMIN`. The default interface name is
+`tailmix0`; creating it and installing routes requires those privileges.
+MagicDNS uses Tailscale's native Linux DNS configurator, which
 selects the host's systemd-resolved, NetworkManager, resolvconf, or direct
 `resolv.conf` integration. Disconnect a regular Tailscale client first if its
 routes would overlap tailmix's.

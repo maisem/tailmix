@@ -242,6 +242,11 @@ type Server struct {
 	// used.
 	AuthKey string
 
+	// DisableAuthKeyEnv prevents AuthKey from falling back to the TS_AUTHKEY
+	// and TS_AUTH_KEY environment variables. An explicit AuthKey still takes
+	// precedence.
+	DisableAuthKeyEnv bool
+
 	// ControlURL optionally specifies the coordination server URL.
 	// If empty, the Tailscale default is used.
 	// If empty, it defaults to the TS_CONTROL_URL environment variable.
@@ -682,6 +687,9 @@ func (s *Server) LogtailWriter() io.Writer {
 func (s *Server) getAuthKey() string {
 	if v := s.AuthKey; v != "" {
 		return v
+	}
+	if s.DisableAuthKeyEnv {
+		return ""
 	}
 	if v := os.Getenv("TS_AUTHKEY"); v != "" {
 		return v

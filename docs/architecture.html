@@ -937,9 +937,9 @@
           </article>
         </div>
         <div class="callout">
-          tailmix rejects a global <code>TS_AUTHKEY</code> or
-          <code>TS_AUTH_KEY</code> when any profile lacks an explicit
-          per-profile key environment. This prevents one ambient key from
+          tailmix profile engines ignore global <code>TS_AUTHKEY</code> and
+          <code>TS_AUTH_KEY</code> values. Only an explicitly selected
+          per-profile key is used, preventing one ambient key from
           accidentally enrolling every identity into the same tailnet.
         </div>
       </section>

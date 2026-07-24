@@ -21,6 +21,11 @@ LocalAPI. Server-owned settings such as the embedded hostname still take
 precedence, and an explicitly configured `Server.ControlURL` still overrides a
 saved login server.
 
+`Server.DisableAuthKeyEnv` lets profile managers opt out of the upstream
+`TS_AUTHKEY` and `TS_AUTH_KEY` fallback while retaining explicit auth-key
+login. tailmix enables this for every managed profile so ambient process
+environment cannot enroll multiple profiles with one key.
+
 OAuth-secret and workload-identity auth-key minting are omitted because their
 registration hooks live in an internal Tailscale package that cannot be
 imported by this module. Device auth keys and interactive login remain

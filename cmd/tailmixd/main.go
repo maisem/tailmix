@@ -130,9 +130,6 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := validateAuthKeyEnv(runtimeProfiles); err != nil {
-		return err
-	}
 	st.Profiles = stateProfiles(runtimeProfiles)
 	if err := store.Save(st); err != nil {
 		return err
@@ -401,14 +398,6 @@ func dnsLabel(s string) string {
 		label = strings.TrimRight(label[:58], "-")
 	}
 	return label
-}
-
-func validateAuthKeyEnv(profiles []runtimeProfile) error {
-	if os.Getenv("TS_AUTHKEY") == "" && os.Getenv("TS_AUTH_KEY") == "" {
-		return nil
-	}
-	_ = profiles
-	return fmt.Errorf("global TS_AUTHKEY/TS_AUTH_KEY is unsupported for live profile management; use per-profile auth-key-env or unset it before starting tailmixd")
 }
 
 func tsnetConfig(rp runtimeProfile, stderr io.Writer, verbose, logUpload bool, logUploadURL string) (tailmixprofile.TSNetConfig, error) {

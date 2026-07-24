@@ -48,14 +48,15 @@ func (e *TSNetEngine) Start(ctx context.Context) error {
 		return err
 	}
 	s := &tsnet.Server{
-		Dir:          e.cfg.Dir,
-		Hostname:     e.cfg.Hostname,
-		UserLogf:     e.cfg.UserLogf,
-		Logf:         e.cfg.Logf,
-		LogUpload:    e.cfg.LogUpload,
-		LogUploadURL: e.cfg.LogUploadURL,
-		AuthKey:      e.cfg.AuthKey,
-		Tun:          e.cfg.Tun,
+		Dir:               e.cfg.Dir,
+		Hostname:          e.cfg.Hostname,
+		UserLogf:          e.cfg.UserLogf,
+		Logf:              e.cfg.Logf,
+		LogUpload:         e.cfg.LogUpload,
+		LogUploadURL:      e.cfg.LogUploadURL,
+		AuthKey:           e.cfg.AuthKey,
+		DisableAuthKeyEnv: true,
+		Tun:               e.cfg.Tun,
 	}
 	if err := s.Start(); err != nil {
 		s.AuthKey = ""

@@ -52,3 +52,26 @@ func TestStartupPrefsExplicitControlURLWins(t *testing.T) {
 		t.Fatalf("ControlURL = %q, want explicit value %q", got.ControlURL, server.ControlURL)
 	}
 }
+
+func TestGetAuthKeyCanIgnoreEnvironment(t *testing.T) {
+	t.Setenv("TS_AUTHKEY", "global-key")
+	t.Setenv("TS_AUTH_KEY", "global-key-alias")
+
+	server := &Server{DisableAuthKeyEnv: true}
+	if got := server.getAuthKey(); got != "" {
+		t.Fatalf("getAuthKey() = %q, want global environment ignored", got)
+	}
+
+	server.AuthKey = "profile-key"
+	if got := server.getAuthKey(); got != "profile-key" {
+		t.Fatalf("getAuthKey() = %q, want explicit profile key", got)
+	}
+}
+
+func TestGetAuthKeyUsesEnvironmentByDefault(t *testing.T) {
+	t.Setenv("TS_AUTHKEY", "global-key")
+
+	if got := new(Server).getAuthKey(); got != "global-key" {
+		t.Fatalf("getAuthKey() = %q, want default environment fallback", got)
+	}
+}

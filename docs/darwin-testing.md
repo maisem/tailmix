@@ -16,18 +16,13 @@ inside the shared TUN; tailmix does not open a kernel DNS listener.
   conflict with tailmix's routes.
 - Use a distinct state directory for every profile.
 - TUN creation and route changes require root.
-- Unset `TS_AUTHKEY` and `TS_AUTH_KEY`; interactive login is supported, and a
-  global key could accidentally enroll every profile into the same tailnet.
 
 ## Build and run
 
 ```sh
-go build -o /tmp/tailmixd ./cmd/tailmixd
-go build -o /tmp/tailmix ./cmd/tailmix
+go install ./cmd/tailmixd ./cmd/tailmix
 
-unset TS_AUTHKEY TS_AUTH_KEY
-
-sudo /tmp/tailmixd \
+sudo tailmixd \
   -state "$HOME/Library/Application Support/tailmix/state.json" \
   -synthetic-pool 10.250.0.0/16 \
   -profile id=work \
@@ -69,8 +64,8 @@ for each one without taking over the source tailnet's entire DNS suffix.
 ## First checks
 
 ```sh
-/tmp/tailmix work status
-/tmp/tailmix home status
+tailmix ts --profile work status
+tailmix ts --profile home status
 route -n get 10.250.0.3
 scutil --dns | grep -A8 'home.ts.net'
 dig @100.100.100.100 db.home.ts.net
@@ -81,9 +76,8 @@ nc -vz 10.250.0.3 22
 
 The profile commands use Tailscale's upstream CLI against the selected
 profile's `ipnserver` socket. The socket applies normal Unix peer credentials
-and Tailscale operator permissions; use `sudo /tmp/tailmix ...` for write commands
-unless your user is a local administrator or the profile's configured
-operator.
+and Tailscale operator permissions; use `sudo tailmix ...` for write commands
+unless your user is a local administrator or the profile's configured operator.
 
 `route -n get` should show the tailmix `utun`; it should not contain a
 profile-specific preferred source. Test one peer in each tailnet without
