@@ -84,9 +84,8 @@ Use `tailmix help` for the complete subcommand space. Route listings use one
 state column: `✓` marks enabled entries, while waiting, ambiguous, and
 overridden entries retain diagnostic details.
 
-Use `sudo /tmp/tailmix status` for one aggregate view of profile health, IP
-routes, DNS routes, and OS search-domain state. Add `--json` for structured
-output.
+Use `sudo /tmp/tailmix status` for a concise list of active profiles and their
+runtime health. Add `--json` for structured output.
 
 The sockets default to `/var/run/tailmix`. If `tailmixd` uses `-socket-dir`, set
 `TAILMIX_SOCKET_DIR` to the same directory when invoking `tailmix`. Access uses

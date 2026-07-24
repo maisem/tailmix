@@ -104,7 +104,7 @@ tailmix dns search <policy-command> [arguments]
 tailmix {tailscale|ts} --profile <name> <tailscale-subcommand> [arguments]
 ```
 
-`status` shows the aggregate runtime view across profiles and policy.
+`status` is the concise active-profile overview, equivalent to `profiles list`.
 `profiles` owns tailmix lifecycle operations. `tailscale` delegates to the
 selected profile's upstream Tailscale CLI, and `ts` is its exact alias. A
 profile name appears only as an operand or the value of `--profile`. `routes`

@@ -46,17 +46,6 @@ type usageError struct {
 
 func (e usageError) Error() string { return e.message }
 
-type aggregateStatus struct {
-	Profiles []controlapi.Profile `json:"profiles"`
-	Routes   controlapi.IPRoutes  `json:"routes"`
-	DNS      aggregateDNSStatus   `json:"dns"`
-}
-
-type aggregateDNSStatus struct {
-	Routes controlapi.DNSRoutes     `json:"routes"`
-	Search controlapi.SearchDomains `json:"search"`
-}
-
 type dependencies struct {
 	stdin     io.Reader
 	stdout    io.Writer
@@ -151,30 +140,10 @@ func runStatus(ctx context.Context, client managementClient, args []string, deps
 	if err != nil {
 		return err
 	}
-	routes, err := client.IPRoutes(ctx, false)
-	if err != nil {
-		return err
-	}
-	dnsRoutes, err := client.DNSRoutes(ctx, false)
-	if err != nil {
-		return err
-	}
-	search, err := client.SearchDomains(ctx)
-	if err != nil {
-		return err
-	}
-	status := aggregateStatus{
-		Profiles: profiles.Profiles,
-		Routes:   routes,
-		DNS: aggregateDNSStatus{
-			Routes: dnsRoutes,
-			Search: search,
-		},
-	}
 	if jsonOutput {
-		return writeJSON(deps.stdout, status)
+		return writeJSON(deps.stdout, profiles)
 	}
-	writeStatus(deps.stdout, status)
+	writeProfiles(deps.stdout, profiles.Profiles)
 	return nil
 }
 
@@ -952,17 +921,6 @@ func writeJSON(w io.Writer, value any) error {
 	return encoder.Encode(value)
 }
 
-func writeStatus(w io.Writer, status aggregateStatus) {
-	fmt.Fprintln(w, "PROFILES")
-	writeProfiles(w, status.Profiles)
-	fmt.Fprintln(w, "\nIP ROUTES")
-	writeIPRoutes(w, status.Routes, false)
-	fmt.Fprintln(w, "\nDNS ROUTES")
-	writeDNSRoutes(w, status.DNS.Routes, false)
-	fmt.Fprintln(w, "\nDNS SEARCH")
-	writeSearchDomains(w, status.DNS.Search)
-}
-
 func writeProfiles(w io.Writer, profiles []controlapi.Profile) {
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(table, "PROFILE\tENABLED\tRUNTIME\tTAILNET\tPEERS\tERROR")
@@ -1162,7 +1120,7 @@ Usage:
   tailmix [--socket-dir <directory>] <command> [arguments]
 
 Commands:
-  status       Show aggregate runtime and policy status
+  status       List active profiles and their runtime status
   profiles     Manage profile lifecycle and configuration
   routes       Accept IP routes and pin prefixes to profiles
   dns routes   Route DNS suffixes through selected profiles
@@ -1180,8 +1138,8 @@ Environment:
 const statusHelp = `Usage:
   tailmix status [--json]
 
-Shows profile health and the effective IP-route, DNS-route, and search-domain
-state reported by the running daemon.
+Lists active profiles and their runtime status. This is the concise form of
+"tailmix profiles list".
 `
 
 const profilesHelp = `Usage:
