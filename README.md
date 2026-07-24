@@ -46,6 +46,20 @@ credential-authenticated LocalAPI socket.
 
 ## Install
 
+### Linux with systemd
+
+Disconnect the regular Tailscale client first, then install both binaries and
+enable `tailmixd` at boot with:
+
+```sh
+sudo make install-systemd
+```
+
+The service starts immediately, stores persistent state under
+`/var/lib/tailmix`, creates its sockets under `/run/tailmix`, and writes logs to
+the system journal. See [docs/linux-install.md](docs/linux-install.md) for
+prerequisites, daemon configuration, updates, and service management.
+
 ### Homebrew
 
 Disconnect the regular Tailscale client before starting the service so its
@@ -80,7 +94,8 @@ sudo brew services restart maisem/tailmix/tailmix
 sudo brew services stop maisem/tailmix/tailmix
 ```
 
-For source builds and local installation, see [DEVELOPMENT.md](DEVELOPMENT.md).
+For other source-build and local-installation workflows, see
+[DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Run on macOS
 
@@ -158,12 +173,16 @@ lifecycle CLI and daemon control API.
 
 ## Run on Linux
 
-Run `tailmixd` as root or with `CAP_NET_ADMIN`. The default interface name is
-`tailmix0`; creating it and installing routes requires those privileges.
-MagicDNS uses Tailscale's native Linux DNS configurator, which
-selects the host's systemd-resolved, NetworkManager, resolvconf, or direct
-`resolv.conf` integration. Disconnect a regular Tailscale client first if its
-routes would overlap tailmix's.
+The recommended systemd installation runs `tailmixd` as root because creating
+the `tailmix0` interface and installing routes and DNS configuration require
+elevated privileges. MagicDNS uses Tailscale's native Linux DNS configurator,
+which selects the host's systemd-resolved, NetworkManager, resolvconf, or direct
+`resolv.conf` integration.
+
+Once the service is running, profile, route, and DNS commands are the same as
+the macOS examples above. See
+[docs/linux-install.md](docs/linux-install.md) for the complete systemd
+workflow.
 
 ## License
 

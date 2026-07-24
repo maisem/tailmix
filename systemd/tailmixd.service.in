@@ -1,0 +1,19 @@
+[Unit]
+Description=Tailmix multi-tailnet networking daemon
+Documentation=https://github.com/maisem/tailmix
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Environment="TAILMIXD_FLAGS="
+ExecStart=@BINDIR@/tailmixd -state=/var/lib/tailmix/state.json -socket-dir=/var/run/tailmix $TAILMIXD_FLAGS
+Restart=on-failure
+RestartSec=5s
+StateDirectory=tailmix
+StateDirectoryMode=0700
+RuntimeDirectory=tailmix
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

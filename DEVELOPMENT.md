@@ -25,13 +25,26 @@ The Make target installs both binaries under `/usr/local/bin` by default:
 sudo make install
 ```
 
+On a systemd-based Linux host, install the binaries and service, enable it at
+boot, and start or restart it with:
+
+```sh
+sudo make install-systemd
+```
+
 For an unprivileged or staged installation, set `PREFIX`, `BINDIR`, or
 `DESTDIR`:
 
 ```sh
 make install PREFIX="$HOME/.local"
 make install DESTDIR="$PWD/package-root"
+make install-systemd DESTDIR="$PWD/package-root" PREFIX=/usr
 ```
+
+A staged systemd installation does not contact `systemctl`. Set
+`SYSTEMD_UNIT_DIR` to override the unit destination or `SYSTEMCTL` to use a
+different systemctl command. See
+[docs/linux-install.md](docs/linux-install.md) for the runtime workflow.
 
 ## Validate
 
