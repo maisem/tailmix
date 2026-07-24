@@ -37,26 +37,22 @@ go build -o /tmp/tailmix ./cmd/tailmix
 
 ### Homebrew
 
-Until the first versioned release, install the current `main` branch from this
-repository as a head-only tap:
+Until the first versioned release, install the current `main` branch and start
+`tailmixd` automatically at system startup with:
 
 ```sh
 brew tap maisem/tailmix git@github.com:maisem/tailmix.git
-brew install --HEAD maisem/tailmix/tailmix
+brew install --HEAD maisem/tailmix/tailmix && \
+  sudo brew services start maisem/tailmix/tailmix
 ```
 
 The repository is currently private, so this requires GitHub access and a
-working SSH key. This installs both `tailmix` and `tailmixd`. Future updates are
+working SSH key. This installs both `tailmix` and `tailmixd`; the explicit
+`sudo` authorizes Homebrew to register the root LaunchDaemon. Future updates are
 installed with:
 
 ```sh
 brew upgrade --fetch-HEAD maisem/tailmix/tailmix
-```
-
-Start `tailmixd` now and automatically at system startup:
-
-```sh
-sudo brew services start maisem/tailmix/tailmix
 ```
 
 The service stores daemon state under `$(brew --prefix)/var/lib/tailmix`, writes
