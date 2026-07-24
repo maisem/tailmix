@@ -19,8 +19,8 @@ and `truetype` subpackages, so they remain visibly marked `Unknown` in the
 generated report. This exception must be reviewed again if the module version
 changes.
 
-The source copied into `tsnet/` is handled separately. Its upstream license and
-provenance are recorded in [`tsnet/LICENSE`](../tsnet/LICENSE) and
+The forked source under `tsnet/` is handled separately. Its upstream license
+and provenance are recorded in [`tsnet/LICENSE`](../tsnet/LICENSE) and
 [`tsnet/UPSTREAM`](../tsnet/UPSTREAM).
 
 [go-licenses]: https://github.com/google/go-licenses

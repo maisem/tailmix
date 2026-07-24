@@ -2,6 +2,10 @@
 
 tailmix connects one host to multiple Tailscale tailnets at the same time.
 
+tailmix is an independent project and is not affiliated with, sponsored by, or
+endorsed by Tailscale Inc. Tailscale is a registered trademark of Tailscale
+Inc.
+
 ## Start here
 
 You only need to install it, connect one profile, and check that it works.
@@ -16,12 +20,10 @@ Choose your operating system.
 **macOS**
 
 ```sh
-brew tap maisem/tailmix git@github.com:maisem/tailmix.git
+brew tap maisem/tailmix https://github.com/maisem/tailmix.git
 brew install --HEAD tailmix
 sudo brew services start tailmix
 ```
-
-The tap currently requires GitHub SSH access.
 
 **Linux with systemd**
 
@@ -111,8 +113,9 @@ Exit nodes are not yet supported.
 
 ## License
 
-tailmix's original code is available under the BSD 3-Clause License. See
-[LICENSE](LICENSE). The copied tsnet source retains Tailscale's copyright and
-license in [tsnet/LICENSE](tsnet/LICENSE). The linked Go dependency license
-report is generated with `go-licenses`; see [licenses/tailmix.md](licenses/tailmix.md)
-and [licenses/README.md](licenses/README.md).
+Except for the forked source under `tsnet/`, the contents of this repository
+are available under the BSD 3-Clause License. See [LICENSE](LICENSE). The
+`tsnet` fork retains Tailscale's copyright and license in
+[tsnet/LICENSE](tsnet/LICENSE). The linked Go dependency license report is
+generated with `go-licenses`; see [licenses/tailmix.md](licenses/tailmix.md) and
+[licenses/README.md](licenses/README.md).

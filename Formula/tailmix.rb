@@ -2,7 +2,7 @@ class Tailmix < Formula
   desc "Connect one host to multiple Tailscale tailnets"
   homepage "https://github.com/maisem/tailmix"
   license "BSD-3-Clause"
-  head "ssh://git@github.com/maisem/tailmix.git", branch: "main"
+  head "https://github.com/maisem/tailmix.git", branch: "main"
 
   depends_on "go" => :build
 
