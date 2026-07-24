@@ -23,6 +23,12 @@ tailmix profiles enable <name>
 tailmix profiles disable <name>
 tailmix profiles restart <name>
 tailmix profiles remove <name> [--purge --yes]
+
+tailmix dns search list
+tailmix dns search set <domain>...
+tailmix dns search add <domain>...
+tailmix dns search remove <domain>...
+tailmix dns search clear
 ```
 
 Profile-local Tailscale commands have their own explicit namespace and select a
@@ -47,6 +53,7 @@ or removing a profile must not restart the daemon or disrupt other profiles.
 - Persist every successful requested configuration change.
 - Give tailmix commands, local profile names, advertised hostnames, and
   tailnet-provided DNS names distinct naming domains.
+- Change the ordered OS search-domain policy without restarting the daemon.
 - Report profiles that are disabled, starting, awaiting login, running, or
   failed without blocking on them.
 - Isolate profile startup, authentication, and watcher failures.
@@ -72,14 +79,17 @@ The first positional token always names a command namespace, never a profile:
 
 ```text
 tailmix profiles <lifecycle-command> [arguments]
+tailmix dns search <policy-command> [arguments]
 tailmix {tailscale|ts} --profile <name> <tailscale-subcommand> [arguments]
 ```
 
 `profiles` owns tailmix lifecycle operations. `tailscale` delegates to the
 selected profile's upstream Tailscale CLI, and `ts` is its exact alias. A
-profile name appears only as an operand or the value of `--profile`; it can
-never collide with `profiles`, `tailscale`, `ts`, an upstream subcommand, or a
-future tailmix command.
+profile name appears only as an operand or the value of `--profile`. `dns`
+owns daemon-wide DNS policy, and search-domain operands occupy only domain
+positions. Profile names and DNS domains can therefore never collide with
+`profiles`, `dns`, `tailscale`, `ts`, an upstream subcommand, or a future
+tailmix command.
 
 The current `tailmix work status` form is intentionally not part of the target
 grammar. A release may recognize it solely to print a deprecation error with
@@ -128,6 +138,50 @@ match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` and are compared exactly. They are not
 DNS-normalized, appended to a tailnet suffix, or used to derive the advertised
 hostname. Default state directories and socket paths derive from the opaque
 profile ID, so a filesystem name is not another implicit user-facing identity.
+
+### DNS search domains
+
+Search domains are daemon-wide ordered policy, not profile names or aliases.
+The default list is empty, preserving fully qualified MagicDNS behavior.
+
+```text
+tailmix dns search list [--json]
+tailmix dns search set <domain>... [--json]
+tailmix dns search add <domain>... [--json]
+tailmix dns search remove <domain>... [--json]
+tailmix dns search clear [--json]
+```
+
+`set` atomically replaces the desired list in the given order. `add` appends
+domains that are not already present, `remove` is an idempotent removal, and
+`clear` restores the empty default. DNS names are case-insensitive; input is
+normalized to lowercase fully qualified suffixes stored without a trailing
+dot. Duplicates are removed while preserving the first occurrence.
+
+A desired search domain is installed only while it is equal to or below
+exactly one active profile's MagicDNS suffix. This matters because on systems
+such as Linux with `systemd-resolved`, a search domain also routes matching
+queries to tailmix's DNS service. tailmix must not capture an arbitrary suffix
+that it cannot answer authoritatively.
+
+Desired domains that are not currently covered remain persisted but have
+`waiting-for-route` state. They are installed automatically if a profile later
+provides the required route and withdrawn if that profile is disabled,
+removed, or loses its usable netmap. Profile lifecycle changes do not silently
+edit the desired search-domain list.
+
+Human-readable status distinguishes desired policy from observed installation:
+
+```text
+ORDER  DOMAIN               PROFILE  STATE
+1      work.example.ts.net  work     installed
+2      lab.example.ts.net            waiting-for-route
+```
+
+The configured order is passed to the OS unchanged after filtering unavailable
+domains. Short-name expansion and collision behavior then follow the host
+resolver's normal search-list semantics. tailmix does not inspect a short name
+and choose a profile itself.
 
 ### `profiles list`
 
@@ -298,8 +352,8 @@ API errors have stable machine-readable codes:
 
 Initial codes should include `invalid_request`, `profile_exists`,
 `profile_not_found`, `profile_disabled`, `transition_in_progress`,
-`permission_denied`, `runtime_start_failed`, `reconcile_failed`, and
-`purge_failed`.
+`invalid_dns_name`, `permission_denied`, `runtime_start_failed`,
+`dns_configuration_failed`, `reconcile_failed`, and `purge_failed`.
 
 ## Daemon control API
 
@@ -331,6 +385,11 @@ POST   /v1/profiles/by-name/{escaped-profile-name}/enable
 POST   /v1/profiles/by-name/{escaped-profile-name}/disable
 POST   /v1/profiles/by-name/{escaped-profile-name}/restart
 DELETE /v1/profiles/by-name/{escaped-profile-name}?purge=false
+
+GET    /v1/dns/search-domains
+PUT    /v1/dns/search-domains
+PATCH  /v1/dns/search-domains
+DELETE /v1/dns/search-domains
 ```
 
 Mutations are serialized by the daemon lifecycle loop. A response is sent only
@@ -364,6 +423,28 @@ The profile resource separates desired state from observed state:
 `runtimeState` is one of `disabled`, `starting`, `needs-login`, `running`,
 `stopping`, or `error`. It is tailmix lifecycle state; `backendState` is the
 profile's upstream Tailscale state.
+
+The search-domain resource reports desired and observed state separately:
+
+```json
+{
+  "desired": ["work.example.ts.net", "lab.example.ts.net"],
+  "installed": [{
+    "domain": "work.example.ts.net",
+    "profileId": "p_01k2x7vq3c8m",
+    "profileName": "work"
+  }],
+  "waiting": [{
+    "domain": "lab.example.ts.net",
+    "reason": "no_active_route"
+  }]
+}
+```
+
+`PUT` atomically replaces `desired`. `PATCH` accepts `add` and `remove` arrays
+and applies them atomically to the current list. `DELETE` clears the list.
+Every mutation persists desired state and completes DNS reconciliation before
+returning.
 
 ## Runtime design
 
@@ -427,6 +508,21 @@ the listener, waits for the serving goroutine, and removes the stale socket
 path. Failure of one profile LocalAPI server marks that profile failed rather
 than terminating the daemon.
 
+### Dynamic DNS policy
+
+The supervisor owns the desired search-domain list and derives the installed
+subset during every aggregate reconciliation. Coverage is checked against the
+same active authoritative domains used to build MagicDNS routes. No active
+covering route produces `no_active_route`; more than one produces
+`ambiguous_route`.
+
+The DNS service configuration carries domains, records, and search domains
+together. Its live `Configure` operation validates the complete next
+configuration before calling the Tailscale DNS manager, so a failed search
+policy update cannot partially replace routes or records. Installed domains
+retain desired-list order even though authoritative route tables are otherwise
+sorted for determinism.
+
 ### Dynamic TUN membership
 
 The current TUN mux receives a fixed profile map and starts one inbound worker
@@ -464,8 +560,8 @@ persisted desired state + passive healthy profile snapshots + retained leases
 ```
 
 The plan includes effective-IP leases, packet mappings, host routes, DNS
-domains and records, and the SOCKS routing snapshot. It is fully validated
-before any live component changes.
+domains, records, installed search domains, and the SOCKS routing snapshot. It
+is fully validated before any live component changes.
 
 Removing or disabling a profile follows this order:
 
@@ -496,6 +592,11 @@ Persist the stable identity, local name, lifecycle flags, and existing engine
 configuration:
 
 ```go
+type State struct {
+    // Existing fields...
+    SearchDomains []string `json:"searchDomains,omitempty"`
+}
+
 type Profile struct {
     ID string `json:"id"`
     Name string `json:"name"`
@@ -511,6 +612,10 @@ IDs. Using `Disabled` rather than `Enabled` makes existing stored profiles
 enabled after upgrade. A removed profile remains as a tombstone until purge so
 its ID, state directory, and leases can be recovered. Runtime state and errors
 are observational and are not persisted.
+
+`SearchDomains` is the normalized desired order. Installed and waiting state is
+derived from it and the active profile routes, so those observations are not
+persisted.
 
 The daemon remains the only state writer after startup. Startup `--profile`
 flags can remain as a compatibility bootstrap, but should be documented as
@@ -534,6 +639,9 @@ Auth key material is never added to `state.State`.
 
 - Make LocalAPI servers, TUN mux membership, and SOCKS router snapshots dynamic.
 - Add `profiles add`, `enable`, `disable`, `restart`, and non-purging `remove`.
+- Add `dns search` commands and control endpoints.
+- Carry the filtered search-domain list through aggregate planning and the DNS
+  service's live configuration.
 - Reconcile incomplete and failed profiles without global failure.
 
 ### Slice 3: configuration and destructive cleanup
@@ -553,6 +661,13 @@ Unit tests should cover:
 - Profile-name changes preserving stable ID, leases, state path, and socket.
 - Profile names never being DNS-normalized or used as device hostnames.
 - Human and JSON output from the same API resource.
+- Search-domain normalization, stable ordering, deduplication, and atomic
+  set/add/remove/clear operations.
+- Installation only for domains covered by exactly one active authoritative
+  MagicDNS suffix.
+- Automatic withdrawal and restoration as the covering profile stops and
+  starts, without changing desired policy.
+- OS DNS configuration receiving search and match domains as separate fields.
 - Auth key environment/file resolution without secret output or persistence.
 - State migration from legacy ID/alias fields and an absent `disabled` field.
 - Idempotent enable and disable transitions.
@@ -574,6 +689,8 @@ Integration tests should start two fake profile engines and prove:
 3. Existing traffic and status for the original profiles remain available.
 4. A profile that needs login or fails startup does not prevent reconciliation.
 5. Restarting the daemon reproduces the last requested enabled/disabled set.
+6. Updating search domains changes OS DNS configuration without restarting the
+   daemon or any profile.
 
 The final validation target is:
 

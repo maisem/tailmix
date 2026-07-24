@@ -12,7 +12,7 @@ The core contract is that there is no active-tailnet switch. If three tailnets a
 
 - Do not support overlapping advertised subnet route remapping.
 - Do not define app connector route conflict semantics unless they reduce to direct node reachability.
-- Do not add tailnets as OS search domains.
+- Do not install OS search domains implicitly from the active profile set.
 - Do not expose an unqualified, ambiguous single-tailnet CLI target.
 - Do not install anti-bridging firewall rules.
 - Do not build a Tailscale-managed cross-tailnet router feature.
@@ -146,14 +146,22 @@ Consequences:
 
 ## DNS And Names
 
-Multi-tailnet mode does not add tailnet DNS suffixes to OS search domains.
+Multi-tailnet mode installs no OS search domains by default. The administrator
+may configure an explicit ordered list at runtime.
 
 Rules:
 
-- Unqualified MagicDNS names like `db` are disabled.
-- Names must identify the target tailnet explicitly.
-- Unique short names do not resolve implicitly.
-- Ambiguous short names do not pick a profile by priority.
+- Unqualified MagicDNS names like `db` fail while the search-domain list is
+  empty.
+- Exact DNS names identify the target tailnet explicitly.
+- Unique short names do not cause tailmix to infer or install a search domain.
+- A configured search domain is installed only when it is equal to or below
+  exactly one active profile's authoritative MagicDNS suffix.
+- Search-domain order is explicit administrator policy. Short-name expansion
+  and collisions follow the host resolver's normal search-list behavior;
+  tailmix does not pick a profile by priority.
+- Configured domains without a current authoritative route remain desired but
+  are not installed.
 - DNS answers for node names return effective IPs.
 - DNS answers must be specific enough to map to exactly one profile.
 
@@ -237,8 +245,9 @@ domains. The daemon serves each socket through `ipnserver`, so peer credentials
 and `OperatorUser` permissions are evaluated in the same request path as
 `tailscaled`.
 
-Aggregate lifecycle commands use `tailmix profiles ...` and a separate
-multi-profile API. They must not silently pick one profile.
+Aggregate lifecycle commands use `tailmix profiles ...`, DNS search policy uses
+`tailmix dns search ...`, and both use a separate multi-profile API. They must
+not silently pick one profile.
 
 Core objects:
 
@@ -270,6 +279,7 @@ Persistent daemon state includes:
 - Profile definitions and local profile names.
 - Effective-IP leases and allocator metadata.
 - DNS/profile metadata for explicit resolution.
+- Ordered desired OS search domains.
 - Exit-node/default-route selection.
 - Multi-tailnet-layer preferences.
 
@@ -304,7 +314,10 @@ Core contract tests:
 - Effective IPs do not leak into profile engine identity, peer identity, netmap, or ACL-visible packet metadata.
 - Inbound policy remains evaluated by the receiving profile/tailnet.
 - Shields-up blocks inbound for one profile without blocking another.
-- Unqualified MagicDNS names fail in multi-tailnet mode.
+- Unqualified MagicDNS names fail when no search domains are configured.
+- Explicitly configured, actively routed search domains are installed in the
+  requested order and allow normal OS short-name expansion.
+- Search domains without an active authoritative route are not installed.
 - Tailnet-qualified names resolve to effective IPs.
 - Removing or restarting one profile does not disrupt the others.
 - One explicitly selected exit node/default route is active at a time.
@@ -317,7 +330,9 @@ Manual/system tests:
 - Verify ordinary local tools can reach nodes in both tailnets concurrently.
 - Verify an inbound local listener is reachable from both tailnets.
 - Enable shields-up on one profile and verify inbound is blocked only there.
-- Verify OS DNS has no tailnet search domains.
+- Verify OS DNS has no tailnet search domains by default.
+- Configure and clear selected search domains without restarting the daemon,
+  and verify OS DNS tracks only the installed subset.
 - Verify host-admin forwarding/NAT is not blocked by the daemon.
 
 ## Open Implementation Risks
