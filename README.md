@@ -106,7 +106,7 @@ Exit nodes are not yet supported.
 
 - [Linux service setup and troubleshooting](docs/linux-install.md)
 - [Profile, route, and DNS command reference](docs/profile-management.md)
-- [Architecture](docs/architecture.html)
+- [Architecture](docs/architecture.md)
 - [Development workflows](DEVELOPMENT.md)
 
 ## License
