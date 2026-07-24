@@ -24,6 +24,16 @@ tailmix profiles disable <name>
 tailmix profiles restart <name>
 tailmix profiles remove <name> [--purge --yes]
 
+tailmix routes list [--available]
+tailmix routes bind --profile <name> <prefix>...
+tailmix routes unbind <prefix>...
+tailmix routes set --profile <name> --accept-all=<true|false>
+
+tailmix dns routes list [--available]
+tailmix dns routes bind --profile <name> <domain>...
+tailmix dns routes unbind <domain>...
+tailmix dns routes set --profile <name> --accept-all=<true|false>
+
 tailmix dns search list
 tailmix dns search set <domain>...
 tailmix dns search add <domain>...
@@ -53,6 +63,11 @@ or removing a profile must not restart the daemon or disrupt other profiles.
 - Persist every successful requested configuration change.
 - Give tailmix commands, local profile names, advertised hostnames, and
   tailnet-provided DNS names distinct naming domains.
+- Accept selected advertised IP routes and pin each destination prefix to one
+  profile.
+- Pin selected DNS suffixes to one profile's MagicDNS or split-DNS route.
+- Optionally follow every current and future IP or DNS route advertised by a
+  selected profile.
 - Change the ordered OS search-domain policy without restarting the daemon.
 - Report profiles that are disabled, starting, awaiting login, running, or
   failed without blocking on them.
@@ -68,6 +83,9 @@ or removing a profile must not restart the daemon or disrupt other profiles.
 - Automatically delete a removed profile's identity or effective-IP leases.
 - Provide remote profile administration.
 - Make global address-pool changes live in the first version.
+- Infer application or app-connector routes from DNS answers. A DNS route
+  binding selects where DNS queries go; returned traffic still follows the IP
+  route table.
 - Guarantee uninterrupted flows through the profile being stopped or
   restarted. Other profiles must remain uninterrupted.
 
@@ -79,17 +97,19 @@ The first positional token always names a command namespace, never a profile:
 
 ```text
 tailmix profiles <lifecycle-command> [arguments]
+tailmix routes <policy-command> [arguments]
+tailmix dns routes <policy-command> [arguments]
 tailmix dns search <policy-command> [arguments]
 tailmix {tailscale|ts} --profile <name> <tailscale-subcommand> [arguments]
 ```
 
 `profiles` owns tailmix lifecycle operations. `tailscale` delegates to the
 selected profile's upstream Tailscale CLI, and `ts` is its exact alias. A
-profile name appears only as an operand or the value of `--profile`. `dns`
-owns daemon-wide DNS policy, and search-domain operands occupy only domain
-positions. Profile names and DNS domains can therefore never collide with
-`profiles`, `dns`, `tailscale`, `ts`, an upstream subcommand, or a future
-tailmix command.
+profile name appears only as an operand or the value of `--profile`. `routes`
+owns daemon-wide IP route policy. `dns routes` owns DNS query routing, while
+`dns search` owns the ordered OS search list. Prefixes and DNS domains therefore
+occupy only resource positions and cannot collide with profile or command
+names.
 
 The current `tailmix work status` form is intentionally not part of the target
 grammar. A release may recognize it solely to print a deprecation error with
@@ -139,6 +159,142 @@ DNS-normalized, appended to a tailnet suffix, or used to derive the advertised
 hostname. Default state directories and socket paths derive from the opaque
 profile ID, so a filesystem name is not another implicit user-facing identity.
 
+### IP route bindings
+
+An IP route binding says both which advertised subnet route to accept and which
+profile must carry it. There is no daemon-wide `accept-routes` boolean:
+
+```text
+tailmix routes list [--available] [--json]
+tailmix routes bind --profile <name> <prefix>... [--replace] [--json]
+tailmix routes unbind <prefix>... [--profile <name>] [--json]
+tailmix routes set --profile <name> --accept-all=<true|false> [--json]
+```
+
+`bind` atomically records every normalized prefix against the selected
+profile's stable ID. Repeating the same binding is a successful no-op. Binding
+an already-bound prefix to another profile returns a conflict unless
+`--replace` is present, making a re-pin intentional. `unbind` is idempotent;
+its optional profile is a precondition that prevents removing a binding that
+has since been re-pinned.
+
+`set --accept-all=true` adds a persistent profile-wide import policy. It
+accepts every current approved primary subnet route from that profile and
+automatically follows routes added later. Setting it to `false` stops following
+the profile without removing any exact bindings. Direct peer reachability is
+unchanged, and exit-node default routes remain separate.
+
+`list` reports desired and observed state. With `--available`, it instead shows
+the approved, primary subnet routes currently observed in each profile's
+netmap, including routes that have not been bound:
+
+```text
+PREFIX          PROFILE  POLICY      ADVERTISED BY  STATE
+10.20.0.0/16    work     bound       router-a       installed
+10.30.0.0/16    lab      bound                      waiting-for-route
+10.40.0.0/16    work     accept-all  router-b       installed
+```
+
+A binding becomes installed only while the selected profile is active and its
+netmap has an approved primary subnet route that contains the requested
+prefix. Allowing a more-specific prefix lets an operator accept only part of an
+advertised route. Default routes are excluded because exit-node selection is a
+separate policy. Prefixes that overlap tailmix's effective-IP pools, host NAT
+addresses, or other daemon-reserved ranges are rejected.
+
+An exact prefix has only one binding, but different bindings may overlap.
+Longest-prefix match is deterministic, so `10.0.0.0/8` may use `work` while
+`10.20.0.0/16` uses `lab`. Within the selected profile, the Tailscale control
+plane still chooses the primary subnet-router peer and may fail over between
+eligible routers. The binding pins a tailnet profile, not an individual peer.
+
+Exact bindings are authoritative overrides of profile-wide imports. Lookup
+first uses longest-prefix match among desired exact bindings. If that binding
+is waiting, the destination fails closed; only when no exact binding matches
+does lookup use longest-prefix match among imported routes. Imported routes
+from multiple accept-all profiles may overlap, but an identical prefix from
+more than one profile is left uninstalled as `ambiguous-route` until an exact
+binding selects one.
+
+If the route is withdrawn or the profile becomes unavailable, tailmix removes
+the host route and packet mapping but retains the desired binding as
+`waiting-for-route`. It is restored automatically when the same stable profile
+can serve it again. A binding implies acceptance: tailmix ensures the profile
+engine accepts the covering route while it is needed. That internal preference
+is only a transport mechanism and does not expose any unbound route to the
+host.
+
+### DNS route bindings
+
+A DNS route binding sends queries for a suffix through one selected profile:
+
+```text
+tailmix dns routes list [--available] [--json]
+tailmix dns routes bind --profile <name> <domain>... [--replace] [--json]
+tailmix dns routes unbind <domain>... [--profile <name>] [--json]
+tailmix dns routes set --profile <name> --accept-all=<true|false> [--json]
+```
+
+The mutation and precondition behavior matches IP route bindings. Domains are
+normalized to lowercase suffixes without a trailing dot. An exact suffix has
+one binding, nested suffixes may bind different profiles, and DNS
+longest-suffix match selects the most-specific binding.
+The root suffix `.` is a valid DNS route binding for a profile's default
+resolver route, but it is not a valid search domain.
+
+`set --accept-all=true` follows the profile's complete current and future DNS
+route configuration: its MagicDNS suffix, split-DNS routes, and Tailscale's
+configured default/fallback resolver behavior. It does not import the profile's
+search domains; `tailmix dns search` remains the only way to change the OS
+search list. Setting the flag to `false` removes only the profile-wide import
+policy and retains exact suffix bindings.
+
+Each active profile contributes observed DNS capabilities from its netmap:
+
+- Its MagicDNS suffix, which tailmix can answer from that profile's node data.
+- Its split-DNS routes and resolver descriptors, which tailmix can forward
+  through that profile.
+
+A binding is installed only when the selected profile currently has an equal
+or covering DNS route. A more-specific binding can therefore select a subtree
+of an advertised split-DNS suffix. If the capability disappears, the binding
+remains desired with `waiting-for-route` state and no other profile is chosen.
+
+Human-readable status distinguishes policy, source, and realization:
+
+```text
+DOMAIN                PROFILE  SOURCE     POLICY     STATE
+work.example.ts.net   work     magicdns   automatic  installed
+corp.example.com      work     split-dns  bound      installed
+internal.example.com  work     split-dns  accept-all installed
+lab.example.com       lab                  bound      waiting-for-route
+```
+
+DNS selection uses three policy tiers. It first uses longest-suffix match among
+desired exact bindings; a waiting result fails closed. Only with no matching
+exact binding does it consider routes imported from accept-all profiles, then
+automatic MagicDNS routes. Identical imported suffixes from multiple profiles
+are `ambiguous-route` and are not installed until an exact binding selects one.
+
+For compatibility, an otherwise unbound and unimported MagicDNS suffix is
+routed automatically only when exactly one active profile is authoritative for
+it. Ambiguous MagicDNS suffixes require an exact binding or one unambiguous
+accept-all import. Split-DNS and default resolver routes are never imported
+automatically.
+
+Forwarding must use a profile-scoped DNS path. Installing a private resolver IP
+directly in a shared host resolver is insufficient because identical resolver
+addresses may be reachable in several tailnets. The aggregate DNS service
+therefore selects the binding by suffix and invokes a resolver/forwarder whose
+dials enter the selected profile engine. It must preserve upstream UDP, TCP,
+and DNS-over-HTTPS behavior rather than assuming every resolver is a plain UDP
+address.
+
+This policy routes DNS queries, not arbitrary application connections by
+hostname. MagicDNS node answers contain effective IPs. Addresses returned by
+split DNS follow the host's IP routing policy; reaching one through a tailnet
+requires a corresponding installed IP route binding or accept-all import.
+
 ### DNS search domains
 
 Search domains are daemon-wide ordered policy, not profile names or aliases.
@@ -158,11 +314,12 @@ domains that are not already present, `remove` is an idempotent removal, and
 normalized to lowercase fully qualified suffixes stored without a trailing
 dot. Duplicates are removed while preserving the first occurrence.
 
-A desired search domain is installed only while it is equal to or below
-exactly one active profile's MagicDNS suffix. This matters because on systems
-such as Linux with `systemd-resolved`, a search domain also routes matching
-queries to tailmix's DNS service. tailmix must not capture an arbitrary suffix
-that it cannot answer authoritatively.
+A desired search domain is installed only while it is equal to or below one
+effective DNS route, whether that route is an explicit binding or an
+unambiguous automatic MagicDNS route. This matters because on systems such as
+Linux with `systemd-resolved`, a search domain also routes matching queries to
+tailmix's DNS service. tailmix must not capture an arbitrary suffix without a
+known query path.
 
 Desired domains that are not currently covered remain persisted but have
 `waiting-for-route` state. They are installed automatically if a profile later
@@ -215,6 +372,8 @@ The result includes:
 - Runtime state and last lifecycle error.
 - Tailscale backend state, login URL, tailnet suffix, self DNS name and
   addresses, peer count, and shields-up state when available.
+- Approved primary subnet routes and observed DNS routes, plus the IP and DNS
+  bindings pinned to the profile.
 - The profile LocalAPI socket path when the engine is running.
 
 An auth key is never returned.
@@ -321,15 +480,19 @@ Removed definitions are omitted from `profiles list` unless `--all` is used.
 creating a new identity.
 
 If the profile is the selected exit-node profile, removal also clears that
-selection.
+selection. IP route bindings, DNS route bindings, and the profile's accept-all
+flags retain the stable profile ID and become `waiting-for-profile`, so
+resurrecting the profile restores its policy without a rename-sensitive
+rewrite.
 
 `--purge` additionally deletes only that profile's resolved state directory and
 effective-IP leases. It requires an interactive confirmation, or `--yes` for
-non-interactive use. The daemon must reject purge if the state directory is
-empty, is a parent of the daemon state file, is shared by another profile, or
-does not resolve beneath an explicitly allowed profile-state root. Partial
-purge failure leaves the profile removed but reports which retained data could
-not be deleted.
+non-interactive use. The daemon must reject purge while any IP or DNS route
+binding refers to the profile; the operator must unbind those resources first.
+It must also reject purge if the state directory is empty, is a parent of the
+daemon state file, is shared by another profile, or does not resolve beneath an
+explicitly allowed profile-state root. Partial purge failure leaves the profile
+removed but reports which retained data could not be deleted.
 
 ## Exit status and errors
 
@@ -352,7 +515,9 @@ API errors have stable machine-readable codes:
 
 Initial codes should include `invalid_request`, `profile_exists`,
 `profile_not_found`, `profile_disabled`, `transition_in_progress`,
-`invalid_dns_name`, `permission_denied`, `runtime_start_failed`,
+`invalid_prefix`, `route_binding_conflict`, `invalid_dns_name`,
+`dns_route_binding_conflict`, `binding_profile_mismatch`,
+`profile_has_bindings`, `permission_denied`, `runtime_start_failed`,
 `dns_configuration_failed`, `reconcile_failed`, and `purge_failed`.
 
 ## Daemon control API
@@ -386,6 +551,18 @@ POST   /v1/profiles/by-name/{escaped-profile-name}/disable
 POST   /v1/profiles/by-name/{escaped-profile-name}/restart
 DELETE /v1/profiles/by-name/{escaped-profile-name}?purge=false
 
+GET    /v1/routes
+PUT    /v1/routes
+PATCH  /v1/routes
+DELETE /v1/routes
+GET    /v1/routes/available
+
+GET    /v1/dns/routes
+PUT    /v1/dns/routes
+PATCH  /v1/dns/routes
+DELETE /v1/dns/routes
+GET    /v1/dns/routes/available
+
 GET    /v1/dns/search-domains
 PUT    /v1/dns/search-domains
 PATCH  /v1/dns/search-domains
@@ -407,6 +584,8 @@ The profile resource separates desired state from observed state:
   "controlUrl": "",
   "enabled": true,
   "removed": false,
+  "acceptAllRoutes": true,
+  "acceptAllDnsRoutes": true,
   "runtimeState": "running",
   "backendState": "Running",
   "magicDnsSuffix": "example.ts.net",
@@ -423,6 +602,57 @@ The profile resource separates desired state from observed state:
 `runtimeState` is one of `disabled`, `starting`, `needs-login`, `running`,
 `stopping`, or `error`. It is tailmix lifecycle state; `backendState` is the
 profile's upstream Tailscale state.
+
+IP and DNS route resources report the persisted binding and its current
+realization together:
+
+```json
+{
+  "acceptAllProfiles": [{
+    "profileId": "p_01k2x7vq3c8m",
+    "profileName": "work",
+    "state": "installed"
+  }],
+  "bindings": [{
+    "prefix": "10.20.0.0/16",
+    "profileId": "p_01k2x7vq3c8m",
+    "profileName": "work",
+    "state": "installed",
+    "coveringRoute": "10.20.0.0/16",
+    "primaryRouter": "router-a"
+  }]
+}
+```
+
+```json
+{
+  "acceptAllProfiles": [{
+    "profileId": "p_01k2x7vq3c8m",
+    "profileName": "work",
+    "state": "installed"
+  }],
+  "bindings": [{
+    "domain": "corp.example.com",
+    "profileId": "p_01k2x7vq3c8m",
+    "profileName": "work",
+    "state": "installed",
+    "coveringRoute": "corp.example.com",
+    "source": "split-dns"
+  }]
+}
+```
+
+Waiting bindings use `state: "waiting"` and a stable `reason`, including
+`profile_unavailable`, `route_not_advertised`, `dns_route_not_advertised`, or
+`host_route_conflict`. The `available` resources are observational snapshots
+grouped by profile and do not mutate policy.
+
+For both binding resources, `PUT` atomically replaces the complete desired
+binding table and accept-all profile set. `PATCH` accepts atomic `bind` and
+`unbind` arrays, an explicit `replace` flag, and an `acceptAll` map from profile
+name to boolean. `DELETE` clears exact bindings and accept-all policy. Mutation
+entries use a profile name; the daemon resolves it under the lifecycle lock and
+persists the stable profile ID. Profile renames therefore change display only.
 
 The search-domain resource reports desired and observed state separately:
 
@@ -441,10 +671,10 @@ The search-domain resource reports desired and observed state separately:
 }
 ```
 
-`PUT` atomically replaces `desired`. `PATCH` accepts `add` and `remove` arrays
-and applies them atomically to the current list. `DELETE` clears the list.
-Every mutation persists desired state and completes DNS reconciliation before
-returning.
+For search domains, `PUT` atomically replaces `desired`. `PATCH` accepts `add`
+and `remove` arrays and applies them atomically to the current list. `DELETE`
+clears the list. Every routing-policy mutation persists desired state and
+completes aggregate route and DNS reconciliation before returning.
 
 ## Runtime design
 
@@ -484,9 +714,16 @@ bringing the profile up or blocking.
 
 Aggregate status must return a result per profile, including a per-profile
 error, instead of failing the entire snapshot when one profile is unhealthy.
-Only enabled profiles with a usable netmap, self address, and MagicDNS suffix
-participate in the aggregate route and DNS plan. A profile in `needs-login` or
+Capability readiness is evaluated separately: direct peer and subnet routing
+need a usable netmap and self address, MagicDNS needs node data and a suffix,
+and split DNS needs a usable netmap DNS configuration. A profile without one
+capability can still contribute the others. A profile in `needs-login` or
 `error` remains inspectable and does not take down healthy profiles.
+
+The passive snapshot must include approved primary subnet routes and the
+netmap's DNS route map and resolver descriptors. These observations are not
+persisted as policy; they are inputs used to decide whether desired bindings
+can currently be installed.
 
 Zero profiles is a valid steady state. The daemon control socket and selected
 networking mode remain available after the last profile is removed, with an
@@ -510,11 +747,22 @@ than terminating the daemon.
 
 ### Dynamic DNS policy
 
-The supervisor owns the desired search-domain list and derives the installed
-subset during every aggregate reconciliation. Coverage is checked against the
-same active authoritative domains used to build MagicDNS routes. No active
-covering route produces `no_active_route`; more than one produces
-`ambiguous_route`.
+The supervisor owns exact DNS route bindings, profile-wide accept-all flags,
+and the desired search-domain list. It builds a tiered longest-suffix-match DNS
+plan from exact bindings, routes imported from accept-all profiles, and
+unambiguous automatic MagicDNS routes. The most-specific desired exact binding
+acts as either an installed route or a fail-closed waiting barrier. A lower
+tier is considered only when no exact binding matches.
+
+MagicDNS routes terminate in tailmix's aggregate authoritative resolver.
+Split-DNS and accepted default/fallback resolution terminate in profile-scoped
+forwarders that reuse Tailscale's resolver behavior with dials bound to the
+selected engine. A single shared dialer cannot be used because resolver IPs can
+overlap between profiles.
+
+The installed search-domain subset is derived from that effective DNS plan.
+No covering DNS route produces `no_active_route`; an unresolved automatic
+MagicDNS conflict produces `ambiguous_route`.
 
 The DNS service configuration carries domains, records, and search domains
 together. Its live `Configure` operation validates the complete next
@@ -522,6 +770,39 @@ configuration before calling the Tailscale DNS manager, so a failed search
 policy update cannot partially replace routes or records. Installed domains
 retain desired-list order even though authoritative route tables are otherwise
 sorted for determinism.
+
+### Dynamic IP route policy
+
+The supervisor expands each active accept-all profile into its current approved
+primary subnet routes, then validates exact IP bindings against each selected
+profile's routes. It excludes direct Tailscale addresses and `/0` exit routes.
+An exact requested prefix is usable when it is equal to or more specific than
+an observed route. Expansion happens on every relevant netmap update, so future
+advertisements are followed without changing persisted state.
+
+The installed prefix table records a policy tier and route kind:
+
+```text
+effective peer address -> profile + canonical peer address
+accepted subnet prefix -> profile, destination preserved
+```
+
+Lookup uses longest-prefix match over desired exact bindings before considering
+the imported tier. A waiting exact binding is a fail-closed barrier. An exact
+duplicate imported from multiple profiles is omitted as ambiguous rather than
+relying on profile iteration order.
+
+For a subnet packet, the outbound mapper selects the profile, translates the
+shared host source to that profile's self address, and preserves the
+destination for the profile engine. On return, it preserves the subnet source
+and translates the profile self destination back to the shared host address.
+Inbound subnet packets are admitted only when longest-prefix match pins their
+source to the profile on which they arrived.
+
+The selected profile engine may internally accept a covering route, but the
+host receives only exact-bound prefixes and routes materialized by accept-all
+policy. Those daemon policies remain authoritative even if the delegated
+profile-local CLI changes its broad `accept-routes` preference.
 
 ### Dynamic TUN membership
 
@@ -548,7 +829,11 @@ and isolated where possible. Host TUN failure remains global.
 The current SOCKS router is immutable. The SOCKS server should hold an atomic
 pointer to a newly validated router snapshot. New connections use the latest
 snapshot; established connections continue through their selected engine until
-they close or that profile is stopped.
+they close or that profile is stopped. IP destinations consult the same
+effective-peer and bound-prefix table as TUN mode. Domain destinations use the
+DNS plan for resolution, then the resolved address must still select an
+effective peer, installed IP binding, or accept-all import; a DNS binding alone
+does not authorize an application route.
 
 ### Aggregate reconciliation
 
@@ -559,9 +844,10 @@ immutable aggregate plan from:
 persisted desired state + passive healthy profile snapshots + retained leases
 ```
 
-The plan includes effective-IP leases, packet mappings, host routes, DNS
-domains, records, installed search domains, and the SOCKS routing snapshot. It
-is fully validated before any live component changes.
+The plan includes effective-IP leases, direct-peer and bound-subnet packet
+mappings, host routes, DNS bindings and profile forwarders, records, installed
+search domains, and the SOCKS routing snapshot. It is fully validated before
+any live component changes.
 
 Removing or disabling a profile follows this order:
 
@@ -594,7 +880,19 @@ configuration:
 ```go
 type State struct {
     // Existing fields...
+    IPRouteBindings []IPRouteBinding `json:"ipRouteBindings,omitempty"`
+    DNSRouteBindings []DNSRouteBinding `json:"dnsRouteBindings,omitempty"`
     SearchDomains []string `json:"searchDomains,omitempty"`
+}
+
+type IPRouteBinding struct {
+    Prefix string `json:"prefix"`
+    ProfileID string `json:"profileId"`
+}
+
+type DNSRouteBinding struct {
+    Domain string `json:"domain"`
+    ProfileID string `json:"profileId"`
 }
 
 type Profile struct {
@@ -602,6 +900,8 @@ type Profile struct {
     Name string `json:"name"`
     Disabled bool `json:"disabled,omitempty"`
     Removed bool `json:"removed,omitempty"`
+    AcceptAllRoutes bool `json:"acceptAllRoutes,omitempty"`
+    AcceptAllDNSRoutes bool `json:"acceptAllDnsRoutes,omitempty"`
     // Existing engine configuration fields...
 }
 ```
@@ -613,9 +913,16 @@ enabled after upgrade. A removed profile remains as a tombstone until purge so
 its ID, state directory, and leases can be recovered. Runtime state and errors
 are observational and are not persisted.
 
-`SearchDomains` is the normalized desired order. Installed and waiting state is
-derived from it and the active profile routes, so those observations are not
-persisted.
+Route binding slices are normalized desired policy keyed by stable profile ID;
+profile names are never persisted in a binding. Exact prefixes and domains are
+unique, and slices are serialized in canonical order for stable diffs.
+Accept-all flags live on the stable profile definition and survive rename,
+disable, reversible removal, resurrection, and daemon restart. They default to
+false during migration, so an upgrade never begins importing subnet or
+split-DNS routes.
+`SearchDomains` is the normalized desired order. Installed, available, and
+waiting state is derived from desired policy plus live profile observations, so
+those observations are not persisted.
 
 The daemon remains the only state writer after startup. Startup `--profile`
 flags can remain as a compatibility bootstrap, but should be documented as
@@ -639,12 +946,24 @@ Auth key material is never added to `state.State`.
 
 - Make LocalAPI servers, TUN mux membership, and SOCKS router snapshots dynamic.
 - Add `profiles add`, `enable`, `disable`, `restart`, and non-purging `remove`.
-- Add `dns search` commands and control endpoints.
-- Carry the filtered search-domain list through aggregate planning and the DNS
-  service's live configuration.
 - Reconcile incomplete and failed profiles without global failure.
 
-### Slice 3: configuration and destructive cleanup
+### Slice 3: live routing policy
+
+- Expose approved primary subnet routes and netmap DNS routes in passive profile
+  snapshots.
+- Add IP route binding commands, resources, longest-prefix matching, and
+  dynamic host-route installation.
+- Add DNS route binding commands, resources, longest-suffix matching, and
+  profile-scoped DNS forwarding.
+- Add profile-wide accept-all flags that continuously import current and future
+  IP or DNS routes without importing search domains.
+- Add `dns search` commands and control endpoints, deriving installation from
+  the effective DNS route plan.
+- Carry all three policies through TUN, SOCKS, and DNS aggregate
+  reconciliation without restarting a profile.
+
+### Slice 4: configuration and destructive cleanup
 
 - Add `profiles rename` and `set`.
 - Add guarded `remove --purge`.
@@ -661,10 +980,36 @@ Unit tests should cover:
 - Profile-name changes preserving stable ID, leases, state path, and socket.
 - Profile names never being DNS-normalized or used as device hostnames.
 - Human and JSON output from the same API resource.
+- IP prefix normalization, atomic bind/unbind, intentional re-pinning, and
+  optional-profile unbind preconditions.
+- Enabling and disabling accept-all without removing exact bindings, including
+  automatic import and withdrawal after netmap updates.
+- Binding persistence by stable profile ID across profile rename, disable,
+  removal, resurrection, and daemon restart.
+- Installation only when a selected profile has an approved covering primary
+  subnet route; withdrawn routes remain desired and fail closed.
+- Longest-prefix selection for overlapping bindings to different profiles,
+  including inbound source/profile validation.
+- Exclusion of default routes and daemon-reserved address ranges.
+- No unbound subnet route becoming host-reachable when a profile engine
+  internally enables accept-routes.
+- Exact IP bindings overriding accept-all imports, with identical imports from
+  multiple profiles failing as ambiguous.
+- DNS suffix normalization, atomic bind/unbind, and longest-suffix selection
+  for nested bindings to different profiles.
+- Automatic routing only for unambiguous MagicDNS suffixes, with ambiguous
+  suffixes waiting for an explicit binding.
+- Split-DNS routes requiring an exact binding or accept-all policy and
+  forwarding UDP, TCP, and DoH through the selected profile even when resolver
+  IPs overlap.
+- DNS accept-all importing MagicDNS, split, and default/fallback resolution but
+  never the profile's search-domain list.
+- Exact DNS bindings overriding accept-all imports, with identical imports from
+  multiple profiles failing as ambiguous.
+- DNS bindings not creating application routes for returned IP addresses.
 - Search-domain normalization, stable ordering, deduplication, and atomic
   set/add/remove/clear operations.
-- Installation only for domains covered by exactly one active authoritative
-  MagicDNS suffix.
+- Search-domain installation only when covered by an effective DNS route.
 - Automatic withdrawal and restoration as the covering profile stops and
   starts, without changing desired policy.
 - OS DNS configuration receiving search and match domains as separate fields.
@@ -691,6 +1036,16 @@ Integration tests should start two fake profile engines and prove:
 5. Restarting the daemon reproduces the last requested enabled/disabled set.
 6. Updating search domains changes OS DNS configuration without restarting the
    daemon or any profile.
+7. Binding overlapping private prefixes to different profiles routes each
+   destination by longest prefix and withdraws only the affected binding when
+   an advertisement disappears.
+8. Binding the same split-DNS suffix to one of two tailnets with overlapping
+   resolver addresses sends queries only through the selected profile.
+9. Renaming a profile leaves its IP and DNS bindings installed under the new
+   display name.
+10. Enabling accept-all on one profile follows newly advertised subnet and DNS
+    routes live; disabling it withdraws only imported routes and keeps exact
+    bindings.
 
 The final validation target is:
 

@@ -10,8 +10,9 @@ The core contract is that there is no active-tailnet switch. If three tailnets a
 
 ## Non-Goals For V1
 
-- Do not support overlapping advertised subnet route remapping.
-- Do not define app connector route conflict semantics unless they reduce to direct node reachability.
+- Do not accept advertised subnet routes or split-DNS routes without explicit
+  daemon policy.
+- Do not infer application or app-connector routes from DNS answers.
 - Do not install OS search domains implicitly from the active profile set.
 - Do not expose an unqualified, ambiguous single-tailnet CLI target.
 - Do not install anti-bridging firewall rules.
@@ -33,7 +34,8 @@ The daemon owns:
 - Profile orchestration.
 - Effective IP allocation and persistence.
 - Effective-IP-to-profile packet routing.
-- Explicit DNS resolution behavior.
+- Explicit IP route acceptance and profile pinning.
+- Explicit DNS query routing and search-domain behavior.
 - Profile selection and per-profile LocalAPI socket orchestration.
 - Exit-node/default-route selection.
 
@@ -48,19 +50,27 @@ Each `tsnet` profile engine owns:
 - Tailnet transport behavior for that profile.
 - Native LocalAPI behavior, credentials, and operator permissions.
 
-Outbound packet flow:
+Outbound packet flow supports direct peers and accepted subnets:
 
-1. A local process sends traffic to an effective IP.
+1. A local process sends traffic to an effective peer IP or an explicitly
+   accepted subnet destination.
 2. The OS routes that traffic to the shared daemon-owned TUN.
-3. A BART longest-prefix-match table maps the effective destination IP to one `(profile, canonical peer IP)`.
-4. The daemon SNATs the shared host NAT address to that profile's canonical self address and translates the effective destination to the canonical peer address.
+3. A BART longest-prefix-match table maps the destination to a profile and
+   route kind.
+4. The daemon SNATs the shared host NAT address to that profile's canonical
+   self address. It translates a direct peer's effective destination to its
+   canonical address, but preserves a subnet destination.
 5. The packet enters the selected `tsnet` engine's packet path.
 6. The selected profile engine sends the packet through its normal Tailscale transport.
 
 Inbound packet flow:
 
 1. A profile engine receives canonical tailnet traffic for its local profile identity.
-2. A per-profile BART table maps the canonical peer source to its stable effective address, and the daemon DNATs the canonical self destination to the shared host NAT address.
+2. A per-profile BART table maps a canonical peer source to its stable
+   effective address. An accepted subnet source remains unchanged and is
+   admitted only if longest-prefix match pins it to the receiving profile.
+   The daemon DNATs the canonical self destination to the shared host NAT
+   address.
 3. The packet is injected toward the host through the shared TUN/listener path.
 4. Local OS firewall and listener behavior apply normally.
 
@@ -147,23 +157,47 @@ Consequences:
 ## DNS And Names
 
 Multi-tailnet mode installs no OS search domains by default. The administrator
-may configure an explicit ordered list at runtime.
+may configure an explicit ordered list at runtime. DNS query routing is a
+separate suffix-to-profile policy.
 
 Rules:
 
 - Unqualified MagicDNS names like `db` fail while the search-domain list is
   empty.
-- Exact DNS names identify the target tailnet explicitly.
+- A DNS route binding maps a normalized suffix to one stable profile ID.
+- The root suffix `.` may bind a profile's default resolver route; it is not a
+  valid OS search domain.
+- Exact suffixes have one binding; overlapping suffixes use longest-suffix
+  match, so a subtree can be pinned to another profile.
+- A profile-wide DNS accept-all flag continuously imports that profile's
+  MagicDNS, split-DNS, and default/fallback resolver behavior, including routes
+  advertised later. It never imports search domains.
+- A binding is installed only while the selected profile reports an equal or
+  covering MagicDNS or split-DNS route. Otherwise it remains desired and no
+  other profile is substituted.
+- Selection uses longest-suffix match in policy order: desired exact bindings,
+  routes imported from accept-all profiles, then automatic MagicDNS routes. A
+  waiting exact binding fails closed rather than falling through.
+- Identical imports from several profiles fail closed until an exact binding
+  selects one.
+- An otherwise unbound and unimported MagicDNS suffix is installed
+  automatically only when exactly one active profile is authoritative for it.
+  Split-DNS and default resolver routes are not imported automatically.
+- Split-DNS queries use a profile-scoped forwarder. Resolver addresses cannot
+  be installed through a shared dialer because private resolver IPs may overlap
+  across tailnets.
 - Unique short names do not cause tailmix to infer or install a search domain.
 - A configured search domain is installed only when it is equal to or below
-  exactly one active profile's authoritative MagicDNS suffix.
+  an effective DNS route.
 - Search-domain order is explicit administrator policy. Short-name expansion
   and collisions follow the host resolver's normal search-list behavior;
   tailmix does not pick a profile by priority.
-- Configured domains without a current authoritative route remain desired but
+- Configured domains without a current DNS route remain desired but
   are not installed.
 - DNS answers for node names return effective IPs.
-- DNS answers must be specific enough to map to exactly one profile.
+- Addresses returned by split DNS follow ordinary host IP routing. A
+  destination that must traverse a tailnet needs a separate IP route policy;
+  DNS bindings do not create application or app-connector routes.
 
 Expected DNS-shaped names include upstream-style fully qualified names:
 
@@ -181,25 +215,47 @@ Those selectors are CLI/API conveniences, not OS search-domain behavior.
 
 In the userspace SOCKS milestone, SOCKS destinations are intentionally stricter:
 
-- MagicDNS FQDNs are allowed and select the profile whose running tailnet reports that MagicDNS suffix.
+- MagicDNS FQDNs are allowed when the effective DNS plan selects one profile.
 - Synthetic effective IP literals are allowed when they appear in the local effective-IP lease table.
+- IP literals covered by installed exact or accept-all subnet policy select its
+  profile.
 - Canonical Tailscale IP literals are rejected, even when a canonical IP is unique.
 - Unqualified names are rejected.
 - UDP ASSOCIATE is out of scope for the first SOCKS milestone.
 
 ## Routing And Exit Nodes
 
-The daemon installs enough local routing for effective node IPs from all active profiles to be reachable at the same time.
+The daemon installs routes for effective node IPs and for explicitly accepted
+subnet prefixes. An IP route binding maps a destination prefix to one stable
+profile ID.
 
 Rules:
 
 - All active tailnet node peers are reachable concurrently through effective IPs.
 - Route lookup maps each effective IP to exactly one profile and canonical node.
+- A subnet binding is installed only while the selected profile reports an
+  approved primary advertised route equal to or covering the requested prefix.
+  A narrower binding can accept only part of an advertisement.
+- A profile-wide route accept-all flag continuously imports every approved
+  non-default subnet route from that profile, including later advertisements.
+- Exact prefixes have one binding. Overlapping bindings are allowed and use
+  longest-prefix match, so `10.0.0.0/8` and `10.20.0.0/16` may be pinned to
+  different profiles.
+- Lookup first uses longest-prefix match among desired exact bindings, then
+  among accept-all imports. A waiting exact binding fails closed rather than
+  falling through. Identical imports from several profiles fail closed until an
+  exact binding selects one.
+- The binding selects a tailnet profile, not a subnet-router peer. The selected
+  tailnet's control plane chooses and may fail over its primary router.
+- A withdrawn route or unavailable profile withdraws the host route but leaves
+  the desired binding waiting. No other profile is selected automatically.
+- The profile engine may accept a covering route internally, but the host sees
+  only exact-bound prefixes and routes imported by accept-all policy.
+- Default routes are excluded from subnet bindings and remain governed by the
+  exit-node policy below.
 - The daemon does not install anti-bridging rules.
 - The daemon does not automatically forward packets between tailnets.
 - Host-admin forwarding, NAT, and proxying are ordinary host networking outside v1 semantics.
-- Advertised subnet routes are out of scope.
-- Overlapping subnet route handling is out of scope.
 
 Exit/default route behavior:
 
@@ -245,9 +301,20 @@ domains. The daemon serves each socket through `ipnserver`, so peer credentials
 and `OperatorUser` permissions are evaluated in the same request path as
 `tailscaled`.
 
-Aggregate lifecycle commands use `tailmix profiles ...`, DNS search policy uses
-`tailmix dns search ...`, and both use a separate multi-profile API. They must
-not silently pick one profile.
+Aggregate lifecycle commands use `tailmix profiles ...`; IP route bindings use
+`tailmix routes ...`; and DNS bindings and search policy use
+`tailmix dns routes ...` and `tailmix dns search ...`. All use a separate
+multi-profile API and must not silently pick one profile.
+
+Profile-wide imports are explicit live policy:
+
+```text
+tailmix routes set --profile <name> --accept-all=<true|false>
+tailmix dns routes set --profile <name> --accept-all=<true|false>
+```
+
+Disabling accept-all withdraws imported routes without removing exact
+prefix/suffix bindings.
 
 Core objects:
 
@@ -255,6 +322,10 @@ Core objects:
 - Peer: one visible node inside one profile's netmap.
 - Effective IP: local dial address assigned to a visible peer.
 - Canonical IP: tailnet-assigned node address.
+- IP route binding: accepted destination prefix pinned to a stable profile ID.
+- DNS route binding: query suffix pinned to a stable profile ID.
+- Search domain: ordered OS short-name expansion suffix, independent of DNS
+  route bindings.
 - Profile ID: stable daemon-generated key for runtime state, identity storage,
   and effective-IP leases; it is not a CLI selector.
 - Profile name: local user-friendly handle for selecting a profile; it is
@@ -269,6 +340,11 @@ Required behavior:
 - Login, logout, add, remove, and reauth are profile operations.
 - Exit-node selection requires a profile and peer selector.
 - Effective-IP mapping and cleanup are explicit inspectable operations.
+- Available subnet and DNS routes are observable without accepting them.
+- IP and DNS route bindings require an explicit profile selector and survive
+  profile renames.
+- Accept-all policy follows future profile advertisements and remains separate
+  for IP routes, DNS routes, and OS search domains.
 
 ## Persistent State
 
@@ -278,7 +354,9 @@ Persistent daemon state includes:
 
 - Profile definitions and local profile names.
 - Effective-IP leases and allocator metadata.
-- DNS/profile metadata for explicit resolution.
+- Desired IP route bindings keyed by stable profile ID.
+- Desired DNS route bindings keyed by stable profile ID.
+- Per-profile IP and DNS accept-all flags, both defaulting to false.
 - Ordered desired OS search domains.
 - Exit-node/default-route selection.
 - Multi-tailnet-layer preferences.
@@ -294,11 +372,16 @@ Persistent profile-engine state includes:
 Failure behavior:
 
 - Daemon restart preserves profile identities and effective IPs.
+- Daemon restart and profile rename preserve IP and DNS route bindings and
+  accept-all flags.
 - A failed profile engine does not stop other profile engines.
 - Auth expiry, device approval, or Tailnet Lock problems are reported per profile.
 - If the shared TUN fails, node reachability fails globally, but profile state remains inspectable where possible.
 - If one profile cannot allocate a unique effective IP for a peer, that peer is marked unreachable and other peers continue operating.
 - Removing one profile does not garbage-collect another profile's effective-IP leases.
+- Removing or disabling a profile withdraws its installed bindings without
+  assigning them to another profile; retained bindings can resume if the same
+  stable profile returns.
 
 ## Testing And Validation
 
@@ -314,14 +397,31 @@ Core contract tests:
 - Effective IPs do not leak into profile engine identity, peer identity, netmap, or ACL-visible packet metadata.
 - Inbound policy remains evaluated by the receiving profile/tailnet.
 - Shields-up blocks inbound for one profile without blocking another.
+- Explicit subnet bindings install only when the pinned profile has an approved
+  covering route.
+- IP accept-all follows current and future non-default routes from one profile;
+  disabling it retains exact bindings.
+- Overlapping subnet bindings select profiles by longest prefix, including when
+  canonical private address space overlaps between tailnets.
+- Exact bindings override accept-all imports, and identical imports from
+  multiple profiles fail closed.
+- Route withdrawal removes only the affected host route while preserving its
+  desired binding.
+- Nested DNS bindings select profiles by longest suffix.
+- DNS accept-all follows MagicDNS, split, and default/fallback resolution from
+  one profile without importing its search domains.
+- Ambiguous MagicDNS suffixes and all split-DNS routes require an exact binding
+  or profile-wide accept-all policy.
+- Private DNS resolver queries use the selected profile even when resolver
+  addresses overlap.
+- DNS answers do not implicitly install IP or app-connector routes.
 - Unqualified MagicDNS names fail when no search domains are configured.
 - Explicitly configured, actively routed search domains are installed in the
   requested order and allow normal OS short-name expansion.
-- Search domains without an active authoritative route are not installed.
+- Search domains without an effective DNS route are not installed.
 - Tailnet-qualified names resolve to effective IPs.
 - Removing or restarting one profile does not disrupt the others.
 - One explicitly selected exit node/default route is active at a time.
-- Subnet route conflicts are out of scope and are not silently remapped.
 
 Manual/system tests:
 
@@ -333,6 +433,10 @@ Manual/system tests:
 - Verify OS DNS has no tailnet search domains by default.
 - Configure and clear selected search domains without restarting the daemon,
   and verify OS DNS tracks only the installed subset.
+- Pin overlapping subnet routes to different profiles and verify longest-prefix
+  selection.
+- Pin a split-DNS suffix to one of two profiles with the same resolver IP and
+  verify queries traverse only the selected profile.
 - Verify host-admin forwarding/NAT is not blocked by the daemon.
 
 ## Open Implementation Risks
