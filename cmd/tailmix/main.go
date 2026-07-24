@@ -287,10 +287,6 @@ func runProfileAdd(ctx context.Context, client managementClient, args []string, 
 	if err != nil {
 		return err
 	}
-	controlURL, _, err := takeString(&rest, "--control-url")
-	if err != nil {
-		return err
-	}
 	authEnv, authEnvSet, err := takeString(&rest, "--auth-key-env")
 	if err != nil {
 		return err
@@ -328,11 +324,10 @@ func runProfileAdd(ctx context.Context, client managementClient, args []string, 
 		}
 	}
 	request := controlapi.AddProfileRequest{
-		Name:       name,
-		StateDir:   stateDir,
-		ControlURL: controlURL,
-		AuthKey:    authKey,
-		Disabled:   disabled,
+		Name:     name,
+		StateDir: stateDir,
+		AuthKey:  authKey,
+		Disabled: disabled,
 	}
 	if hostnameSet {
 		request.Hostname = hostname
@@ -358,10 +353,6 @@ func runProfileSet(ctx context.Context, client managementClient, args []string, 
 	if err != nil {
 		return err
 	}
-	controlURL, controlURLSet, err := takeString(&rest, "--control-url")
-	if err != nil {
-		return err
-	}
 	jsonOutput, err := takeBool(&rest, "--json")
 	if err != nil {
 		return err
@@ -370,15 +361,12 @@ func runProfileSet(ctx context.Context, client managementClient, args []string, 
 	if err != nil {
 		return err
 	}
-	if !hostnameSet && !controlURLSet {
-		return usageError{"profiles set requires --hostname or --control-url"}
+	if !hostnameSet {
+		return usageError{"profiles set requires --hostname"}
 	}
 	request := controlapi.PatchProfileRequest{}
 	if hostnameSet {
 		request.Hostname = &hostname
-	}
-	if controlURLSet {
-		request.ControlURL = &controlURL
 	}
 	result, err := client.PatchProfile(ctx, name, request)
 	if err != nil {
@@ -943,7 +931,6 @@ func writeProfile(w io.Writer, profile controlapi.Profile) {
 		{"Backend", profile.BackendState},
 		{"State directory", profile.StateDir},
 		{"Hostname", profile.Hostname},
-		{"Control URL", profile.ControlURL},
 		{"Tailnet", profile.MagicDNSSuffix},
 		{"Self DNS", profile.SelfDNSName},
 		{"Accept all routes", yesNo(profile.AcceptAllRoutes)},
@@ -1147,7 +1134,7 @@ const profilesHelp = `Usage:
   tailmix profiles show <profile> [--json]
   tailmix profiles add <profile> [options]
   tailmix profiles rename <profile> <new-profile>
-  tailmix profiles set <profile> [--hostname <hostname>] [--control-url <url>] [--json]
+  tailmix profiles set <profile> --hostname <hostname> [--json]
   tailmix profiles enable <profile> [--json]
   tailmix profiles disable <profile> [--json]
   tailmix profiles restart <profile> [--json]
@@ -1156,7 +1143,6 @@ const profilesHelp = `Usage:
 Add options:
   --hostname <hostname>
   --state-dir <directory>
-  --control-url <url>
   --auth-key-env <variable>
   --auth-key-file <path|->
   --disabled

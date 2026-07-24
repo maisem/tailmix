@@ -604,7 +604,6 @@ func (s *supervisor) projectProfileLocked(configured state.Profile) controlapi.P
 		Name:               profileName(configured),
 		StateDir:           configured.StateDir,
 		Hostname:           configured.Hostname,
-		ControlURL:         configured.ControlURL,
 		Enabled:            !configured.Disabled && !configured.Removed,
 		Removed:            configured.Removed,
 		AcceptAllRoutes:    configured.AcceptAllRoutes,
@@ -730,9 +729,6 @@ func (s *supervisor) AddProfile(_ context.Context, request controlapi.AddProfile
 		if request.Hostname != "" {
 			existing.Hostname = request.Hostname
 		}
-		if request.ControlURL != "" {
-			existing.ControlURL = request.ControlURL
-		}
 		if err := s.store.Save(s.st); err != nil {
 			s.st = before
 			return controlapi.Profile{}, err
@@ -769,12 +765,11 @@ func (s *supervisor) AddProfile(_ context.Context, request controlapi.AddProfile
 		return controlapi.Profile{}, err
 	}
 	configured := state.Profile{
-		ID:         id,
-		Name:       request.Name,
-		StateDir:   stateDir,
-		Hostname:   hostname,
-		ControlURL: strings.TrimSpace(request.ControlURL),
-		Disabled:   request.Disabled,
+		ID:       id,
+		Name:     request.Name,
+		StateDir: stateDir,
+		Hostname: hostname,
+		Disabled: request.Disabled,
 	}
 	s.st.Profiles = append(s.st.Profiles, configured)
 	state.Normalize(&s.st)
@@ -814,10 +809,6 @@ func (s *supervisor) PatchProfile(_ context.Context, name string, request contro
 	}
 	if request.Hostname != nil && configured.Hostname != strings.TrimSpace(*request.Hostname) {
 		configured.Hostname = strings.TrimSpace(*request.Hostname)
-		restart = true
-	}
-	if request.ControlURL != nil && configured.ControlURL != strings.TrimSpace(*request.ControlURL) {
-		configured.ControlURL = strings.TrimSpace(*request.ControlURL)
 		restart = true
 	}
 	if err := s.store.Save(s.st); err != nil {

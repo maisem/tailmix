@@ -696,6 +696,25 @@ func (s *Server) getControlURL() string {
 	return os.Getenv("TS_CONTROL_URL")
 }
 
+func (s *Server) startupPrefs(saved ipn.PrefsView) *ipn.Prefs {
+	prefs := saved.AsStruct()
+	if prefs == nil {
+		prefs = ipn.NewPrefs()
+	}
+	prefs.Hostname = s.hostname
+	prefs.WantRunning = true
+	if controlURL := s.getControlURL(); controlURL != "" {
+		prefs.ControlURL = controlURL
+	}
+	if s.RunWebClient {
+		prefs.RunWebClient = true
+	}
+	if len(s.AdvertiseTags) != 0 {
+		prefs.AdvertiseTags = s.AdvertiseTags
+	}
+	return prefs
+}
+
 func (s *Server) start() (reterr error) {
 	var closePool closeOnErrorPool
 	defer closePool.closeAllIfError(&reterr)
@@ -873,12 +892,7 @@ func (s *Server) start() (reterr error) {
 		return fmt.Errorf("failed to start netstack: %w", err)
 	}
 	closePool.addFunc(func() { s.lb.Shutdown() })
-	prefs := ipn.NewPrefs()
-	prefs.Hostname = s.hostname
-	prefs.WantRunning = true
-	prefs.ControlURL = s.getControlURL()
-	prefs.RunWebClient = s.RunWebClient
-	prefs.AdvertiseTags = s.AdvertiseTags
+	prefs := s.startupPrefs(lb.Prefs())
 	authKey := s.getAuthKey()
 	err = lb.Start(ipn.Options{
 		UpdatePrefs: prefs,

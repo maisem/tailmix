@@ -26,7 +26,6 @@ type TSNetConfig struct {
 	Dir            string
 	Hostname       string
 	AuthKey        string
-	ControlURL     string
 	MagicDNSSuffix string
 	UserLogf       logger.Logf
 	Logf           logger.Logf
@@ -56,7 +55,6 @@ func (e *TSNetEngine) Start(ctx context.Context) error {
 		LogUpload:    e.cfg.LogUpload,
 		LogUploadURL: e.cfg.LogUploadURL,
 		AuthKey:      e.cfg.AuthKey,
-		ControlURL:   e.cfg.ControlURL,
 		Tun:          e.cfg.Tun,
 	}
 	if err := s.Start(); err != nil {

@@ -27,6 +27,12 @@ func TestParseProfileSpecUsesMagicDNSSuffixAndAuthKeyEnv(t *testing.T) {
 	}
 }
 
+func TestParseProfileSpecRejectsLegacyControlURL(t *testing.T) {
+	if _, err := parseProfileSpec("id=work,control-url=https://headscale.example.com"); err == nil {
+		t.Fatal("legacy control-url field unexpectedly accepted")
+	}
+}
+
 func TestResolveProfilesMergesFlagsWithPersistentState(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	got, err := resolveProfiles(state.State{

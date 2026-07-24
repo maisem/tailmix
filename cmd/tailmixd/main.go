@@ -40,7 +40,6 @@ type profileSpec struct {
 	Alias          string
 	Dir            string
 	Hostname       string
-	ControlURL     string
 	MagicDNSSuffix string
 	AuthKeyEnv     string
 }
@@ -93,7 +92,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	verbose := fs.Bool("verbose", false, "enable verbose per-profile tsnet logs")
 	logUpload := fs.Bool("log-upload", false, "opt in to remote per-profile logtail uploads")
 	logUploadURL := fs.String("log-upload-url", "", "replace the remote logtail upload base URL (requires -log-upload)")
-	fs.Var(&profiles, "profile", "profile config: id=work,dir=/path,hostname=tailmix-work[,control-url=URL][,suffix=tailnet.ts.net][,auth-key-env=ENV]")
+	fs.Var(&profiles, "profile", "profile config: id=work,dir=/path,hostname=tailmix-work[,suffix=tailnet.ts.net][,auth-key-env=ENV]")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -306,8 +305,6 @@ func parseProfileSpec(raw string) (profileSpec, error) {
 			spec.Dir = value
 		case "hostname":
 			spec.Hostname = value
-		case "control-url", "controlurl":
-			spec.ControlURL = value
 		case "suffix", "magicdns-suffix", "magic-dns-suffix":
 			spec.MagicDNSSuffix = value
 		case "auth-key-env", "authkey-env":
@@ -354,9 +351,6 @@ func resolveProfiles(st state.State, specs []profileSpec, statePath string) ([]r
 		}
 		if spec.Hostname != "" {
 			rp.State.Hostname = spec.Hostname
-		}
-		if spec.ControlURL != "" {
-			rp.State.ControlURL = spec.ControlURL
 		}
 		if spec.MagicDNSSuffix != "" {
 			rp.State.MagicDNSSuffix = spec.MagicDNSSuffix
@@ -431,7 +425,6 @@ func tsnetConfig(rp runtimeProfile, stderr io.Writer, verbose, logUpload bool, l
 		Dir:            rp.State.StateDir,
 		Hostname:       rp.State.Hostname,
 		AuthKey:        authKey,
-		ControlURL:     rp.State.ControlURL,
 		MagicDNSSuffix: rp.State.MagicDNSSuffix,
 		UserLogf:       prefixedLogf(stderr, rp.State.ID),
 		LogUpload:      logUpload,

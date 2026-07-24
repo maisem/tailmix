@@ -394,7 +394,6 @@ An auth key is never returned.
 tailmix profiles add <name> \
   [--hostname <hostname>] \
   [--state-dir <directory>] \
-  [--control-url <url>] \
   [--auth-key-env <name> | --auth-key-file <path|->] \
   [--disabled] \
   [--json]
@@ -425,6 +424,14 @@ Profile "work" added; login required.
 Run: tailmix ts --profile work up
 ```
 
+Alternative coordination servers are selected by the profile-local upstream
+command and persisted in native Tailscale state:
+
+```text
+tailmix ts --profile work login \
+  --login-server=https://headscale.example.com
+```
+
 `add` fails with a conflict if the name is already active or disabled.
 Re-adding a previously removed name resurrects its retained profile definition,
 stable ID, state directory, and effective-IP leases unless it was purged.
@@ -435,8 +442,7 @@ stable ID, state directory, and effective-IP leases unless it was purged.
 tailmix profiles rename <name> <new-name>
 
 tailmix profiles set <name> \
-  [--hostname <hostname>] \
-  [--control-url <url>] \
+  --hostname <hostname> \
   [--json]
 ```
 
@@ -445,10 +451,11 @@ separate, offline administrative operation and should not be hidden inside a
 live update.
 
 `rename` updates only the local control-plane index; the stable ID and running
-engine do not change. `set` changes engine configuration. Changing hostname or
-control URL restarts only the selected profile after persisting the new desired
+engine do not change. `set` changes the Tailmix-owned hostname. Changing it
+restarts only the selected profile after persisting the new desired
 configuration. The command reports that brief profile-local disruption before
-applying it.
+applying it. Native Tailscale settings, including the login server, remain in
+the profile's Tailscale state and are preserved by that restart.
 
 ### `profiles enable`, `disable`, and `restart`
 
@@ -591,7 +598,6 @@ The profile resource separates desired state from observed state:
   "name": "work",
   "stateDir": "/var/db/tailmix/profiles/p_01k2x7vq3c8m",
   "hostname": "tailmix-a2c123",
-  "controlUrl": "",
   "enabled": true,
   "removed": false,
   "acceptAllRoutes": true,

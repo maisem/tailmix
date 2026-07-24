@@ -16,6 +16,11 @@ The fork also changes remote logging behavior:
 - `Server.LogUpload` explicitly enables it; and
 - `Server.LogUploadURL` can replace the default upload base URL.
 
+On restart, the fork retains preferences written through the native Tailscale
+LocalAPI. Server-owned settings such as the embedded hostname still take
+precedence, and an explicitly configured `Server.ControlURL` still overrides a
+saved login server.
+
 OAuth-secret and workload-identity auth-key minting are omitted because their
 registration hooks live in an internal Tailscale package that cannot be
 imported by this module. Device auth keys and interactive login remain

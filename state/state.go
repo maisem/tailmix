@@ -21,7 +21,6 @@ type Profile struct {
 	Alias              string `json:"alias,omitempty"`
 	StateDir           string `json:"stateDir"`
 	Hostname           string `json:"hostname,omitempty"`
-	ControlURL         string `json:"controlUrl,omitempty"`
 	MagicDNSSuffix     string `json:"magicDnsSuffix,omitempty"`
 	Disabled           bool   `json:"disabled,omitempty"`
 	Removed            bool   `json:"removed,omitempty"`

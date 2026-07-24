@@ -72,6 +72,26 @@ func TestHandlerRejectsUnknownRequestFields(t *testing.T) {
 	}
 }
 
+func TestHandlerRejectsRemovedProfileControlURL(t *testing.T) {
+	backend := &recordingBackend{}
+	request := httptest.NewRequest(http.MethodPost, "/v1/profiles", strings.NewReader(`{
+		"name":"work",
+		"controlUrl":"https://headscale.example.com"
+	}`))
+	response := httptest.NewRecorder()
+	Handler(backend).ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var got Error
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Code != "invalid_request" {
+		t.Fatalf("error = %+v", got)
+	}
+}
+
 func TestHandlerMapsConflictsToHTTPConflict(t *testing.T) {
 	backend := &conflictBackend{recordingBackend: recordingBackend{}}
 	request := httptest.NewRequest(http.MethodPatch, "/v1/routes", strings.NewReader(`{

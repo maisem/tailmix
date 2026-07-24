@@ -24,7 +24,6 @@ type Profile struct {
 	Name                   string                  `json:"name"`
 	StateDir               string                  `json:"stateDir"`
 	Hostname               string                  `json:"hostname,omitempty"`
-	ControlURL             string                  `json:"controlUrl,omitempty"`
 	Enabled                bool                    `json:"enabled"`
 	Removed                bool                    `json:"removed"`
 	AcceptAllRoutes        bool                    `json:"acceptAllRoutes"`
@@ -49,18 +48,16 @@ type Profiles struct {
 }
 
 type AddProfileRequest struct {
-	Name       string `json:"name"`
-	StateDir   string `json:"stateDir,omitempty"`
-	Hostname   string `json:"hostname,omitempty"`
-	ControlURL string `json:"controlUrl,omitempty"`
-	AuthKey    string `json:"authKey,omitempty"`
-	Disabled   bool   `json:"disabled,omitempty"`
+	Name     string `json:"name"`
+	StateDir string `json:"stateDir,omitempty"`
+	Hostname string `json:"hostname,omitempty"`
+	AuthKey  string `json:"authKey,omitempty"`
+	Disabled bool   `json:"disabled,omitempty"`
 }
 
 type PatchProfileRequest struct {
-	Name       *string `json:"name,omitempty"`
-	Hostname   *string `json:"hostname,omitempty"`
-	ControlURL *string `json:"controlUrl,omitempty"`
+	Name     *string `json:"name,omitempty"`
+	Hostname *string `json:"hostname,omitempty"`
 }
 
 type AvailableIPRoute struct {

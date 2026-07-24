@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -53,6 +54,34 @@ func TestStoreCorruptFileFailsClosed(t *testing.T) {
 	}
 	if _, err := NewJSONStore(path).Load(); err == nil {
 		t.Fatal("expected corrupt state to fail")
+	}
+}
+
+func TestStoreDropsLegacyProfileControlURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{
+		"profiles":[{
+			"id":"work",
+			"stateDir":"profiles/work",
+			"controlUrl":"https://headscale.example.com"
+		}]
+	}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewJSONStore(path)
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "controlUrl") {
+		t.Fatalf("legacy controlUrl remained in state:\n%s", got)
 	}
 }
 

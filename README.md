@@ -33,6 +33,22 @@ go build -o /tmp/tailmixd ./cmd/tailmixd
 go build -o /tmp/tailmix ./cmd/tailmix
 ```
 
+## Install
+
+Install both `tailmix` and `tailmixd` under `/usr/local/bin`:
+
+```sh
+sudo make install
+```
+
+For an unprivileged installation, choose a prefix already on your `PATH`:
+
+```sh
+make install PREFIX="$HOME/.local"
+```
+
+`PREFIX`, `BINDIR`, and `DESTDIR` are configurable for packaging.
+
 ## Run on macOS
 
 Disconnect the regular Tailscale client first, then run tailmix as root. Zero
@@ -55,6 +71,16 @@ sudo /tmp/tailmix profiles add home
 sudo /tmp/tailmix ts --profile work up
 sudo /tmp/tailmix ts --profile home up
 ```
+
+For a non-default coordination server, use Tailscale's native login option:
+
+```sh
+sudo /tmp/tailmix ts --profile work login \
+  --login-server=https://headscale.example.com
+```
+
+The selected server and other native Tailscale preferences are stored in that
+profile's Tailscale state and survive profile and daemon restarts.
 
 Existing profiles reuse their persisted login state. For unattended login,
 pass `--auth-key-env` or `--auth-key-file` to `profiles add`; the resolved key

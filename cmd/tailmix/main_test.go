@@ -113,6 +113,27 @@ func TestTSSelectsOpaqueProfileLocalAPISocket(t *testing.T) {
 	}
 }
 
+func TestTSForwardsNativeLoginServer(t *testing.T) {
+	client := &fakeManagementClient{
+		profile: controlapi.Profile{ID: "p_work", Name: "work", LocalAPISocket: "/tmp/work.sock"},
+	}
+	var gotArgs []string
+	code := runWithDependencies(context.Background(),
+		[]string{"ts", "--profile", "work", "login", "--login-server=https://headscale.example.com"},
+		testDependencies(client, io.Discard, io.Discard, func(_ context.Context, args []string) error {
+			gotArgs = slices.Clone(args)
+			return nil
+		}))
+	want := []string{
+		"--socket=/tmp/work.sock",
+		"login",
+		"--login-server=https://headscale.example.com",
+	}
+	if code != 0 || !slices.Equal(gotArgs, want) {
+		t.Fatalf("exit = %d, upstream args = %q, want %q", code, gotArgs, want)
+	}
+}
+
 func TestTSRejectsSocketOverride(t *testing.T) {
 	client := &fakeManagementClient{}
 	var stderr bytes.Buffer
@@ -162,6 +183,18 @@ func TestRootHelpShowsFullSubcommandSpace(t *testing.T) {
 		if !strings.Contains(stdout.String(), command) {
 			t.Errorf("help does not contain %q:\n%s", command, stdout.String())
 		}
+	}
+}
+
+func TestProfilesHelpOmitsControlURL(t *testing.T) {
+	var stdout bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"profiles", "help"},
+		testDependencies(&fakeManagementClient{}, &stdout, io.Discard, nil))
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if strings.Contains(stdout.String(), "control-url") {
+		t.Fatalf("profiles help still contains control-url:\n%s", stdout.String())
 	}
 }
 
