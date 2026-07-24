@@ -169,6 +169,7 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		if nodeID == "" {
 			continue
 		}
+		advertiser := routeAdvertiserName(peer.HostName, peer.DNSName, nodeID)
 		peers = append(peers, PeerStatus{
 			NodeID:       nodeID,
 			DNSName:      normalizeDNSRoute(peer.DNSName),
@@ -181,7 +182,7 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 				}
 				availableRoutes = append(availableRoutes, RouteStatus{
 					Prefix:        prefix.Masked(),
-					PrimaryRouter: nodeID,
+					PrimaryRouter: advertiser,
 				})
 			}
 		}
@@ -295,6 +296,16 @@ func normalizeDNSRoute(domain string) string {
 		return "."
 	}
 	return parsed.WithoutTrailingDot()
+}
+
+func routeAdvertiserName(hostName, dnsName, nodeID string) string {
+	if hostName = strings.TrimSpace(hostName); hostName != "" {
+		return hostName
+	}
+	if dnsName = normalizeDNSRoute(dnsName); dnsName != "" && dnsName != "." {
+		return dnsname.FirstLabel(dnsName)
+	}
+	return nodeID
 }
 
 func cloneResolvers(in []*dnstype.Resolver) []*dnstype.Resolver {

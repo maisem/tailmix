@@ -191,18 +191,22 @@ the approved, primary subnet routes currently observed in each profile's
 netmap, including routes that have not been bound:
 
 ```text
-PREFIX          PROFILE  POLICY      ADVERTISED BY  STATE
-10.20.0.0/16    work     bound       router-a       installed
-10.30.0.0/16    lab      bound                      waiting-for-route
-10.40.0.0/16    work     accept-all  router-b       installed
+PREFIX          PROFILE  ADVERTISED BY  ENABLED  STATUS
+10.20.0.0/16    work     router-a       ✓
+10.30.0.0/16    lab                              waiting:route_not_advertised
+10.40.0.0/16    work     router-b       ✓
 ```
 
-A binding becomes installed only while the selected profile is active and its
+A binding becomes enabled only while the selected profile is active and its
 netmap has an approved primary subnet route that contains the requested
 prefix. Allowing a more-specific prefix lets an operator accept only part of an
 advertised route. Default routes are excluded because exit-node selection is a
 separate policy. Prefixes that overlap tailmix's effective-IP pools, host NAT
 addresses, or other daemon-reserved ranges are rejected.
+
+`ADVERTISED BY` uses the subnet router's readable Tailscale node name rather
+than its opaque stable node ID. The `PROFILE` column identifies the tailnet
+profile where that advertiser was observed.
 
 An exact prefix has only one binding, but different bindings may overlap.
 Longest-prefix match is deterministic, so `10.0.0.0/8` may use `work` while
