@@ -218,6 +218,9 @@ Higher-level features such as Tailscale SSH, Serve, and Funnel are configured pe
 
 ## CLI And API Surface
 
+The proposed live lifecycle commands and daemon control protocol are specified
+in [profile-management.md](profile-management.md).
+
 Profile-scoped commands use:
 
 ```text

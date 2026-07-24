@@ -76,7 +76,9 @@ URL and requires `-log-upload`; local user and verbose logging are unaffected.
 
 See [docs/darwin-testing.md](docs/darwin-testing.md) for verification steps,
 [docs/architecture.html](docs/architecture.html) for the implementation
-architecture, and [docs/design.md](docs/design.md) for the design semantics.
+architecture, [docs/design.md](docs/design.md) for the design semantics, and
+[docs/profile-management.md](docs/profile-management.md) for the proposed live
+profile lifecycle CLI and daemon control API.
 
 ## Run on Linux
 
