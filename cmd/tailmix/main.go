@@ -1009,28 +1009,26 @@ func writeIPRoutes(w io.Writer, routes controlapi.IPRoutes, available bool) {
 		_ = table.Flush()
 		return
 	}
-	fmt.Fprintln(table, "PREFIX\tPROFILE\tADVERTISED BY\tENABLED\tSTATUS\tOVERRIDDEN BY")
+	fmt.Fprintln(table, "PREFIX\tPROFILE\tADVERTISED BY\tSTATE\tMATCHED ROUTE")
 	shown := map[string]bool{}
 	for _, route := range append(append([]controlapi.IPRouteBinding(nil), routes.Bindings...), routes.Imported...) {
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n",
 			route.Prefix, route.ProfileName, route.PrimaryRouter,
-			enabledMark(route.State), exceptionalStatus(route.State, route.Reason),
-			ipOverrideLabel(route.OverriddenBy, route.OverrideProfileName))
+			stateLabel(route.State, route.Reason), prefixLabel(route.CoveringRoute))
 		shown[route.Prefix.String()+"\x00"+route.ProfileID+"\x00"+route.PrimaryRouter] = true
 	}
 	for _, route := range routes.Available {
 		if shown[route.Prefix.String()+"\x00"+route.ProfileID+"\x00"+route.PrimaryRouter] {
 			continue
 		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t\t\t\n", route.Prefix, route.ProfileName, route.PrimaryRouter)
+		fmt.Fprintf(table, "%s\t%s\t%s\t\t\n", route.Prefix, route.ProfileName, route.PrimaryRouter)
 	}
 	for _, accepted := range routes.AcceptAllProfiles {
-		fmt.Fprintf(table, "*\t%s\t\t%s\t%s\t\n",
-			accepted.ProfileName, enabledMark(accepted.State),
-			exceptionalStatus(accepted.State, accepted.Reason))
+		fmt.Fprintf(table, "*\t%s\t\t%s\t\n",
+			accepted.ProfileName, stateLabel(accepted.State, accepted.Reason))
 	}
 	if routes.ReconcileError != "" {
-		fmt.Fprintf(table, "!\t\t\t\tfailed:%s\t\n", routes.ReconcileError)
+		fmt.Fprintf(table, "!\t\t\tfailed:%s\t\n", routes.ReconcileError)
 	}
 	_ = table.Flush()
 }
@@ -1045,29 +1043,28 @@ func writeDNSRoutes(w io.Writer, routes controlapi.DNSRoutes, available bool) {
 		_ = table.Flush()
 		return
 	}
-	fmt.Fprintln(table, "DOMAIN\tPROFILE\tSOURCE\tENABLED\tSTATUS\tOVERRIDDEN BY")
+	fmt.Fprintln(table, "DOMAIN\tPROFILE\tSOURCE\tSTATE\tRESOLVERS")
 	all := append(append(append([]controlapi.DNSRouteBinding(nil), routes.Bindings...), routes.Imported...), routes.Automatic...)
 	shown := map[string]bool{}
 	for _, route := range all {
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n",
 			route.Domain, route.ProfileName, route.Source,
-			enabledMark(route.State), exceptionalStatus(route.State, route.Reason),
-			overrideLabel(route.OverriddenBy, route.OverrideProfileName))
+			stateLabel(route.State, route.Reason), resolverList(route.Resolvers))
 		shown[route.Domain+"\x00"+route.ProfileID+"\x00"+route.Source] = true
 	}
 	for _, route := range routes.Available {
 		if shown[route.Domain+"\x00"+route.ProfileID+"\x00"+route.Source] {
 			continue
 		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t\t\t\n", route.Domain, route.ProfileName, route.Source)
+		fmt.Fprintf(table, "%s\t%s\t%s\t\t%s\n",
+			route.Domain, route.ProfileName, route.Source, resolverList(route.Resolvers))
 	}
 	for _, accepted := range routes.AcceptAllProfiles {
-		fmt.Fprintf(table, "*\t%s\t\t%s\t%s\t\n",
-			accepted.ProfileName, enabledMark(accepted.State),
-			exceptionalStatus(accepted.State, accepted.Reason))
+		fmt.Fprintf(table, "*\t%s\t\t%s\t\n",
+			accepted.ProfileName, stateLabel(accepted.State, accepted.Reason))
 	}
 	if routes.ReconcileError != "" {
-		fmt.Fprintf(table, "!\t\t\t\tfailed:%s\t\n", routes.ReconcileError)
+		fmt.Fprintf(table, "!\t\t\tfailed:%s\t\n", routes.ReconcileError)
 	}
 	_ = table.Flush()
 }
@@ -1082,24 +1079,24 @@ func writeSearchDomains(w io.Writer, domains controlapi.SearchDomains) {
 		waiting[domain.Domain] = domain.Reason
 	}
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "ORDER\tDOMAIN\tPROFILE\tENABLED\tSTATUS")
+	fmt.Fprintln(table, "ORDER\tDOMAIN\tPROFILE\tSTATE")
 	shown := map[string]bool{}
 	for i, domain := range domains.Desired {
 		if active, ok := installed[domain]; ok {
-			fmt.Fprintf(table, "%d\t%s\t%s\t✓\t\n", i+1, domain, active.ProfileName)
+			fmt.Fprintf(table, "%d\t%s\t%s\t✓\n", i+1, domain, active.ProfileName)
 			shown[domain+"\x00"+active.ProfileID] = true
 		} else {
-			fmt.Fprintf(table, "%d\t%s\t\t\twaiting:%s\n", i+1, domain, waiting[domain])
+			fmt.Fprintf(table, "%d\t%s\t\twaiting:%s\n", i+1, domain, waiting[domain])
 		}
 	}
 	for _, domain := range domains.Available {
 		if shown[domain.Domain+"\x00"+domain.ProfileID] {
 			continue
 		}
-		fmt.Fprintf(table, "\t%s\t%s\t\t\n", domain.Domain, domain.ProfileName)
+		fmt.Fprintf(table, "\t%s\t%s\t\n", domain.Domain, domain.ProfileName)
 	}
 	if domains.ReconcileError != "" {
-		fmt.Fprintf(table, "!\t\t\t\tfailed:%s\n", domains.ReconcileError)
+		fmt.Fprintf(table, "!\t\t\tfailed:%s\n", domains.ReconcileError)
 	}
 	_ = table.Flush()
 }
@@ -1128,21 +1125,11 @@ func resolverList(resolvers []controlapi.DNSResolver) string {
 	return strings.Join(values, ",")
 }
 
-func overrideLabel(resource, profileName string) string {
-	if resource == "" {
-		return ""
-	}
-	if profileName == "" {
-		return resource
-	}
-	return resource + " -> " + profileName
-}
-
-func ipOverrideLabel(prefix netip.Prefix, profileName string) string {
+func prefixLabel(prefix netip.Prefix) string {
 	if !prefix.IsValid() {
 		return ""
 	}
-	return overrideLabel(prefix.String(), profileName)
+	return prefix.String()
 }
 
 func yesNo(value bool) string {
@@ -1152,16 +1139,12 @@ func yesNo(value bool) string {
 	return "no"
 }
 
-func enabledMark(state string) string {
+func stateLabel(state, reason string) string {
 	if state == "installed" {
-		return "✓"
-	}
-	return ""
-}
-
-func exceptionalStatus(state, reason string) string {
-	if state == "installed" {
-		return reason
+		if reason == "" {
+			return "✓"
+		}
+		return "✓ " + reason
 	}
 	if reason == "" {
 		return state

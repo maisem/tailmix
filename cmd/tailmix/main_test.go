@@ -286,30 +286,44 @@ func TestRouteHelpDocumentsOverrides(t *testing.T) {
 }
 
 func TestDefaultIPRouteListIncludesEveryDetectedRoute(t *testing.T) {
-	prefix := netip.MustParsePrefix("10.0.0.0/8")
+	boundPrefix := netip.MustParsePrefix("10.1.0.0/16")
+	advertisedPrefix := netip.MustParsePrefix("10.0.0.0/8")
 	routes := controlapi.IPRoutes{
 		Bindings: []controlapi.IPRouteBinding{{
-			Prefix: prefix, ProfileID: "work-id", ProfileName: "work", Policy: "bound",
+			Prefix: boundPrefix, ProfileID: "work-id", ProfileName: "work", Policy: "bound",
 			PrimaryRouter: "work-router", State: "installed",
+			CoveringRoute: advertisedPrefix,
 		}},
 		Available: []controlapi.AvailableIPRoute{
-			{Prefix: prefix, ProfileID: "work-id", ProfileName: "work", PrimaryRouter: "work-router"},
-			{Prefix: prefix, ProfileID: "work-id", ProfileName: "work", PrimaryRouter: "backup-router"},
-			{Prefix: prefix, ProfileID: "lab-id", ProfileName: "lab", PrimaryRouter: "lab-router"},
+			{Prefix: advertisedPrefix, ProfileID: "work-id", ProfileName: "work", PrimaryRouter: "work-router"},
+			{Prefix: advertisedPrefix, ProfileID: "work-id", ProfileName: "work", PrimaryRouter: "backup-router"},
+			{Prefix: advertisedPrefix, ProfileID: "lab-id", ProfileName: "lab", PrimaryRouter: "lab-router"},
 			{Prefix: netip.MustParsePrefix("172.16.0.0/12"), ProfileID: "lab-id", ProfileName: "lab", PrimaryRouter: "lab-router"},
 		},
 	}
 	var output bytes.Buffer
 	writeIPRoutes(&output, routes, false)
-	if got := strings.Count(output.String(), prefix.String()); got != 3 {
-		t.Fatalf("route appears %d times, want selected plus every other detection:\n%s", got, output.String())
+	var detectedRows int
+	for _, line := range strings.Split(output.String(), "\n") {
+		if strings.HasPrefix(line, advertisedPrefix.String()+" ") {
+			detectedRows++
+		}
 	}
-	for _, want := range []string{"172.16.0.0/12", "✓", "lab-router", "backup-router"} {
+	if got := detectedRows; got != 3 {
+		t.Fatalf("detected route appears in %d rows, want all three advertisers:\n%s", got, output.String())
+	}
+	for _, want := range []string{
+		"STATE", "MATCHED ROUTE", "172.16.0.0/12", advertisedPrefix.String(),
+		"✓", "lab-router", "backup-router",
+	} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("IP route list does not contain %q:\n%s", want, output.String())
 		}
 	}
-	for _, unwanted := range []string{"POLICY", "detected", "installed", "available"} {
+	for _, unwanted := range []string{
+		"POLICY", "ENABLED", "STATUS", "OVERRIDDEN BY",
+		"detected", "installed", "available",
+	} {
 		if strings.Contains(output.String(), unwanted) {
 			t.Fatalf("IP route list unexpectedly contains %q:\n%s", unwanted, output.String())
 		}
@@ -323,9 +337,18 @@ func TestDefaultDNSRouteListIncludesEveryDetectedRoute(t *testing.T) {
 			Source: "magicdns", Policy: "automatic", State: "installed",
 		}},
 		Available: []controlapi.AvailableDNSRoute{
-			{Domain: "corp.example", ProfileID: "work-id", ProfileName: "work", Source: "magicdns"},
-			{Domain: "corp.example", ProfileID: "lab-id", ProfileName: "lab", Source: "split-dns"},
-			{Domain: "dev.example", ProfileID: "lab-id", ProfileName: "lab", Source: "split-dns"},
+			{
+				Domain: "corp.example", ProfileID: "work-id", ProfileName: "work",
+				Source: "magicdns",
+			},
+			{
+				Domain: "corp.example", ProfileID: "lab-id", ProfileName: "lab",
+				Source: "split-dns", Resolvers: []controlapi.DNSResolver{{Addr: "10.0.0.54"}},
+			},
+			{
+				Domain: "dev.example", ProfileID: "lab-id", ProfileName: "lab",
+				Source: "split-dns", Resolvers: []controlapi.DNSResolver{{Addr: "10.0.0.53"}},
+			},
 		},
 	}
 	var output bytes.Buffer
@@ -333,12 +356,18 @@ func TestDefaultDNSRouteListIncludesEveryDetectedRoute(t *testing.T) {
 	if got := strings.Count(output.String(), "corp.example"); got != 2 {
 		t.Fatalf("domain appears %d times, want selected and other-profile detection:\n%s", got, output.String())
 	}
-	for _, want := range []string{"dev.example", "✓", "split-dns"} {
+	for _, want := range []string{
+		"STATE", "RESOLVERS", "dev.example", "✓", "split-dns",
+		"10.0.0.53", "10.0.0.54",
+	} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("DNS route list does not contain %q:\n%s", want, output.String())
 		}
 	}
-	for _, unwanted := range []string{"POLICY", "detected", "automatic", "installed", "available"} {
+	for _, unwanted := range []string{
+		"POLICY", "ENABLED", "STATUS", "OVERRIDDEN BY",
+		"detected", "automatic", "installed", "available",
+	} {
 		if strings.Contains(output.String(), unwanted) {
 			t.Fatalf("DNS route list unexpectedly contains %q:\n%s", unwanted, output.String())
 		}
@@ -362,12 +391,12 @@ func TestSearchListIncludesEveryDetectedSearchDomain(t *testing.T) {
 	if got := strings.Count(output.String(), "corp.example"); got != 2 {
 		t.Fatalf("search domain appears %d times, want selected and other-profile detection:\n%s", got, output.String())
 	}
-	for _, want := range []string{"dev.example", "✓", "lab"} {
+	for _, want := range []string{"STATE", "dev.example", "✓", "lab"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("search domain list does not contain %q:\n%s", want, output.String())
 		}
 	}
-	for _, unwanted := range []string{"installed", "available"} {
+	for _, unwanted := range []string{"ENABLED", "STATUS", "installed", "available"} {
 		if strings.Contains(output.String(), unwanted) {
 			t.Fatalf("search domain list unexpectedly contains %q:\n%s", unwanted, output.String())
 		}

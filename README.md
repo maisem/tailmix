@@ -80,9 +80,9 @@ sudo /tmp/tailmix dns routes bind --profile work corp.example.com
 sudo /tmp/tailmix dns search set corp.example.com
 ```
 
-Use `tailmix help` for the complete subcommand space. Route listings mark
-enabled entries with `✓` and retain details for waiting, ambiguous, and
-overridden state.
+Use `tailmix help` for the complete subcommand space. Route listings use one
+state column: `✓` marks enabled entries, while waiting, ambiguous, and
+overridden entries retain diagnostic details.
 
 Use `sudo /tmp/tailmix status` for one aggregate view of profile health, IP
 routes, DNS routes, and OS search-domain state. Add `--json` for structured

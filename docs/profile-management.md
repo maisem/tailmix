@@ -191,10 +191,10 @@ the approved, primary subnet routes currently observed in each profile's
 netmap, including routes that have not been bound:
 
 ```text
-PREFIX          PROFILE  ADVERTISED BY  ENABLED  STATUS
-10.20.0.0/16    work     router-a       ✓
-10.30.0.0/16    lab                              waiting:route_not_advertised
-10.40.0.0/16    work     router-b       ✓
+PREFIX          PROFILE  ADVERTISED BY  STATE                          MATCHED ROUTE
+10.20.0.0/16    work     router-a       ✓                              10.20.0.0/16
+10.30.0.0/16    lab                     waiting:route_not_advertised
+10.40.0.0/16    work     router-b       ✓                              10.40.0.0/16
 ```
 
 A binding becomes enabled only while the selected profile is active and its
@@ -206,7 +206,9 @@ addresses, or other daemon-reserved ranges are rejected.
 
 `ADVERTISED BY` uses the subnet router's readable Tailscale node name rather
 than its opaque stable node ID. The `PROFILE` column identifies the tailnet
-profile where that advertiser was observed.
+profile where that advertiser was observed. `STATE` combines the active marker
+and exceptional runtime status in one column. `MATCHED ROUTE` shows the
+approved advertised prefix that covers a configured binding.
 
 An exact prefix has only one binding, but different bindings may overlap.
 Longest-prefix match is deterministic, so `10.0.0.0/8` may use `work` while
