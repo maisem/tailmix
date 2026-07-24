@@ -656,6 +656,17 @@ func (s *supervisor) projectProfileLocked(configured state.Profile) controlapi.P
 				Resolvers:   resolverResourcesForAPI(available.Resolvers),
 			})
 		}
+		for _, domain := range status.SearchDomains {
+			domain = routingpolicy.NormalizeDomain(domain)
+			if domain == "" || domain == "." {
+				continue
+			}
+			result.AvailableSearchDomains = append(result.AvailableSearchDomains, controlapi.AvailableSearchDomain{
+				Domain:      domain,
+				ProfileID:   configured.ID,
+				ProfileName: result.Name,
+			})
+		}
 	}
 	if path, err := profilesocket.Path(s.cfg.SocketDir, configured.ID); err == nil {
 		result.LocalAPISocket = path

@@ -40,6 +40,7 @@ type Status struct {
 	ShieldsUp       bool
 	AvailableRoutes []RouteStatus
 	DNSRoutes       []DNSRouteStatus
+	SearchDomains   []string
 }
 
 type PeerStatus struct {

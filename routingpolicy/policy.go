@@ -184,6 +184,7 @@ func BuildDNS(st state.State, statuses []profile.Status) DNSPlan {
 		names[configured.ID] = profileName(configured)
 	}
 	statusByID := make(map[string]profile.Status, len(statuses))
+	availableSearch := map[string]bool{}
 	var plan DNSPlan
 	for _, status := range statuses {
 		statusByID[status.ProfileID] = status
@@ -198,6 +199,22 @@ func BuildDNS(st state.State, statuses []profile.Status) DNSPlan {
 				ProfileName: names[status.ProfileID],
 				Source:      available.Source,
 				Resolvers:   resolverResources(available.Resolvers),
+			})
+		}
+		for _, raw := range status.SearchDomains {
+			domain := NormalizeDomain(raw)
+			if domain == "" || domain == "." {
+				continue
+			}
+			key := status.ProfileID + "\x00" + domain
+			if availableSearch[key] {
+				continue
+			}
+			availableSearch[key] = true
+			plan.Search.Available = append(plan.Search.Available, controlapi.AvailableSearchDomain{
+				Domain:      domain,
+				ProfileID:   status.ProfileID,
+				ProfileName: names[status.ProfileID],
 			})
 		}
 	}
@@ -700,5 +717,11 @@ func sortDNSPlan(plan *DNSPlan) {
 	})
 	sort.Slice(plan.Resource.AcceptAllProfiles, func(i, j int) bool {
 		return plan.Resource.AcceptAllProfiles[i].ProfileName < plan.Resource.AcceptAllProfiles[j].ProfileName
+	})
+	sort.Slice(plan.Search.Available, func(i, j int) bool {
+		if plan.Search.Available[i].Domain != plan.Search.Available[j].Domain {
+			return plan.Search.Available[i].Domain < plan.Search.Available[j].Domain
+		}
+		return plan.Search.Available[i].ProfileName < plan.Search.Available[j].ProfileName
 	})
 }

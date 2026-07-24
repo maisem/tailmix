@@ -943,12 +943,20 @@ func writeIPRoutes(w io.Writer, routes controlapi.IPRoutes, available bool) {
 		return
 	}
 	fmt.Fprintln(table, "PREFIX\tPROFILE\tPOLICY\tADVERTISED BY\tSTATE\tOVERRIDDEN BY")
+	shown := map[string]bool{}
 	for _, route := range append(append([]controlapi.IPRouteBinding(nil), routes.Bindings...), routes.Imported...) {
 		state := route.State
 		if route.Reason != "" {
 			state += ":" + route.Reason
 		}
 		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n", route.Prefix, route.ProfileName, route.Policy, route.PrimaryRouter, state, ipOverrideLabel(route.OverriddenBy, route.OverrideProfileName))
+		shown[route.Prefix.String()+"\x00"+route.ProfileID+"\x00"+route.PrimaryRouter] = true
+	}
+	for _, route := range routes.Available {
+		if shown[route.Prefix.String()+"\x00"+route.ProfileID+"\x00"+route.PrimaryRouter] {
+			continue
+		}
+		fmt.Fprintf(table, "%s\t%s\tdetected\t%s\tavailable\t\n", route.Prefix, route.ProfileName, route.PrimaryRouter)
 	}
 	for _, accepted := range routes.AcceptAllProfiles {
 		state := accepted.State
@@ -975,12 +983,20 @@ func writeDNSRoutes(w io.Writer, routes controlapi.DNSRoutes, available bool) {
 	}
 	fmt.Fprintln(table, "DOMAIN\tPROFILE\tSOURCE\tPOLICY\tSTATE\tOVERRIDDEN BY")
 	all := append(append(append([]controlapi.DNSRouteBinding(nil), routes.Bindings...), routes.Imported...), routes.Automatic...)
+	shown := map[string]bool{}
 	for _, route := range all {
 		state := route.State
 		if route.Reason != "" {
 			state += ":" + route.Reason
 		}
 		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n", route.Domain, route.ProfileName, route.Source, route.Policy, state, overrideLabel(route.OverriddenBy, route.OverrideProfileName))
+		shown[route.Domain+"\x00"+route.ProfileID+"\x00"+route.Source] = true
+	}
+	for _, route := range routes.Available {
+		if shown[route.Domain+"\x00"+route.ProfileID+"\x00"+route.Source] {
+			continue
+		}
+		fmt.Fprintf(table, "%s\t%s\t%s\tdetected\tavailable\t\n", route.Domain, route.ProfileName, route.Source)
 	}
 	for _, accepted := range routes.AcceptAllProfiles {
 		state := accepted.State
@@ -1006,12 +1022,20 @@ func writeSearchDomains(w io.Writer, domains controlapi.SearchDomains) {
 	}
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(table, "ORDER\tDOMAIN\tPROFILE\tSTATE")
+	shown := map[string]bool{}
 	for i, domain := range domains.Desired {
 		if active, ok := installed[domain]; ok {
 			fmt.Fprintf(table, "%d\t%s\t%s\tinstalled\n", i+1, domain, active.ProfileName)
+			shown[domain+"\x00"+active.ProfileID] = true
 		} else {
 			fmt.Fprintf(table, "%d\t%s\t\twaiting:%s\n", i+1, domain, waiting[domain])
 		}
+	}
+	for _, domain := range domains.Available {
+		if shown[domain.Domain+"\x00"+domain.ProfileID] {
+			continue
+		}
+		fmt.Fprintf(table, "\t%s\t%s\tavailable\n", domain.Domain, domain.ProfileName)
 	}
 	if domains.ReconcileError != "" {
 		fmt.Fprintf(table, "!\t\t\tfailed:%s\n", domains.ReconcileError)
@@ -1120,6 +1144,8 @@ const routesHelp = `Usage:
 
 Bindings are explicit overrides: the longest matching binding wins before any
 accept-all import. Overridden and conflicting imports are shown by "routes list".
+The default list also includes every detected route; --available shows only
+detected routes.
 Default routes use exit-node policy.
 `
 
@@ -1137,6 +1163,8 @@ const dnsRoutesHelp = `Usage:
 Bindings are explicit overrides: the longest matching binding wins before any
 accept-all import or automatic MagicDNS route. Overridden and conflicting
 imports are shown by "dns routes list".
+The default list also includes every detected DNS route; --available shows only
+detected routes.
 The root suffix "." selects a profile's default DNS resolver route.
 `
 
@@ -1146,6 +1174,9 @@ const dnsSearchHelp = `Usage:
   tailmix dns search add <domain>... [--json]
   tailmix dns search remove <domain>... [--json]
   tailmix dns search clear [--json]
+
+The list includes configured search domains and every search domain detected
+from each tailnet.
 `
 
 const tailscaleHelp = `Usage:

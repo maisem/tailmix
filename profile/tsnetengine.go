@@ -203,6 +203,7 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		shieldsUp = prefs.ShieldsUp
 	}
 	var dnsRoutes []DNSRouteStatus
+	var searchDomains []string
 	if backend, err := e.LocalBackend(); err == nil {
 		if nm := backend.NetMapNoPeers(); nm != nil {
 			if suffix != "" && nm.DNS.Proxied {
@@ -230,6 +231,15 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 					Resolvers: cloneResolvers(defaultResolvers),
 				})
 			}
+			seenSearchDomains := map[string]bool{}
+			for _, raw := range nm.DNS.Domains {
+				domain := normalizeDNSRoute(raw)
+				if domain == "" || domain == "." || seenSearchDomains[domain] {
+					continue
+				}
+				seenSearchDomains[domain] = true
+				searchDomains = append(searchDomains, domain)
+			}
 		}
 	}
 	sort.Slice(dnsRoutes, func(i, j int) bool {
@@ -238,6 +248,7 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		}
 		return dnsRoutes[i].Source < dnsRoutes[j].Source
 	})
+	sort.Strings(searchDomains)
 	return Status{
 		ProfileID:       e.cfg.ProfileID,
 		Alias:           e.cfg.Alias,
@@ -252,6 +263,7 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		ShieldsUp:       shieldsUp,
 		AvailableRoutes: availableRoutes,
 		DNSRoutes:       dnsRoutes,
+		SearchDomains:   searchDomains,
 	}, nil
 }
 

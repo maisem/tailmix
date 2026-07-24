@@ -121,3 +121,23 @@ func TestAcceptAllDoesNotImportDirectTailscaleAddressSpace(t *testing.T) {
 		t.Fatalf("reserved import = %+v", plan.Imported)
 	}
 }
+
+func TestBuildDNSListsDetectedSearchDomainsByProfile(t *testing.T) {
+	st := state.State{Profiles: []state.Profile{
+		{ID: "work-id", Name: "work"},
+		{ID: "lab-id", Name: "lab"},
+	}}
+	plan := BuildDNS(st, []profile.Status{
+		{ProfileID: "work-id", SearchDomains: []string{"Corp.Example.", "corp.example", "."}},
+		{ProfileID: "lab-id", SearchDomains: []string{"Lab.Example."}},
+	})
+	if len(plan.Search.Available) != 2 {
+		t.Fatalf("available search domains = %+v", plan.Search.Available)
+	}
+	if got := plan.Search.Available[0]; got.Domain != "corp.example" || got.ProfileName != "work" {
+		t.Fatalf("first available search domain = %+v", got)
+	}
+	if got := plan.Search.Available[1]; got.Domain != "lab.example" || got.ProfileName != "lab" {
+		t.Fatalf("second available search domain = %+v", got)
+	}
+}

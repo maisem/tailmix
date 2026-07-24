@@ -20,27 +20,28 @@ func (e *Error) Error() string {
 }
 
 type Profile struct {
-	ID                 string              `json:"id"`
-	Name               string              `json:"name"`
-	StateDir           string              `json:"stateDir"`
-	Hostname           string              `json:"hostname,omitempty"`
-	ControlURL         string              `json:"controlUrl,omitempty"`
-	Enabled            bool                `json:"enabled"`
-	Removed            bool                `json:"removed"`
-	AcceptAllRoutes    bool                `json:"acceptAllRoutes"`
-	AcceptAllDNSRoutes bool                `json:"acceptAllDnsRoutes"`
-	RuntimeState       string              `json:"runtimeState"`
-	BackendState       string              `json:"backendState,omitempty"`
-	MagicDNSSuffix     string              `json:"magicDnsSuffix,omitempty"`
-	SelfDNSName        string              `json:"selfDnsName,omitempty"`
-	SelfIPs            []netip.Addr        `json:"selfIps,omitempty"`
-	PeerCount          int                 `json:"peerCount"`
-	ShieldsUp          bool                `json:"shieldsUp"`
-	AuthURL            string              `json:"authUrl,omitempty"`
-	LocalAPISocket     string              `json:"localApiSocket,omitempty"`
-	AvailableRoutes    []AvailableIPRoute  `json:"availableRoutes,omitempty"`
-	AvailableDNSRoutes []AvailableDNSRoute `json:"availableDnsRoutes,omitempty"`
-	LastError          string              `json:"lastError,omitempty"`
+	ID                     string                  `json:"id"`
+	Name                   string                  `json:"name"`
+	StateDir               string                  `json:"stateDir"`
+	Hostname               string                  `json:"hostname,omitempty"`
+	ControlURL             string                  `json:"controlUrl,omitempty"`
+	Enabled                bool                    `json:"enabled"`
+	Removed                bool                    `json:"removed"`
+	AcceptAllRoutes        bool                    `json:"acceptAllRoutes"`
+	AcceptAllDNSRoutes     bool                    `json:"acceptAllDnsRoutes"`
+	RuntimeState           string                  `json:"runtimeState"`
+	BackendState           string                  `json:"backendState,omitempty"`
+	MagicDNSSuffix         string                  `json:"magicDnsSuffix,omitempty"`
+	SelfDNSName            string                  `json:"selfDnsName,omitempty"`
+	SelfIPs                []netip.Addr            `json:"selfIps,omitempty"`
+	PeerCount              int                     `json:"peerCount"`
+	ShieldsUp              bool                    `json:"shieldsUp"`
+	AuthURL                string                  `json:"authUrl,omitempty"`
+	LocalAPISocket         string                  `json:"localApiSocket,omitempty"`
+	AvailableRoutes        []AvailableIPRoute      `json:"availableRoutes,omitempty"`
+	AvailableDNSRoutes     []AvailableDNSRoute     `json:"availableDnsRoutes,omitempty"`
+	AvailableSearchDomains []AvailableSearchDomain `json:"availableSearchDomains,omitempty"`
+	LastError              string                  `json:"lastError,omitempty"`
 }
 
 type Profiles struct {
@@ -191,10 +192,17 @@ type WaitingSearchDomain struct {
 	Reason string `json:"reason"`
 }
 
+type AvailableSearchDomain struct {
+	Domain      string `json:"domain"`
+	ProfileID   string `json:"profileId"`
+	ProfileName string `json:"profileName"`
+}
+
 type SearchDomains struct {
 	Desired        []string                `json:"desired"`
 	Installed      []InstalledSearchDomain `json:"installed,omitempty"`
 	Waiting        []WaitingSearchDomain   `json:"waiting,omitempty"`
+	Available      []AvailableSearchDomain `json:"available,omitempty"`
 	ReconcileError string                  `json:"reconcileError,omitempty"`
 }
 

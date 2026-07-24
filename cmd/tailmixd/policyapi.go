@@ -21,8 +21,6 @@ func (s *supervisor) IPRoutes(_ context.Context, available bool) (controlapi.IPR
 		result.AcceptAllProfiles = nil
 		result.Bindings = nil
 		result.Imported = nil
-	} else {
-		result.Available = nil
 	}
 	return result, nil
 }
@@ -176,8 +174,6 @@ func (s *supervisor) DNSRoutes(_ context.Context, available bool) (controlapi.DN
 		result.Bindings = nil
 		result.Imported = nil
 		result.Automatic = nil
-	} else {
-		result.Available = nil
 	}
 	return result, nil
 }
