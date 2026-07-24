@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/netip"
 	"slices"
@@ -14,14 +15,21 @@ import (
 )
 
 type fakeManagementClient struct {
-	profile       controlapi.Profile
-	profileName   string
-	ipPatch       controlapi.PatchIPRoutesRequest
-	dnsPatch      controlapi.PatchDNSRoutesRequest
-	searchReplace []string
+	profile         controlapi.Profile
+	profileName     string
+	ipPatch         controlapi.PatchIPRoutesRequest
+	dnsPatch        controlapi.PatchDNSRoutesRequest
+	searchReplace   []string
+	statusProfiles  []controlapi.Profile
+	statusIPRoutes  controlapi.IPRoutes
+	statusDNSRoutes controlapi.DNSRoutes
+	statusSearch    controlapi.SearchDomains
 }
 
 func (f *fakeManagementClient) Profiles(context.Context, bool) (controlapi.Profiles, error) {
+	if f.statusProfiles != nil {
+		return controlapi.Profiles{Profiles: f.statusProfiles}, nil
+	}
 	return controlapi.Profiles{Profiles: []controlapi.Profile{f.profile}}, nil
 }
 func (f *fakeManagementClient) Profile(_ context.Context, name string) (controlapi.Profile, error) {
@@ -41,21 +49,21 @@ func (f *fakeManagementClient) RemoveProfile(context.Context, string, bool) (con
 	return f.profile, nil
 }
 func (f *fakeManagementClient) IPRoutes(context.Context, bool) (controlapi.IPRoutes, error) {
-	return controlapi.IPRoutes{}, nil
+	return f.statusIPRoutes, nil
 }
 func (f *fakeManagementClient) PatchIPRoutes(_ context.Context, request controlapi.PatchIPRoutesRequest) (controlapi.IPRoutes, error) {
 	f.ipPatch = request
 	return controlapi.IPRoutes{}, nil
 }
 func (f *fakeManagementClient) DNSRoutes(context.Context, bool) (controlapi.DNSRoutes, error) {
-	return controlapi.DNSRoutes{}, nil
+	return f.statusDNSRoutes, nil
 }
 func (f *fakeManagementClient) PatchDNSRoutes(_ context.Context, request controlapi.PatchDNSRoutesRequest) (controlapi.DNSRoutes, error) {
 	f.dnsPatch = request
 	return controlapi.DNSRoutes{}, nil
 }
 func (f *fakeManagementClient) SearchDomains(context.Context) (controlapi.SearchDomains, error) {
-	return controlapi.SearchDomains{}, nil
+	return f.statusSearch, nil
 }
 func (f *fakeManagementClient) ReplaceSearchDomains(_ context.Context, desired []string) (controlapi.SearchDomains, error) {
 	f.searchReplace = slices.Clone(desired)
@@ -153,10 +161,68 @@ func TestRootHelpShowsFullSubcommandSpace(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	for _, command := range []string{"profiles", "routes", "dns routes", "dns search", "tailscale", "ts"} {
+	for _, command := range []string{"status", "profiles", "routes", "dns routes", "dns search", "tailscale", "ts"} {
 		if !strings.Contains(stdout.String(), command) {
 			t.Errorf("help does not contain %q:\n%s", command, stdout.String())
 		}
+	}
+}
+
+func TestStatusShowsAggregateRuntimeState(t *testing.T) {
+	client := &fakeManagementClient{
+		statusProfiles: []controlapi.Profile{{
+			ID: "work-id", Name: "work", Enabled: true, RuntimeState: "running",
+			MagicDNSSuffix: "corp.example", PeerCount: 3,
+		}},
+		statusIPRoutes: controlapi.IPRoutes{Bindings: []controlapi.IPRouteBinding{{
+			Prefix: netip.MustParsePrefix("10.20.0.0/16"), ProfileID: "work-id",
+			ProfileName: "work", Policy: "bound", State: "installed",
+		}}},
+		statusDNSRoutes: controlapi.DNSRoutes{Bindings: []controlapi.DNSRouteBinding{{
+			Domain: "corp.example", ProfileID: "work-id", ProfileName: "work",
+			Source: "magicdns", Policy: "bound", State: "installed",
+		}}},
+		statusSearch: controlapi.SearchDomains{
+			Desired: []string{"corp.example"},
+			Installed: []controlapi.InstalledSearchDomain{{
+				Domain: "corp.example", ProfileID: "work-id", ProfileName: "work",
+			}},
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"status"},
+		testDependencies(client, &stdout, &stderr, nil))
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, want := range []string{
+		"PROFILES", "IP ROUTES", "DNS ROUTES", "DNS SEARCH",
+		"work", "10.20.0.0/16", "corp.example",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("status does not contain %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestStatusJSONHasNamespacedPolicy(t *testing.T) {
+	client := &fakeManagementClient{
+		statusProfiles: []controlapi.Profile{{ID: "work-id", Name: "work"}},
+		statusSearch:   controlapi.SearchDomains{Desired: []string{"corp.example"}},
+	}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"status", "--json"},
+		testDependencies(client, &stdout, &stderr, nil))
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	var got aggregateStatus
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Profiles) != 1 || got.Profiles[0].Name != "work" ||
+		len(got.DNS.Search.Desired) != 1 || got.DNS.Search.Desired[0] != "corp.example" {
+		t.Fatalf("status JSON = %+v", got)
 	}
 }
 
@@ -238,9 +304,14 @@ func TestDefaultIPRouteListIncludesEveryDetectedRoute(t *testing.T) {
 	if got := strings.Count(output.String(), prefix.String()); got != 3 {
 		t.Fatalf("route appears %d times, want selected plus every other detection:\n%s", got, output.String())
 	}
-	for _, want := range []string{"172.16.0.0/12", "detected", "available", "lab-router", "backup-router"} {
+	for _, want := range []string{"172.16.0.0/12", "✓", "lab-router", "backup-router"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("IP route list does not contain %q:\n%s", want, output.String())
+		}
+	}
+	for _, unwanted := range []string{"POLICY", "detected", "installed", "available"} {
+		if strings.Contains(output.String(), unwanted) {
+			t.Fatalf("IP route list unexpectedly contains %q:\n%s", unwanted, output.String())
 		}
 	}
 }
@@ -262,9 +333,14 @@ func TestDefaultDNSRouteListIncludesEveryDetectedRoute(t *testing.T) {
 	if got := strings.Count(output.String(), "corp.example"); got != 2 {
 		t.Fatalf("domain appears %d times, want selected and other-profile detection:\n%s", got, output.String())
 	}
-	for _, want := range []string{"dev.example", "detected", "available", "split-dns"} {
+	for _, want := range []string{"dev.example", "✓", "split-dns"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("DNS route list does not contain %q:\n%s", want, output.String())
+		}
+	}
+	for _, unwanted := range []string{"POLICY", "detected", "automatic", "installed", "available"} {
+		if strings.Contains(output.String(), unwanted) {
+			t.Fatalf("DNS route list unexpectedly contains %q:\n%s", unwanted, output.String())
 		}
 	}
 }
@@ -286,9 +362,14 @@ func TestSearchListIncludesEveryDetectedSearchDomain(t *testing.T) {
 	if got := strings.Count(output.String(), "corp.example"); got != 2 {
 		t.Fatalf("search domain appears %d times, want selected and other-profile detection:\n%s", got, output.String())
 	}
-	for _, want := range []string{"dev.example", "available", "lab"} {
+	for _, want := range []string{"dev.example", "✓", "lab"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("search domain list does not contain %q:\n%s", want, output.String())
+		}
+	}
+	for _, unwanted := range []string{"installed", "available"} {
+		if strings.Contains(output.String(), unwanted) {
+			t.Fatalf("search domain list unexpectedly contains %q:\n%s", unwanted, output.String())
 		}
 	}
 }

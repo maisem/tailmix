@@ -46,6 +46,17 @@ type usageError struct {
 
 func (e usageError) Error() string { return e.message }
 
+type aggregateStatus struct {
+	Profiles []controlapi.Profile `json:"profiles"`
+	Routes   controlapi.IPRoutes  `json:"routes"`
+	DNS      aggregateDNSStatus   `json:"dns"`
+}
+
+type aggregateDNSStatus struct {
+	Routes controlapi.DNSRoutes     `json:"routes"`
+	Search controlapi.SearchDomains `json:"search"`
+}
+
 type dependencies struct {
 	stdin     io.Reader
 	stdout    io.Writer
@@ -94,6 +105,8 @@ func runWithDependencies(ctx context.Context, args []string, deps dependencies) 
 
 	client := deps.newClient(socketDir)
 	switch args[0] {
+	case "status":
+		err = runStatus(ctx, client, args[1:], deps)
 	case "profiles":
 		err = runProfiles(ctx, client, args[1:], deps)
 	case "routes":
@@ -120,6 +133,49 @@ func runWithDependencies(ctx context.Context, args []string, deps dependencies) 
 	}
 	fmt.Fprintln(deps.stderr, err)
 	return 1
+}
+
+func runStatus(ctx context.Context, client managementClient, args []string, deps dependencies) error {
+	if len(args) > 0 && isHelp(args[0]) {
+		fmt.Fprint(deps.stdout, statusHelp)
+		return nil
+	}
+	jsonOutput, err := takeBool(&args, "--json")
+	if err != nil {
+		return err
+	}
+	if err := noOperands(args); err != nil {
+		return err
+	}
+	profiles, err := client.Profiles(ctx, false)
+	if err != nil {
+		return err
+	}
+	routes, err := client.IPRoutes(ctx, false)
+	if err != nil {
+		return err
+	}
+	dnsRoutes, err := client.DNSRoutes(ctx, false)
+	if err != nil {
+		return err
+	}
+	search, err := client.SearchDomains(ctx)
+	if err != nil {
+		return err
+	}
+	status := aggregateStatus{
+		Profiles: profiles.Profiles,
+		Routes:   routes,
+		DNS: aggregateDNSStatus{
+			Routes: dnsRoutes,
+			Search: search,
+		},
+	}
+	if jsonOutput {
+		return writeJSON(deps.stdout, status)
+	}
+	writeStatus(deps.stdout, status)
+	return nil
 }
 
 func runProfiles(ctx context.Context, client managementClient, args []string, deps dependencies) error {
@@ -896,6 +952,17 @@ func writeJSON(w io.Writer, value any) error {
 	return encoder.Encode(value)
 }
 
+func writeStatus(w io.Writer, status aggregateStatus) {
+	fmt.Fprintln(w, "PROFILES")
+	writeProfiles(w, status.Profiles)
+	fmt.Fprintln(w, "\nIP ROUTES")
+	writeIPRoutes(w, status.Routes, false)
+	fmt.Fprintln(w, "\nDNS ROUTES")
+	writeDNSRoutes(w, status.DNS.Routes, false)
+	fmt.Fprintln(w, "\nDNS SEARCH")
+	writeSearchDomains(w, status.DNS.Search)
+}
+
 func writeProfiles(w io.Writer, profiles []controlapi.Profile) {
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(table, "PROFILE\tENABLED\tRUNTIME\tTAILNET\tPEERS\tERROR")
@@ -942,31 +1009,28 @@ func writeIPRoutes(w io.Writer, routes controlapi.IPRoutes, available bool) {
 		_ = table.Flush()
 		return
 	}
-	fmt.Fprintln(table, "PREFIX\tPROFILE\tPOLICY\tADVERTISED BY\tSTATE\tOVERRIDDEN BY")
+	fmt.Fprintln(table, "PREFIX\tPROFILE\tADVERTISED BY\tENABLED\tSTATUS\tOVERRIDDEN BY")
 	shown := map[string]bool{}
 	for _, route := range append(append([]controlapi.IPRouteBinding(nil), routes.Bindings...), routes.Imported...) {
-		state := route.State
-		if route.Reason != "" {
-			state += ":" + route.Reason
-		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n", route.Prefix, route.ProfileName, route.Policy, route.PrimaryRouter, state, ipOverrideLabel(route.OverriddenBy, route.OverrideProfileName))
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			route.Prefix, route.ProfileName, route.PrimaryRouter,
+			enabledMark(route.State), exceptionalStatus(route.State, route.Reason),
+			ipOverrideLabel(route.OverriddenBy, route.OverrideProfileName))
 		shown[route.Prefix.String()+"\x00"+route.ProfileID+"\x00"+route.PrimaryRouter] = true
 	}
 	for _, route := range routes.Available {
 		if shown[route.Prefix.String()+"\x00"+route.ProfileID+"\x00"+route.PrimaryRouter] {
 			continue
 		}
-		fmt.Fprintf(table, "%s\t%s\tdetected\t%s\tavailable\t\n", route.Prefix, route.ProfileName, route.PrimaryRouter)
+		fmt.Fprintf(table, "%s\t%s\t%s\t\t\t\n", route.Prefix, route.ProfileName, route.PrimaryRouter)
 	}
 	for _, accepted := range routes.AcceptAllProfiles {
-		state := accepted.State
-		if accepted.Reason != "" {
-			state += ":" + accepted.Reason
-		}
-		fmt.Fprintf(table, "*\t%s\taccept-all profile\t\t%s\t\n", accepted.ProfileName, state)
+		fmt.Fprintf(table, "*\t%s\t\t%s\t%s\t\n",
+			accepted.ProfileName, enabledMark(accepted.State),
+			exceptionalStatus(accepted.State, accepted.Reason))
 	}
 	if routes.ReconcileError != "" {
-		fmt.Fprintf(table, "!\t\taggregate\t\tfailed:%s\t\n", routes.ReconcileError)
+		fmt.Fprintf(table, "!\t\t\t\tfailed:%s\t\n", routes.ReconcileError)
 	}
 	_ = table.Flush()
 }
@@ -981,32 +1045,29 @@ func writeDNSRoutes(w io.Writer, routes controlapi.DNSRoutes, available bool) {
 		_ = table.Flush()
 		return
 	}
-	fmt.Fprintln(table, "DOMAIN\tPROFILE\tSOURCE\tPOLICY\tSTATE\tOVERRIDDEN BY")
+	fmt.Fprintln(table, "DOMAIN\tPROFILE\tSOURCE\tENABLED\tSTATUS\tOVERRIDDEN BY")
 	all := append(append(append([]controlapi.DNSRouteBinding(nil), routes.Bindings...), routes.Imported...), routes.Automatic...)
 	shown := map[string]bool{}
 	for _, route := range all {
-		state := route.State
-		if route.Reason != "" {
-			state += ":" + route.Reason
-		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n", route.Domain, route.ProfileName, route.Source, route.Policy, state, overrideLabel(route.OverriddenBy, route.OverrideProfileName))
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			route.Domain, route.ProfileName, route.Source,
+			enabledMark(route.State), exceptionalStatus(route.State, route.Reason),
+			overrideLabel(route.OverriddenBy, route.OverrideProfileName))
 		shown[route.Domain+"\x00"+route.ProfileID+"\x00"+route.Source] = true
 	}
 	for _, route := range routes.Available {
 		if shown[route.Domain+"\x00"+route.ProfileID+"\x00"+route.Source] {
 			continue
 		}
-		fmt.Fprintf(table, "%s\t%s\t%s\tdetected\tavailable\t\n", route.Domain, route.ProfileName, route.Source)
+		fmt.Fprintf(table, "%s\t%s\t%s\t\t\t\n", route.Domain, route.ProfileName, route.Source)
 	}
 	for _, accepted := range routes.AcceptAllProfiles {
-		state := accepted.State
-		if accepted.Reason != "" {
-			state += ":" + accepted.Reason
-		}
-		fmt.Fprintf(table, "*\t%s\t\taccept-all profile\t%s\t\n", accepted.ProfileName, state)
+		fmt.Fprintf(table, "*\t%s\t\t%s\t%s\t\n",
+			accepted.ProfileName, enabledMark(accepted.State),
+			exceptionalStatus(accepted.State, accepted.Reason))
 	}
 	if routes.ReconcileError != "" {
-		fmt.Fprintf(table, "!\t\t\taggregate\tfailed:%s\t\n", routes.ReconcileError)
+		fmt.Fprintf(table, "!\t\t\t\tfailed:%s\t\n", routes.ReconcileError)
 	}
 	_ = table.Flush()
 }
@@ -1021,24 +1082,24 @@ func writeSearchDomains(w io.Writer, domains controlapi.SearchDomains) {
 		waiting[domain.Domain] = domain.Reason
 	}
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "ORDER\tDOMAIN\tPROFILE\tSTATE")
+	fmt.Fprintln(table, "ORDER\tDOMAIN\tPROFILE\tENABLED\tSTATUS")
 	shown := map[string]bool{}
 	for i, domain := range domains.Desired {
 		if active, ok := installed[domain]; ok {
-			fmt.Fprintf(table, "%d\t%s\t%s\tinstalled\n", i+1, domain, active.ProfileName)
+			fmt.Fprintf(table, "%d\t%s\t%s\t✓\t\n", i+1, domain, active.ProfileName)
 			shown[domain+"\x00"+active.ProfileID] = true
 		} else {
-			fmt.Fprintf(table, "%d\t%s\t\twaiting:%s\n", i+1, domain, waiting[domain])
+			fmt.Fprintf(table, "%d\t%s\t\t\twaiting:%s\n", i+1, domain, waiting[domain])
 		}
 	}
 	for _, domain := range domains.Available {
 		if shown[domain.Domain+"\x00"+domain.ProfileID] {
 			continue
 		}
-		fmt.Fprintf(table, "\t%s\t%s\tavailable\n", domain.Domain, domain.ProfileName)
+		fmt.Fprintf(table, "\t%s\t%s\t\t\n", domain.Domain, domain.ProfileName)
 	}
 	if domains.ReconcileError != "" {
-		fmt.Fprintf(table, "!\t\t\tfailed:%s\n", domains.ReconcileError)
+		fmt.Fprintf(table, "!\t\t\t\tfailed:%s\n", domains.ReconcileError)
 	}
 	_ = table.Flush()
 }
@@ -1091,6 +1152,23 @@ func yesNo(value bool) string {
 	return "no"
 }
 
+func enabledMark(state string) string {
+	if state == "installed" {
+		return "✓"
+	}
+	return ""
+}
+
+func exceptionalStatus(state, reason string) string {
+	if state == "installed" {
+		return reason
+	}
+	if reason == "" {
+		return state
+	}
+	return state + ":" + reason
+}
+
 func isHelp(arg string) bool {
 	return arg == "help" || arg == "-h" || arg == "--help"
 }
@@ -1101,6 +1179,7 @@ Usage:
   tailmix [--socket-dir <directory>] <command> [arguments]
 
 Commands:
+  status       Show aggregate runtime and policy status
   profiles     Manage profile lifecycle and configuration
   routes       Accept IP routes and pin prefixes to profiles
   dns routes   Route DNS suffixes through selected profiles
@@ -1113,6 +1192,13 @@ Use "tailmix <command> help" for command-specific help.
 
 Environment:
   TAILMIX_SOCKET_DIR   Default directory for daemon and profile sockets
+`
+
+const statusHelp = `Usage:
+  tailmix status [--json]
+
+Shows profile health and the effective IP-route, DNS-route, and search-domain
+state reported by the running daemon.
 `
 
 const profilesHelp = `Usage:
