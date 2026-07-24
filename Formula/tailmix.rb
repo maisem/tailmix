@@ -11,6 +11,14 @@ class Tailmix < Formula
     system "go", "build", *std_go_args(output: bin/"tailmixd"), "./cmd/tailmixd"
   end
 
+  service do
+    run [opt_bin/"tailmixd", "-state", var/"lib/tailmix/state.json"]
+    keep_alive true
+    require_root true
+    log_path var/"log/tailmixd.log"
+    error_log_path var/"log/tailmixd.log"
+  end
+
   test do
     assert_match "tailmix manages multiple Tailscale profiles", shell_output("#{bin}/tailmix help")
     assert_match "Usage of tailmixd:", shell_output("#{bin}/tailmixd -h 2>&1")

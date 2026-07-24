@@ -53,6 +53,23 @@ installed with:
 brew upgrade --fetch-HEAD maisem/tailmix/tailmix
 ```
 
+Start `tailmixd` now and automatically at system startup:
+
+```sh
+sudo brew services start maisem/tailmix/tailmix
+```
+
+The service stores daemon state under `$(brew --prefix)/var/lib/tailmix`, writes
+logs to `$(brew --prefix)/var/log/tailmixd.log`, and uses the default
+`/var/run/tailmix` socket directory. Root is required for the host TUN, routes,
+DNS configuration, and system-startup service. Manage it with:
+
+```sh
+sudo brew services info maisem/tailmix/tailmix
+sudo brew services restart maisem/tailmix/tailmix
+sudo brew services stop maisem/tailmix/tailmix
+```
+
 ### Make
 
 Install both `tailmix` and `tailmixd` under `/usr/local/bin`:
