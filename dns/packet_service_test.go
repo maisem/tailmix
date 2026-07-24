@@ -41,7 +41,7 @@ func newTestPacketService(t *testing.T, name string, wantIP netip.Addr) *packetS
 	t.Helper()
 	dnsCfg, err := configForService(ServiceConfig{
 		Domains: []Domain{{ProfileID: "work", Suffix: "work.ts.net"}},
-		Records: []Record{{ProfileAlias: "work", Name: name, EffectiveIP: wantIP}},
+		Records: []Record{{ProfileID: "work", Name: name, EffectiveIP: wantIP}},
 	})
 	if err != nil {
 		t.Fatal(err)

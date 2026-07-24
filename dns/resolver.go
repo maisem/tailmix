@@ -4,29 +4,37 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+
+	"tailscale.com/util/dnsname"
 )
 
 type Record struct {
-	ProfileAlias string
-	Name         string
-	EffectiveIP  netip.Addr
+	ProfileID   string
+	Name        string
+	EffectiveIP netip.Addr
 }
 
 type Resolver struct {
-	records map[string]netip.Addr
+	records map[dnsname.FQDN]netip.Addr
 }
 
 func NewResolver(records []Record) *Resolver {
-	r := &Resolver{records: map[string]netip.Addr{}}
+	r := &Resolver{records: map[dnsname.FQDN]netip.Addr{}}
 	for _, rec := range records {
-		r.records[strings.TrimSuffix(strings.ToLower(rec.Name), ".")] = rec.EffectiveIP
+		name, err := dnsname.ToFQDN(strings.ToLower(strings.TrimSpace(rec.Name)))
+		if err == nil && name != dnsname.FQDN(".") {
+			r.records[name] = rec.EffectiveIP
+		}
 	}
 	return r
 }
 
 func (r *Resolver) Resolve(name string) (netip.Addr, error) {
-	key := strings.TrimSuffix(strings.ToLower(name), ".")
-	if !strings.Contains(key, ".") {
+	key, err := dnsname.ToFQDN(strings.ToLower(strings.TrimSpace(name)))
+	if err != nil || key == dnsname.FQDN(".") {
+		return netip.Addr{}, fmt.Errorf("invalid MagicDNS name %q", name)
+	}
+	if key.NumLabels() < 2 {
 		return netip.Addr{}, fmt.Errorf("unqualified MagicDNS names are disabled in multi-tailnet mode: %q", name)
 	}
 	ip, ok := r.records[key]

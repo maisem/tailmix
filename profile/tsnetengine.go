@@ -15,7 +15,9 @@ import (
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/tailcfg"
+	"tailscale.com/types/dnstype"
 	"tailscale.com/types/logger"
+	"tailscale.com/util/dnsname"
 )
 
 type TSNetConfig struct {
@@ -58,8 +60,15 @@ func (e *TSNetEngine) Start(ctx context.Context) error {
 		Tun:          e.cfg.Tun,
 	}
 	if err := s.Start(); err != nil {
+		s.AuthKey = ""
+		e.cfg.AuthKey = ""
+		_ = s.Close()
 		return err
 	}
+	// Auth keys are one-shot bootstrap credentials. Do not retain them in the
+	// long-lived engine configuration after the server has consumed them.
+	s.AuthKey = ""
+	e.cfg.AuthKey = ""
 	e.server = s
 	return nil
 }
@@ -134,7 +143,11 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 	if e.server == nil {
 		return Status{ProfileID: e.cfg.ProfileID, Alias: e.cfg.Alias, MagicDNSSuffix: e.cfg.MagicDNSSuffix}, nil
 	}
-	st, err := e.server.Up(ctx)
+	lc, err := e.server.LocalClient()
+	if err != nil {
+		return Status{}, err
+	}
+	st, err := lc.Status(ctx)
 	if err != nil {
 		return Status{}, err
 	}
@@ -147,9 +160,10 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 	selfDNSName := ""
 	if st.Self != nil {
 		selfNode = nodeIDString(st.Self.ID, st.Self.NodeID)
-		selfDNSName = strings.TrimSuffix(st.Self.DNSName, ".")
+		selfDNSName = normalizeDNSRoute(st.Self.DNSName)
 	}
 	var peers []PeerStatus
+	var availableRoutes []RouteStatus
 	for _, peer := range st.Peer {
 		nodeID := nodeIDString(peer.ID, peer.NodeID)
 		if nodeID == "" {
@@ -157,9 +171,20 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		}
 		peers = append(peers, PeerStatus{
 			NodeID:       nodeID,
-			DNSName:      strings.TrimSuffix(peer.DNSName, "."),
+			DNSName:      normalizeDNSRoute(peer.DNSName),
 			TailscaleIPs: append([]netip.Addr(nil), peer.TailscaleIPs...),
 		})
+		if peer.PrimaryRoutes != nil {
+			for _, prefix := range peer.PrimaryRoutes.All() {
+				if !prefix.IsValid() || prefix.Bits() == 0 {
+					continue
+				}
+				availableRoutes = append(availableRoutes, RouteStatus{
+					Prefix:        prefix.Masked(),
+					PrimaryRouter: nodeID,
+				})
+			}
+		}
 	}
 	sort.Slice(peers, func(i, j int) bool {
 		if peers[i].NodeID != peers[j].NodeID {
@@ -167,25 +192,107 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		}
 		return peers[i].DNSName < peers[j].DNSName
 	})
+	sort.Slice(availableRoutes, func(i, j int) bool {
+		if availableRoutes[i].Prefix != availableRoutes[j].Prefix {
+			return availableRoutes[i].Prefix.String() < availableRoutes[j].Prefix.String()
+		}
+		return availableRoutes[i].PrimaryRouter < availableRoutes[j].PrimaryRouter
+	})
 	shieldsUp := false
-	if lc, err := e.server.LocalClient(); err == nil {
-		if prefs, err := lc.GetPrefs(ctx); err == nil {
-			shieldsUp = prefs.ShieldsUp
+	if prefs, err := lc.GetPrefs(ctx); err == nil {
+		shieldsUp = prefs.ShieldsUp
+	}
+	var dnsRoutes []DNSRouteStatus
+	if backend, err := e.LocalBackend(); err == nil {
+		if nm := backend.NetMapNoPeers(); nm != nil {
+			if suffix != "" && nm.DNS.Proxied {
+				dnsRoutes = append(dnsRoutes, DNSRouteStatus{Domain: normalizeDNSRoute(suffix), Source: "magicdns"})
+			}
+			for domain, resolvers := range nm.DNS.Routes {
+				normalizedDomain := normalizeDNSRoute(domain)
+				if nm.DNS.Proxied && len(resolvers) == 0 && normalizedDomain == normalizeDNSRoute(suffix) {
+					continue
+				}
+				dnsRoutes = append(dnsRoutes, DNSRouteStatus{
+					Domain:    normalizedDomain,
+					Source:    "split-dns",
+					Resolvers: cloneResolvers(resolvers),
+				})
+			}
+			defaultResolvers := nm.DNS.Resolvers
+			if len(defaultResolvers) == 0 {
+				defaultResolvers = nm.DNS.FallbackResolvers
+			}
+			if len(defaultResolvers) != 0 {
+				dnsRoutes = append(dnsRoutes, DNSRouteStatus{
+					Domain:    ".",
+					Source:    "default",
+					Resolvers: cloneResolvers(defaultResolvers),
+				})
+			}
 		}
 	}
+	sort.Slice(dnsRoutes, func(i, j int) bool {
+		if dnsRoutes[i].Domain != dnsRoutes[j].Domain {
+			return dnsRoutes[i].Domain < dnsRoutes[j].Domain
+		}
+		return dnsRoutes[i].Source < dnsRoutes[j].Source
+	})
 	return Status{
-		ProfileID:      e.cfg.ProfileID,
-		Alias:          e.cfg.Alias,
-		MagicDNSSuffix: suffix,
-		BackendState:   st.BackendState,
-		AuthURL:        st.AuthURL,
-		SelfNodeID:     selfNode,
-		SelfDNSName:    selfDNSName,
-		SelfIPs:        ips,
-		Peers:          peers,
-		PeerCount:      len(peers),
-		ShieldsUp:      shieldsUp,
+		ProfileID:       e.cfg.ProfileID,
+		Alias:           e.cfg.Alias,
+		MagicDNSSuffix:  suffix,
+		BackendState:    st.BackendState,
+		AuthURL:         st.AuthURL,
+		SelfNodeID:      selfNode,
+		SelfDNSName:     selfDNSName,
+		SelfIPs:         ips,
+		Peers:           peers,
+		PeerCount:       len(peers),
+		ShieldsUp:       shieldsUp,
+		AvailableRoutes: availableRoutes,
+		DNSRoutes:       dnsRoutes,
 	}, nil
+}
+
+func (e *TSNetEngine) SetRouteAll(ctx context.Context, enabled bool) error {
+	if e.server == nil {
+		return fmt.Errorf("tsnet server is not started")
+	}
+	lc, err := e.server.LocalClient()
+	if err != nil {
+		return err
+	}
+	_, err = lc.EditPrefs(ctx, &ipn.MaskedPrefs{
+		Prefs:       ipn.Prefs{RouteAll: enabled},
+		RouteAllSet: true,
+	})
+	return err
+}
+
+func normalizeDNSRoute(domain string) string {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return ""
+	}
+	parsed, err := dnsname.ToFQDN(domain)
+	if err != nil {
+		return ""
+	}
+	if parsed == dnsname.FQDN(".") {
+		return "."
+	}
+	return parsed.WithoutTrailingDot()
+}
+
+func cloneResolvers(in []*dnstype.Resolver) []*dnstype.Resolver {
+	out := make([]*dnstype.Resolver, 0, len(in))
+	for _, resolver := range in {
+		if resolver != nil {
+			out = append(out, resolver.Clone())
+		}
+	}
+	return out
 }
 
 func nodeIDString(stable tailcfg.StableNodeID, numeric tailcfg.NodeID) string {

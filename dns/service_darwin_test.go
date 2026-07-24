@@ -40,7 +40,7 @@ func TestManagerUsesNativeSplitDNSAndAnswersEffectiveIP(t *testing.T) {
 	const sharedName = "external-node.shared.example"
 	dnsCfg, err := configForService(ServiceConfig{
 		Domains: []Domain{{ProfileID: "home", Suffix: "home.example"}},
-		Records: []Record{{ProfileAlias: "home", Name: sharedName, EffectiveIP: wantIP}},
+		Records: []Record{{ProfileID: "home", Name: sharedName, EffectiveIP: wantIP}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ func TestManagerUsesNativeSplitDNSAndAnswersEffectiveIP(t *testing.T) {
 	service := &osService{manager: manager}
 	if err := service.Configure(
 		[]Domain{{ProfileID: "home", Suffix: "home.example"}},
-		[]Record{{ProfileAlias: "home", Name: addedName, EffectiveIP: addedIP}},
+		[]Record{{ProfileID: "home", Name: addedName, EffectiveIP: addedIP}},
 	); err != nil {
 		t.Fatal(err)
 	}

@@ -55,3 +55,24 @@ func TestStoreCorruptFileFailsClosed(t *testing.T) {
 		t.Fatal("expected corrupt state to fail")
 	}
 }
+
+func TestNormalizeMigratesProfileNameAndDNSPolicy(t *testing.T) {
+	st := State{
+		Profiles: []Profile{{ID: "stable-id", Alias: "old-display-name"}},
+		DNSRouteBindings: []DNSRouteBinding{
+			{Domain: "_Service._TCP.Example.COM.", ProfileID: "stable-id"},
+			{Domain: "bad..example.com", ProfileID: "stable-id"},
+		},
+		SearchDomains: []string{"Work.Example.COM.", "work.example.com", "."},
+	}
+	Normalize(&st)
+	if got := st.Profiles[0].Name; got != "stable-id" {
+		t.Fatalf("migrated name = %q, want stable ID", got)
+	}
+	if len(st.DNSRouteBindings) != 1 || st.DNSRouteBindings[0].Domain != "_service._tcp.example.com" {
+		t.Fatalf("DNS bindings = %+v", st.DNSRouteBindings)
+	}
+	if len(st.SearchDomains) != 1 || st.SearchDomains[0] != "work.example.com" {
+		t.Fatalf("search domains = %q", st.SearchDomains)
+	}
+}

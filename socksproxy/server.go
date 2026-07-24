@@ -9,7 +9,7 @@ import (
 	"tailscale.com/types/logger"
 )
 
-func Serve(ctx context.Context, ln net.Listener, router *Router, logf logger.Logf) error {
+func Serve(ctx context.Context, ln net.Listener, router Dialer, logf logger.Logf) error {
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()

@@ -14,8 +14,8 @@ func TestConfigForServiceUsesEffectiveHostsAndScopedDomains(t *testing.T) {
 			{ProfileID: "work", Suffix: "work.ts.net"},
 		},
 		Records: []Record{
-			{ProfileAlias: "work", Name: "db.work.ts.net", EffectiveIP: netip.MustParseAddr("100.127.0.7")},
-			{ProfileAlias: "work", Name: "db.work.ts.net", EffectiveIP: netip.MustParseAddr("fd6d:6e65:7400::7")},
+			{ProfileID: "work", Name: "db.work.ts.net", EffectiveIP: netip.MustParseAddr("100.127.0.7")},
+			{ProfileID: "work", Name: "db.work.ts.net", EffectiveIP: netip.MustParseAddr("fd6d:6e65:7400::7")},
 		},
 	})
 	if err != nil {
@@ -64,9 +64,9 @@ func TestConfigForServiceRoutesSharedPeerByExactFQDN(t *testing.T) {
 	dnsCfg, err := configForService(ServiceConfig{
 		Domains: []Domain{{ProfileID: "home", Suffix: "home.example"}},
 		Records: []Record{{
-			ProfileAlias: "home",
-			Name:         sharedName.WithoutTrailingDot(),
-			EffectiveIP:  netip.MustParseAddr("100.127.0.7"),
+			ProfileID:   "home",
+			Name:        sharedName.WithoutTrailingDot(),
+			EffectiveIP: netip.MustParseAddr("100.127.0.7"),
 		}},
 	})
 	if err != nil {

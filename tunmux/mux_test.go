@@ -142,3 +142,55 @@ func TestMuxTerminatesLocalServicePackets(t *testing.T) {
 		t.Fatal("timed out waiting for local response")
 	}
 }
+
+func TestMuxAddsAndRemovesProfilesWithoutStopping(t *testing.T) {
+	host := NewChanTUN("host")
+	hostNAT := netip.MustParseAddr("10.250.0.10")
+	destination := netip.MustParseAddr("10.20.1.2")
+	source := netip.MustParseAddr("100.65.0.10")
+	routeTable := func(profileID string) packetmap.Table {
+		routes := new(bart.Table[packetmap.SubnetRoute])
+		routes.Insert(netip.MustParsePrefix("10.20.0.0/16"), packetmap.SubnetRoute{ProfileID: profileID, Active: true})
+		return packetmap.Table{
+			Destinations: new(bart.Table[packetmap.Destination]),
+			ExactRoutes:  routes,
+			Sources: map[packetmap.SourceKey]packetmap.Source{
+				{ProfileID: profileID}: {HostIP: hostNAT, CanonicalIP: source},
+			},
+		}
+	}
+	mux := NewMux(host, nil, packetmap.New(routeTable("work")), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- mux.Run(ctx) }()
+
+	work := NewChanTUN("work")
+	if err := mux.AddProfile("work", work); err != nil {
+		t.Fatal(err)
+	}
+	host.Outbound <- testUDP(hostNAT, destination)
+	select {
+	case <-work.Outbound:
+	case <-time.After(time.Second):
+		t.Fatal("dynamically added profile did not receive a packet")
+	}
+	mux.RemoveProfile("work")
+	select {
+	case err := <-done:
+		t.Fatalf("mux stopped after profile removal: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	home := NewChanTUN("home")
+	mux.SetMapper(packetmap.New(routeTable("home")))
+	if err := mux.AddProfile("home", home); err != nil {
+		t.Fatal(err)
+	}
+	host.Outbound <- testUDP(hostNAT, destination)
+	select {
+	case <-home.Outbound:
+	case <-time.After(time.Second):
+		t.Fatal("replacement profile did not receive a packet")
+	}
+}

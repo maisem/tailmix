@@ -16,6 +16,10 @@ func NewJSONStore(path string) *JSONStore {
 	return &JSONStore{path: path}
 }
 
+func (s *JSONStore) Path() string {
+	return s.path
+}
+
 func (s *JSONStore) Load() (State, error) {
 	b, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -28,10 +32,12 @@ func (s *JSONStore) Load() (State, error) {
 	if err := json.Unmarshal(b, &st); err != nil {
 		return State{}, fmt.Errorf("load tailmix state %s: %w", s.path, err)
 	}
+	Normalize(&st)
 	return st, nil
 }
 
 func (s *JSONStore) Save(st State) error {
+	Normalize(&st)
 	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
 		return err
 	}

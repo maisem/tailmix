@@ -104,3 +104,52 @@ func TestIPv6UsesIPv6ProfileSource(t *testing.T) {
 		t.Fatalf("translated IPv6 packet = %v > %v, want %v > %v", p.Src.Addr(), p.Dst.Addr(), canonicalSrc, canonicalDst)
 	}
 }
+
+func TestExplicitSubnetRouteOverridesMoreSpecificImport(t *testing.T) {
+	hostNAT := netip.MustParseAddr("10.250.0.10")
+	labSelf := netip.MustParseAddr("100.65.0.10")
+	exact := new(bart.Table[SubnetRoute])
+	exact.Insert(netip.MustParsePrefix("10.0.0.0/8"), SubnetRoute{ProfileID: "lab", Active: true})
+	imported := new(bart.Table[SubnetRoute])
+	imported.Insert(netip.MustParsePrefix("10.20.0.0/16"), SubnetRoute{ProfileID: "work", Active: true})
+	mapper := New(Table{
+		Destinations:   new(bart.Table[Destination]),
+		ExactRoutes:    exact,
+		ImportedRoutes: imported,
+		Sources: map[SourceKey]Source{
+			{ProfileID: "lab"}: {HostIP: hostNAT, CanonicalIP: labSelf},
+		},
+	})
+	destination := netip.MustParseAddr("10.20.1.2")
+	translated, route, err := mapper.Outbound(udp4(hostNAT, destination, 1111, 2222))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.ProfileID != "lab" || !route.PreserveDestination {
+		t.Fatalf("route = %+v, want preserved lab route", route)
+	}
+	var parsed packet.Parsed
+	parsed.Decode(translated)
+	if parsed.Src.Addr() != labSelf || parsed.Dst.Addr() != destination {
+		t.Fatalf("translated subnet packet = %v > %v", parsed.Src.Addr(), parsed.Dst.Addr())
+	}
+}
+
+func TestWaitingExplicitSubnetRouteDoesNotFallBack(t *testing.T) {
+	exact := new(bart.Table[SubnetRoute])
+	exact.Insert(netip.MustParsePrefix("10.20.0.0/16"), SubnetRoute{ProfileID: "lab"})
+	imported := new(bart.Table[SubnetRoute])
+	imported.Insert(netip.MustParsePrefix("10.0.0.0/8"), SubnetRoute{ProfileID: "work", Active: true})
+	mapper := New(Table{
+		Destinations:   new(bart.Table[Destination]),
+		ExactRoutes:    exact,
+		ImportedRoutes: imported,
+	})
+	_, _, err := mapper.Outbound(udp4(
+		netip.MustParseAddr("10.250.0.10"),
+		netip.MustParseAddr("10.20.1.2"),
+		1111, 2222))
+	if err == nil {
+		t.Fatal("waiting explicit route unexpectedly fell back to imported route")
+	}
+}

@@ -46,9 +46,10 @@ func normalizeConfig(cfg Config) ([]netip.Prefix, []Route, error) {
 
 	routeSet := map[netip.Prefix]Route{}
 	for _, route := range cfg.Routes {
-		if !route.Destination.IsValid() || route.Destination.Bits() != route.Destination.Addr().BitLen() {
-			return nil, nil, fmt.Errorf("TUN route must be a host prefix: %v", route.Destination)
+		if !route.Destination.IsValid() {
+			return nil, nil, fmt.Errorf("TUN route must be a valid prefix: %v", route.Destination)
 		}
+		route.Destination = route.Destination.Masked()
 		routeSet[route.Destination] = route
 	}
 	routes := make([]Route, 0, len(routeSet))
@@ -56,7 +57,10 @@ func normalizeConfig(cfg Config) ([]netip.Prefix, []Route, error) {
 		routes = append(routes, route)
 	}
 	sort.Slice(routes, func(i, j int) bool {
-		return routes[i].Destination.Addr().Compare(routes[j].Destination.Addr()) < 0
+		if comparison := routes[i].Destination.Addr().Compare(routes[j].Destination.Addr()); comparison != 0 {
+			return comparison < 0
+		}
+		return routes[i].Destination.Bits() < routes[j].Destination.Bits()
 	})
 	return localAddrs, routes, nil
 }

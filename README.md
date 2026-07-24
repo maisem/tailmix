@@ -17,9 +17,12 @@ native `ipnserver` to each embedded profile.
 
 The TUN implementation supports macOS and Linux. Direct node routes, IPv4/IPv6
 effective addresses, interactive login, auth-key login, shared-node FQDNs, and
-MagicDNS are implemented. tailmix watches every profile for netmap updates and
-reconciles host routes, packet mappings, and DNS records when peers appear,
-change, or disappear. Subnet routes and exit nodes are not yet supported.
+MagicDNS are implemented. Profiles, selected subnet routes, split-DNS routes,
+and OS search domains can be changed through the local control API without
+restarting the daemon. Exact route bindings are explicit, fail-closed
+overrides of profile-wide accept-all imports. tailmix watches every profile
+for netmap updates and reconciles host routes, packet mappings, and DNS state
+when peers or advertised routes change. Exit nodes are not yet supported.
 
 ## Build
 
@@ -32,32 +35,53 @@ go build -o /tmp/tailmix ./cmd/tailmix
 
 ## Run on macOS
 
-Disconnect the regular Tailscale client first, then run tailmix as root with a
-separate state directory for each profile:
+Disconnect the regular Tailscale client first, then run tailmix as root. Zero
+profiles is a valid starting state:
 
 ```sh
 unset TS_AUTHKEY TS_AUTH_KEY
 
 sudo /tmp/tailmixd \
   -state /var/db/tailmix/state.json \
-  -synthetic-pool 10.250.0.0/16 \
-  -profile id=work \
-  -profile id=home
+  -synthetic-pool 10.250.0.0/16
 ```
 
-Open each interactive login URL as it appears. Existing profiles reuse their
-persisted login state. For unattended login, configure a distinct
-`auth-key-env` for each profile.
+Add profiles through the live CLI, then use the profile-local Tailscale
+namespace for interactive login:
+
+```sh
+sudo /tmp/tailmix profiles add work
+sudo /tmp/tailmix profiles add home
+sudo /tmp/tailmix ts --profile work up
+sudo /tmp/tailmix ts --profile home up
+```
+
+Existing profiles reuse their persisted login state. For unattended login,
+pass `--auth-key-env` or `--auth-key-file` to `profiles add`; the resolved key
+is used once and is not persisted.
 
 Each profile also gets a credential-authenticated LocalAPI socket. The `tailmix`
 CLI selects one and delegates the remaining arguments to Tailscale's upstream
 CLI implementation:
 
 ```sh
-/tmp/tailmix work status
-/tmp/tailmix home ping peer.home.example
-/tmp/tailmix work set --shields-up
+sudo /tmp/tailmix ts --profile work status
+sudo /tmp/tailmix ts --profile home ping peer.home.example
+sudo /tmp/tailmix ts --profile work set --shields-up
 ```
+
+Route policy is managed separately from profile names and delegated Tailscale
+commands:
+
+```sh
+sudo /tmp/tailmix routes bind --profile work 10.20.0.0/16
+sudo /tmp/tailmix routes set --profile home --accept-all=true
+sudo /tmp/tailmix dns routes bind --profile work corp.example.com
+sudo /tmp/tailmix dns search set corp.example.com
+```
+
+Use `tailmix help` for the complete subcommand space. Route listings show
+installed, waiting, ambiguous, and overridden runtime state.
 
 The sockets default to `/var/run/tailmix`. If `tailmixd` uses `-socket-dir`, set
 `TAILMIX_SOCKET_DIR` to the same directory when invoking `tailmix`. Access uses
@@ -77,8 +101,8 @@ URL and requires `-log-upload`; local user and verbose logging are unaffected.
 See [docs/darwin-testing.md](docs/darwin-testing.md) for verification steps,
 [docs/architecture.html](docs/architecture.html) for the implementation
 architecture, [docs/design.md](docs/design.md) for the design semantics, and
-[docs/profile-management.md](docs/profile-management.md) for the proposed live
-profile lifecycle CLI and daemon control API.
+[docs/profile-management.md](docs/profile-management.md) for the live profile
+lifecycle CLI and daemon control API.
 
 ## Run on Linux
 

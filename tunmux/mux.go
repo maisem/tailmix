@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 
 	"github.com/tailscale/wireguard-go/device"
@@ -14,11 +15,21 @@ import (
 )
 
 type Mux struct {
-	host     tun.Device
+	host   tun.Device
+	mapper atomic.Pointer[packetmap.Mapper]
+	local  LocalPacketHandler
+	logf   logger.Logf
+
+	mu       sync.RWMutex
 	profiles map[string]*ChanTUN
-	mapper   atomic.Pointer[packetmap.Mapper]
-	local    LocalPacketHandler
-	logf     logger.Logf
+	workers  map[string]profileWorker
+	runCtx   context.Context
+	errCh    chan error
+}
+
+type profileWorker struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // LocalPacketHandler terminates packets addressed to a service implemented
@@ -36,7 +47,15 @@ func NewMux(host tun.Device, profiles map[string]*ChanTUN, mapper *packetmap.Map
 	if mapper == nil {
 		mapper = packetmap.New(packetmap.Table{})
 	}
-	m := &Mux{host: host, profiles: profiles, logf: logf}
+	m := &Mux{
+		host:     host,
+		profiles: make(map[string]*ChanTUN, len(profiles)),
+		workers:  map[string]profileWorker{},
+		logf:     logf,
+	}
+	for profileID, profileTun := range profiles {
+		m.profiles[profileID] = profileTun
+	}
 	m.mapper.Store(mapper)
 	return m
 }
@@ -55,21 +74,61 @@ func (m *Mux) SetLocalPacketHandler(h LocalPacketHandler) {
 	m.local = h
 }
 
+func (m *Mux) AddProfile(profileID string, profileTun *ChanTUN) error {
+	if profileID == "" || profileTun == nil {
+		return fmt.Errorf("profile ID and TUN are required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.profiles[profileID]; ok {
+		return fmt.Errorf("profile %q already has a TUN", profileID)
+	}
+	m.profiles[profileID] = profileTun
+	if m.runCtx != nil {
+		m.startProfileWorkerLocked(profileID, profileTun)
+	}
+	return nil
+}
+
+func (m *Mux) RemoveProfile(profileID string) {
+	m.mu.Lock()
+	delete(m.profiles, profileID)
+	worker, ok := m.workers[profileID]
+	if ok {
+		delete(m.workers, profileID)
+		worker.cancel()
+	}
+	m.mu.Unlock()
+	if ok {
+		<-worker.done
+	}
+}
+
 // Run forwards packets in both directions until ctx is canceled or the host
 // TUN fails. The caller owns all TUN devices and must close the host device to
 // unblock its Read when canceling the context.
 func (m *Mux) Run(ctx context.Context) error {
-	workerCount := len(m.profiles) + 1
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	m.mu.Lock()
+	if m.runCtx != nil {
+		m.mu.Unlock()
+		return fmt.Errorf("TUN mux is already running")
+	}
+	m.runCtx = runCtx
+	workerCount := len(m.profiles) + 2
 	if m.local != nil {
 		workerCount++
 	}
-	errCh := make(chan error, workerCount)
-	go func() { errCh <- m.runHostToProfiles(ctx) }()
+	m.errCh = make(chan error, workerCount)
 	for profileID, profileTun := range m.profiles {
-		go func() { errCh <- m.runProfileToHost(ctx, profileID, profileTun) }()
+		m.startProfileWorkerLocked(profileID, profileTun)
 	}
+	errCh := m.errCh
+	m.mu.Unlock()
+	go func() { errCh <- m.runHostToProfiles(runCtx) }()
 	if m.local != nil {
-		go func() { errCh <- m.runLocalToHost(ctx) }()
+		go func() { errCh <- m.runLocalToHost(runCtx) }()
 	}
 
 	select {
@@ -81,6 +140,23 @@ func (m *Mux) Run(ctx context.Context) error {
 		}
 		return err
 	}
+}
+
+func (m *Mux) startProfileWorkerLocked(profileID string, profileTun *ChanTUN) {
+	workerCtx, cancel := context.WithCancel(m.runCtx)
+	done := make(chan struct{})
+	m.workers[profileID] = profileWorker{cancel: cancel, done: done}
+	go func() {
+		defer close(done)
+		err := m.runProfileToHost(workerCtx, profileID, profileTun)
+		if err == nil || workerCtx.Err() != nil {
+			return
+		}
+		select {
+		case m.errCh <- err:
+		case <-m.runCtx.Done():
+		}
+	}()
 }
 
 func (m *Mux) runHostToProfiles(ctx context.Context) error {
@@ -114,7 +190,9 @@ func (m *Mux) runHostToProfiles(ctx context.Context) error {
 				m.logf("drop outbound packet: %v", err)
 				continue
 			}
+			m.mu.RLock()
 			profileTun := m.profiles[route.ProfileID]
+			m.mu.RUnlock()
 			if profileTun == nil {
 				m.logf("drop outbound packet: missing profile TUN %q", route.ProfileID)
 				continue
@@ -163,7 +241,13 @@ func (m *Mux) runProfileToHost(ctx context.Context, profileID string, profileTun
 		select {
 		case <-ctx.Done():
 			return nil
-		case pkt := <-profileTun.Inbound:
+		case pkt, ok := <-profileTun.Inbound:
+			if !ok {
+				if ctx.Err() != nil {
+					return nil
+				}
+				return fmt.Errorf("profile %q TUN inbound channel closed", profileID)
+			}
 			translated, err := m.mapper.Load().Inbound(profileID, pkt)
 			if err != nil {
 				m.logf("drop inbound packet from profile %q: %v", profileID, err)

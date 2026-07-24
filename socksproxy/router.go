@@ -6,8 +6,11 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 
+	"github.com/gaissmai/bart"
 	"github.com/maisem/tailmix/effectiveip"
+	"tailscale.com/util/dnsname"
 )
 
 type Dialer interface {
@@ -26,9 +29,14 @@ type Decision struct {
 }
 
 type Router struct {
-	profilesByID map[string]Profile
-	suffixes     map[string]string
-	effectiveIPs map[netip.Addr]effectiveRoute
+	profilesByID   map[string]Profile
+	suffixes       map[string]string
+	effectiveIPs   map[netip.Addr]effectiveRoute
+	exactRoutes    *bart.Table[SubnetRoute]
+	importedRoutes *bart.Table[SubnetRoute]
+	exactDNS       []DomainRoute
+	importedDNS    []DomainRoute
+	automaticDNS   []DomainRoute
 }
 
 type effectiveRoute struct {
@@ -36,11 +44,61 @@ type effectiveRoute struct {
 	canonical netip.Addr
 }
 
+type SubnetRoute struct {
+	Prefix    netip.Prefix
+	ProfileID string
+	Active    bool
+	Exact     bool
+}
+
+type DomainRoute struct {
+	Suffix    string
+	ProfileID string
+	Active    bool
+	Exact     bool
+	Automatic bool
+}
+
+type DynamicRouter struct {
+	current atomic.Pointer[Router]
+}
+
+func NewDynamicRouter(router *Router) *DynamicRouter {
+	d := new(DynamicRouter)
+	d.Set(router)
+	return d
+}
+
+func (d *DynamicRouter) Set(router *Router) {
+	if router == nil {
+		panic("nil SOCKS router")
+	}
+	d.current.Store(router)
+}
+
+func (d *DynamicRouter) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	router := d.current.Load()
+	if router == nil {
+		return nil, fmt.Errorf("SOCKS router is not configured")
+	}
+	return router.Dial(ctx, network, addr)
+}
+
 func NewRouter(profiles []Profile, leases []effectiveip.Lease) (*Router, error) {
+	return NewRouterWithRoutes(profiles, leases, nil)
+}
+
+func NewRouterWithRoutes(profiles []Profile, leases []effectiveip.Lease, subnetRoutes []SubnetRoute) (*Router, error) {
+	return NewRouterWithPolicies(profiles, leases, subnetRoutes, nil)
+}
+
+func NewRouterWithPolicies(profiles []Profile, leases []effectiveip.Lease, subnetRoutes []SubnetRoute, domainRoutes []DomainRoute) (*Router, error) {
 	r := &Router{
-		profilesByID: map[string]Profile{},
-		suffixes:     map[string]string{},
-		effectiveIPs: map[netip.Addr]effectiveRoute{},
+		profilesByID:   map[string]Profile{},
+		suffixes:       map[string]string{},
+		effectiveIPs:   map[netip.Addr]effectiveRoute{},
+		exactRoutes:    new(bart.Table[SubnetRoute]),
+		importedRoutes: new(bart.Table[SubnetRoute]),
 	}
 	for _, p := range profiles {
 		if p.ID == "" {
@@ -52,10 +110,16 @@ func NewRouter(profiles []Profile, leases []effectiveip.Lease) (*Router, error) 
 		r.profilesByID[p.ID] = p
 		if p.MagicDNSSuffix != "" {
 			suffix := normalizeDNSName(p.MagicDNSSuffix)
-			if existing, ok := r.suffixes[suffix]; ok && existing != p.ID {
-				return nil, fmt.Errorf("MagicDNS suffix %q is configured for both %q and %q", suffix, existing, p.ID)
+			if suffix == "" {
+				return nil, fmt.Errorf("profile %q has invalid MagicDNS suffix %q", p.ID, p.MagicDNSSuffix)
 			}
-			r.suffixes[suffix] = p.ID
+			if existing, ok := r.suffixes[suffix]; ok && existing != p.ID {
+				// An identical automatic suffix is ambiguous until a policy
+				// route explicitly selects one profile.
+				r.suffixes[suffix] = ""
+			} else if !ok {
+				r.suffixes[suffix] = p.ID
+			}
 		}
 	}
 	for _, lease := range leases {
@@ -71,6 +135,45 @@ func NewRouter(profiles []Profile, leases []effectiveip.Lease) (*Router, error) 
 		r.effectiveIPs[lease.EffectiveIP] = effectiveRoute{
 			profileID: lease.NodeKey.ProfileID,
 			canonical: lease.NodeKey.CanonicalIP,
+		}
+	}
+	for _, route := range subnetRoutes {
+		if !route.Prefix.IsValid() || route.Prefix.Bits() == 0 {
+			continue
+		}
+		route.Prefix = route.Prefix.Masked()
+		if route.ProfileID != "" {
+			if _, ok := r.profilesByID[route.ProfileID]; !ok {
+				route.Active = false
+			}
+		}
+		if route.Exact {
+			r.exactRoutes.Insert(route.Prefix, route)
+		} else {
+			r.importedRoutes.Insert(route.Prefix, route)
+		}
+	}
+	for _, route := range domainRoutes {
+		rawSuffix := strings.TrimSpace(route.Suffix)
+		route.Suffix = normalizeDNSName(rawSuffix)
+		if rawSuffix == "." {
+			route.Suffix = "."
+		}
+		if route.Suffix == "" {
+			continue
+		}
+		if route.ProfileID != "" {
+			if _, ok := r.profilesByID[route.ProfileID]; !ok {
+				route.Active = false
+			}
+		}
+		switch {
+		case route.Exact:
+			r.exactDNS = append(r.exactDNS, route)
+		case route.Automatic:
+			r.automaticDNS = append(r.automaticDNS, route)
+		default:
+			r.importedDNS = append(r.importedDNS, route)
 		}
 	}
 	return r, nil
@@ -94,20 +197,41 @@ func (r *Router) Resolve(network, addr string) (Decision, error) {
 		return Decision{}, fmt.Errorf("SOCKS target must be host:port: %w", err)
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
-		route, ok := r.effectiveIPs[ip]
-		if !ok {
-			return Decision{}, fmt.Errorf("canonical Tailscale IP literals are disabled in SOCKS mode: %v", ip)
+		if route, ok := r.effectiveIPs[ip]; ok {
+			return Decision{ProfileID: route.profileID, DialAddr: net.JoinHostPort(route.canonical.String(), port)}, nil
 		}
-		return Decision{ProfileID: route.profileID, DialAddr: net.JoinHostPort(route.canonical.String(), port)}, nil
+		if route, ok := r.exactRoutes.Lookup(ip); ok {
+			if !route.Active || route.ProfileID == "" {
+				return Decision{}, fmt.Errorf("exact route for SOCKS destination %v is unavailable", ip)
+			}
+			return Decision{ProfileID: route.ProfileID, DialAddr: net.JoinHostPort(ip.String(), port)}, nil
+		}
+		if route, ok := r.importedRoutes.Lookup(ip); ok {
+			if !route.Active || route.ProfileID == "" {
+				return Decision{}, fmt.Errorf("imported route for SOCKS destination %v is ambiguous or unavailable", ip)
+			}
+			return Decision{ProfileID: route.ProfileID, DialAddr: net.JoinHostPort(ip.String(), port)}, nil
+		}
+		return Decision{}, fmt.Errorf("canonical Tailscale and unbound IP literals are disabled in SOCKS mode: %v", ip)
 	}
 	name := normalizeDNSName(host)
 	if !strings.Contains(name, ".") {
 		return Decision{}, fmt.Errorf("unqualified MagicDNS names are disabled in multi-tailnet mode: %q", host)
 	}
+	for _, tier := range [][]DomainRoute{r.exactDNS, r.importedDNS, r.automaticDNS} {
+		if route, ok := longestDomainRoute(name, tier); ok {
+			if !route.Active || route.ProfileID == "" {
+				return Decision{}, fmt.Errorf("DNS route for SOCKS destination %q is ambiguous or unavailable", host)
+			}
+			return Decision{ProfileID: route.ProfileID, DialAddr: net.JoinHostPort(name, port)}, nil
+		}
+	}
 	bestSuffix := ""
 	bestProfileID := ""
+	nameFQDN, _ := dnsname.ToFQDN(name)
 	for suffix, profileID := range r.suffixes {
-		if name != suffix && strings.HasSuffix(name, "."+suffix) {
+		suffixFQDN, err := dnsname.ToFQDN(suffix)
+		if err == nil && nameFQDN != suffixFQDN && suffixFQDN.Contains(nameFQDN) {
 			if len(suffix) > len(bestSuffix) {
 				bestSuffix = suffix
 				bestProfileID = profileID
@@ -120,6 +244,32 @@ func (r *Router) Resolve(network, addr string) (Decision, error) {
 	return Decision{}, fmt.Errorf("MagicDNS FQDN %q does not match any active profile", host)
 }
 
+func longestDomainRoute(name string, routes []DomainRoute) (DomainRoute, bool) {
+	nameFQDN, err := dnsname.ToFQDN(name)
+	if err != nil {
+		return DomainRoute{}, false
+	}
+	var best DomainRoute
+	bestLabels := -1
+	for _, route := range routes {
+		suffix, err := dnsname.ToFQDN(route.Suffix)
+		if err != nil || !suffix.Contains(nameFQDN) || suffix.NumLabels() <= bestLabels {
+			continue
+		}
+		best = route
+		bestLabels = suffix.NumLabels()
+	}
+	return best, bestLabels >= 0
+}
+
 func normalizeDNSName(name string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(name)), ".")
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return ""
+	}
+	parsed, err := dnsname.ToFQDN(name)
+	if err != nil || parsed == dnsname.FQDN(".") {
+		return ""
+	}
+	return parsed.WithoutTrailingDot()
 }

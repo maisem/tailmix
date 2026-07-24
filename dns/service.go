@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strings"
 
 	tailscaledns "tailscale.com/net/dns"
 	"tailscale.com/net/tsaddr"
@@ -13,20 +14,37 @@ import (
 )
 
 type Domain struct {
-	ProfileID string
+	ProfileID         string
+	Suffix            string
+	AuthoritativeOnly bool
+}
+
+type Route struct {
 	Suffix    string
+	ProfileID string
+	Resolvers []*dnstype.Resolver
+}
+
+type LiveConfig struct {
+	Domains       []Domain
+	Records       []Record
+	Routes        []Route
+	SearchDomains []string
 }
 
 type ServiceConfig struct {
-	TunName string
-	Domains []Domain
-	Records []Record
-	Logf    logger.Logf
+	TunName       string
+	Domains       []Domain
+	Records       []Record
+	Routes        []Route
+	SearchDomains []string
+	Logf          logger.Logf
 }
 
 type Service interface {
 	Addr() netip.AddrPort
 	Configure([]Domain, []Record) error
+	ConfigureFull(LiveConfig) error
 	HandlePacket([]byte) bool
 	Outbound() <-chan []byte
 	Err() error
@@ -44,7 +62,7 @@ func configForService(cfg ServiceConfig) (tailscaledns.Config, error) {
 		if domain.ProfileID == "" {
 			return tailscaledns.Config{}, fmt.Errorf("MagicDNS profile ID is required")
 		}
-		suffix, err := dnsname.ToFQDN(domain.Suffix)
+		suffix, err := dnsname.ToFQDN(strings.ToLower(strings.TrimSpace(domain.Suffix)))
 		if err != nil {
 			return tailscaledns.Config{}, fmt.Errorf("profile %q MagicDNS suffix %q: %w", domain.ProfileID, domain.Suffix, err)
 		}
@@ -57,23 +75,19 @@ func configForService(cfg ServiceConfig) (tailscaledns.Config, error) {
 		domainByProfile[domain.ProfileID] = suffix
 		ownerByDomain[suffix] = domain.ProfileID
 	}
-	if len(domainByProfile) == 0 {
-		return tailscaledns.Config{}, fmt.Errorf("no MagicDNS suffixes are available")
-	}
-
 	hosts := map[dnsname.FQDN][]netip.Addr{}
 	exactRoutes := map[dnsname.FQDN]bool{}
 	for _, record := range cfg.Records {
 		if !record.EffectiveIP.IsValid() {
 			return tailscaledns.Config{}, fmt.Errorf("MagicDNS record %q has invalid effective IP", record.Name)
 		}
-		domain, ok := domainByProfile[record.ProfileAlias]
+		domain, ok := domainByProfile[record.ProfileID]
 		if !ok {
-			return tailscaledns.Config{}, fmt.Errorf("MagicDNS record %q refers to unknown profile %q", record.Name, record.ProfileAlias)
+			return tailscaledns.Config{}, fmt.Errorf("MagicDNS record %q refers to unknown profile %q", record.Name, record.ProfileID)
 		}
-		name, err := dnsname.ToFQDN(record.Name)
+		name, err := dnsname.ToFQDN(strings.ToLower(strings.TrimSpace(record.Name)))
 		if err != nil {
-			return tailscaledns.Config{}, fmt.Errorf("profile %q MagicDNS name %q: %w", record.ProfileAlias, record.Name, err)
+			return tailscaledns.Config{}, fmt.Errorf("profile %q MagicDNS name %q: %w", record.ProfileID, record.Name, err)
 		}
 		if !domain.Contains(name) {
 			// Shared-in peers retain their source tailnet's FQDN. Route only
@@ -89,8 +103,12 @@ func configForService(cfg ServiceConfig) (tailscaledns.Config, error) {
 	}
 
 	routes := make(map[dnsname.FQDN][]*dnstype.Resolver, len(ownerByDomain))
-	for domain := range ownerByDomain {
-		routes[domain] = nil
+	for _, domain := range cfg.Domains {
+		if domain.AuthoritativeOnly {
+			continue
+		}
+		suffix, _ := dnsname.ToFQDN(strings.ToLower(strings.TrimSpace(domain.Suffix)))
+		routes[suffix] = nil
 	}
 	for name := range exactRoutes {
 		covered := false
@@ -104,10 +122,43 @@ func configForService(cfg ServiceConfig) (tailscaledns.Config, error) {
 			routes[name] = nil
 		}
 	}
+	var defaultResolvers []*dnstype.Resolver
+	for _, route := range cfg.Routes {
+		suffix, err := dnsname.ToFQDN(strings.ToLower(strings.TrimSpace(route.Suffix)))
+		if err != nil {
+			return tailscaledns.Config{}, fmt.Errorf("DNS route suffix %q: %w", route.Suffix, err)
+		}
+		if suffix == dnsname.FQDN(".") {
+			if defaultResolvers != nil && !sameResolvers(defaultResolvers, route.Resolvers) {
+				return tailscaledns.Config{}, fmt.Errorf("default DNS route is configured more than once")
+			}
+			defaultResolvers = cloneDNSResolvers(route.Resolvers)
+			continue
+		}
+		if existing, ok := routes[suffix]; ok && !sameResolvers(existing, route.Resolvers) {
+			return tailscaledns.Config{}, fmt.Errorf("DNS route %q has conflicting resolvers", suffix)
+		}
+		routes[suffix] = cloneDNSResolvers(route.Resolvers)
+	}
+	searchDomains := make([]dnsname.FQDN, 0, len(cfg.SearchDomains))
+	seenSearch := map[dnsname.FQDN]bool{}
+	for _, raw := range cfg.SearchDomains {
+		domain, err := dnsname.ToFQDN(strings.ToLower(strings.TrimSpace(raw)))
+		if err != nil {
+			return tailscaledns.Config{}, fmt.Errorf("search domain %q: %w", raw, err)
+		}
+		if domain == dnsname.FQDN(".") || seenSearch[domain] {
+			continue
+		}
+		seenSearch[domain] = true
+		searchDomains = append(searchDomains, domain)
+	}
 	return tailscaledns.Config{
-		AcceptDNS: true,
-		Hosts:     hosts,
-		Routes:    routes,
+		AcceptDNS:        true,
+		DefaultResolvers: defaultResolvers,
+		Hosts:            hosts,
+		Routes:           routes,
+		SearchDomains:    searchDomains,
 	}, nil
 }
 
@@ -118,4 +169,32 @@ func containsAddr(addrs []netip.Addr, want netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+func sameResolvers(a, b []*dnstype.Resolver) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] == nil || b[i] == nil {
+			if a[i] != b[i] {
+				return false
+			}
+			continue
+		}
+		if !a[i].Equal(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneDNSResolvers(in []*dnstype.Resolver) []*dnstype.Resolver {
+	out := make([]*dnstype.Resolver, 0, len(in))
+	for _, resolver := range in {
+		if resolver != nil {
+			out = append(out, resolver.Clone())
+		}
+	}
+	return out
 }

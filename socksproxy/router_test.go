@@ -122,3 +122,46 @@ func TestResolveRejectsUDP(t *testing.T) {
 		t.Fatal("expected UDP to fail")
 	}
 }
+
+func TestExplicitDomainRouteOverridesImportedRoute(t *testing.T) {
+	r, err := NewRouterWithPolicies([]Profile{
+		{ID: "work", Dialer: &recordingDialer{}},
+		{ID: "lab", Dialer: &recordingDialer{}},
+	}, nil, nil, []DomainRoute{
+		{Suffix: "corp.example", ProfileID: "work", Active: true},
+		{Suffix: "dev.corp.example", ProfileID: "lab", Active: true, Exact: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.Resolve("tcp", "db.dev.corp.example:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ProfileID != "lab" {
+		t.Fatalf("Resolve profile = %q, want lab", got.ProfileID)
+	}
+	got, err = r.Resolve("tcp", "db.corp.example:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ProfileID != "work" {
+		t.Fatalf("Resolve profile = %q, want work", got.ProfileID)
+	}
+}
+
+func TestWaitingExplicitDomainRouteFailsClosed(t *testing.T) {
+	r, err := NewRouterWithPolicies([]Profile{
+		{ID: "work", Dialer: &recordingDialer{}},
+		{ID: "lab", Dialer: &recordingDialer{}},
+	}, nil, nil, []DomainRoute{
+		{Suffix: "corp.example", ProfileID: "work", Active: true},
+		{Suffix: "dev.corp.example", ProfileID: "lab", Exact: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Resolve("tcp", "db.dev.corp.example:443"); err == nil {
+		t.Fatal("waiting explicit route unexpectedly fell back to imported route")
+	}
+}

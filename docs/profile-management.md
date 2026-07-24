@@ -1,6 +1,6 @@
 # Live Profile Management
 
-Status: Proposed
+Status: Implemented
 
 Date: 2026-07-23
 
@@ -241,6 +241,8 @@ one binding, nested suffixes may bind different profiles, and DNS
 longest-suffix match selects the most-specific binding.
 The root suffix `.` is a valid DNS route binding for a profile's default
 resolver route, but it is not a valid search domain.
+Validation and containment use Tailscale's `util/dnsname` parser and `FQDN`
+semantics, so DNS labels are not incorrectly restricted to hostname syntax.
 
 `set --accept-all=true` follows the profile's complete current and future DNS
 route configuration: its MagicDNS suffix, split-DNS routes, and Tailscale's
@@ -646,6 +648,14 @@ Waiting bindings use `state: "waiting"` and a stable `reason`, including
 `profile_unavailable`, `route_not_advertised`, `dns_route_not_advertised`, or
 `host_route_conflict`. The `available` resources are observational snapshots
 grouped by profile and do not mutate policy.
+
+An accept-all or automatic row shadowed completely by a higher policy tier uses
+`state: "overridden"` and reports `overriddenBy`, `overrideProfileId`, and
+`overrideProfileName`. A partially shadowed row remains installed and reports
+`reason: "partially_overridden"`. Identical accept-all imports from different
+profiles remain waiting with `reason: "ambiguous_route"`. Route and search
+resources also expose `reconcileError` when persisted desired state could not
+be fully applied to the live aggregate.
 
 For both binding resources, `PUT` atomically replaces the complete desired
 binding table and accept-all profile set. `PATCH` accepts atomic `bind` and

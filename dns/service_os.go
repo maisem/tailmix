@@ -81,7 +81,16 @@ func StartService(cfg ServiceConfig) (Service, error) {
 }
 
 func (s *osService) Configure(domains []Domain, records []Record) error {
-	dnsCfg, err := configForService(ServiceConfig{Domains: domains, Records: records})
+	return s.ConfigureFull(LiveConfig{Domains: domains, Records: records})
+}
+
+func (s *osService) ConfigureFull(cfg LiveConfig) error {
+	dnsCfg, err := configForService(ServiceConfig{
+		Domains:       cfg.Domains,
+		Records:       cfg.Records,
+		Routes:        cfg.Routes,
+		SearchDomains: cfg.SearchDomains,
+	})
 	if err != nil {
 		return err
 	}
