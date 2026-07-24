@@ -225,15 +225,17 @@ Profile-scoped commands use:
 
 ```text
 tailmix tailscale --profile <name> <tailscale-subcommand> [arguments]
+tailmix ts --profile <name> <tailscale-subcommand> [arguments]
 ```
 
 `tailmix` selects that profile's LocalAPI socket and delegates the remaining
 arguments to `tailscale.com/cmd/tailscale/cli`. Command behavior and output are
-therefore upstream Tailscale behavior. The explicit command namespace and
-profile option keep CLI command names and local profile names in separate
-naming domains. The daemon serves each socket through `ipnserver`, so peer
-credentials and `OperatorUser` permissions are evaluated in the same request
-path as `tailscaled`.
+therefore upstream Tailscale behavior. `ts` is an exact shortcut for the
+`tailscale` command namespace. The explicit command namespace and profile
+option keep CLI command names and local profile names in separate naming
+domains. The daemon serves each socket through `ipnserver`, so peer credentials
+and `OperatorUser` permissions are evaluated in the same request path as
+`tailscaled`.
 
 Aggregate lifecycle commands use `tailmix profiles ...` and a separate
 multi-profile API. They must not silently pick one profile.

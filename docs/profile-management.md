@@ -30,8 +30,11 @@ profile by option:
 
 ```text
 tailmix tailscale --profile work status
-tailmix tailscale --profile home ping peer.home.example
+tailmix ts --profile home ping peer.home.example
 ```
+
+`ts` is an exact shortcut for `tailscale`; neither form changes the delegated
+arguments or behavior.
 
 Profile changes are persisted and applied to the running daemon. Restarting one
 profile is allowed when its engine configuration changes, but adding, changing,
@@ -69,13 +72,14 @@ The first positional token always names a command namespace, never a profile:
 
 ```text
 tailmix profiles <lifecycle-command> [arguments]
-tailmix tailscale --profile <name> <tailscale-subcommand> [arguments]
+tailmix {tailscale|ts} --profile <name> <tailscale-subcommand> [arguments]
 ```
 
 `profiles` owns tailmix lifecycle operations. `tailscale` delegates to the
-selected profile's upstream Tailscale CLI. A profile name appears only as an
-operand or the value of `--profile`; it can never collide with `profiles`,
-`tailscale`, an upstream subcommand, or a future tailmix command.
+selected profile's upstream Tailscale CLI, and `ts` is its exact alias. A
+profile name appears only as an operand or the value of `--profile`; it can
+never collide with `profiles`, `tailscale`, `ts`, an upstream subcommand, or a
+future tailmix command.
 
 The current `tailmix work status` form is intentionally not part of the target
 grammar. A release may recognize it solely to print a deprecation error with
@@ -84,7 +88,7 @@ grammar:
 
 ```text
 tailmix work status
-# error: use "tailmix tailscale --profile work status"
+# error: use "tailmix ts --profile work status"
 ```
 
 Global CLI options precede the namespace; command-specific options follow their
@@ -195,7 +199,7 @@ the user at the normal profile-local command:
 
 ```text
 Profile "work" added; login required.
-Run: tailmix tailscale --profile work up
+Run: tailmix ts --profile work up
 ```
 
 `add` fails with a conflict if the name is already active or disabled.
@@ -544,6 +548,7 @@ Auth key material is never added to `state.State`.
 Unit tests should cover:
 
 - Strict separation of command namespaces from profile-name operands.
+- Exact argument and behavior parity between `tailscale` and its `ts` alias.
 - Deprecation errors for the old ambiguous delegation grammar.
 - Profile-name changes preserving stable ID, leases, state path, and socket.
 - Profile names never being DNS-normalized or used as device hostnames.
