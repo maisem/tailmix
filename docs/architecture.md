@@ -73,9 +73,12 @@ Three invariants keep the profiles isolated:
 
 ## Ownership boundaries
 
-tailmix carries a focused [`tsnet` fork](../tsnet/README.md). It substitutes a
-channel-backed `Server.Tun` and exposes `Server.LocalBackend`; the daemon uses
-published Tailscale modules for the engine, LocalAPI, and credential checks.
+tailmix carries focused [`tsnet`](../tsnet/README.md) and
+[`netns`](../netns/README.md) forks. The former substitutes a channel-backed
+`Server.Tun` and exposes `Server.LocalBackend`; the latter publishes Darwin's
+physical underlay through the shared netmon state consumed by upstream
+Tailscale sockets. The daemon uses published Tailscale modules for the
+remaining engine, LocalAPI, credential, and transport behavior.
 
 | Concern | tailmix owns | Profile engine / upstream Tailscale owns |
 | --- | --- | --- |
@@ -384,6 +387,7 @@ and does not install host routes or DNS configuration.
 | [`profilesocket`](../profilesocket/path.go) | Stable daemon and per-profile LocalAPI socket paths |
 | [`routingpolicy`](../routingpolicy/policy.go) | IP/DNS bindings, accept-all imports, overrides, ambiguity handling |
 | [`tsnet`](../tsnet/tsnet.go) | Upstream-derived embedded node with LocalBackend access |
+| [`netns`](../netns/netns.go) | Upstream-derived logical network namespace plus Darwin underlay publication |
 | [`hosttun`](../hosttun/hosttun.go) | Shared host interface and macOS/Linux route reconciliation |
 | [`tunmux`](../tunmux/mux.go) | Bidirectional packet pumps and profile channel TUNs |
 | [`packetmap`](../packetmap/packetmap.go) | BART lookups and in-place address/checksum translation |

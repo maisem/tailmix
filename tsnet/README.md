@@ -26,13 +26,15 @@ saved login server.
 login. tailmix enables this for every managed profile so ambient process
 environment cannot enroll multiple profiles with one key.
 
-On Darwin, the fork publishes the interface owning the underlying `/0` route
-to Tailscale's netmon before the aggregate tunnel installs split default
-routes. It refreshes that value on link changes. This keeps all `netns`
-consumers—including control, DERP, magicsock, port mapping, and DNS
-fallback—bound to the physical underlay even when the effective default is
-tailmix's pair of `/1` routes. The Darwin host router supplies the matching
-interface-scoped physical default that those bound sockets resolve through.
+On Darwin, the fork publishes the interface index owning the underlying `/0`
+route through tailmix's [`netns` fork](../netns/README.md) before the aggregate
+tunnel installs split default routes. It refreshes that value on link changes.
+The netns fork publishes the corresponding interface into Tailscale netmon's
+shared OS-default state. This keeps control, DERP, magicsock, port mapping, and
+DNS fallback sockets bound to the physical underlay even when the effective
+default is tailmix's pair of `/1` routes. The Darwin host router supplies the
+matching interface-scoped physical default that those bound sockets resolve
+through.
 
 OAuth-secret and workload-identity auth-key minting are omitted because their
 registration hooks live in an internal Tailscale package that cannot be

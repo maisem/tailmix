@@ -125,10 +125,12 @@ subnet routes remain profile-specific and take precedence over that default.
 
 ## License
 
-Except for the forked source under `tsnet/`, the contents of this repository
-are available under the BSD 3-Clause License. See [LICENSE](LICENSE). The
-[`tsnet` fork](tsnet/README.md) records its exact upstream source and why
-tailmix carries it, and retains Tailscale's copyright and license in
-[tsnet/LICENSE](tsnet/LICENSE). The linked Go dependency license report is
-generated with `go-licenses`; see [licenses/tailmix.md](licenses/tailmix.md)
-and [licenses/README.md](licenses/README.md).
+Except for the forked source under `tsnet/` and `netns/`, the contents of this
+repository are available under the BSD 3-Clause License. See
+[LICENSE](LICENSE). The [`tsnet` fork](tsnet/README.md) and
+[`netns` fork](netns/README.md) record their exact upstream sources and why
+tailmix carries them. They retain Tailscale's copyright and licenses in
+[tsnet/LICENSE](tsnet/LICENSE) and [netns/LICENSE](netns/LICENSE). The linked
+Go dependency license report is generated with `go-licenses`; see
+[licenses/tailmix.md](licenses/tailmix.md) and
+[licenses/README.md](licenses/README.md).

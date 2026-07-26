@@ -442,11 +442,13 @@ Manual/system tests:
 
 ## Open Implementation Risks
 
-The design carries a small fork of `tailscale.com/tsnet` pinned to the module
-version in `go.mod`. The fork retains the packet-facing `Server.Tun` hook,
-exposes `Server.LocalBackend` for `ipnserver`, and makes remote log upload
-opt-in with a replaceable endpoint. Updating Tailscale requires reconciling the
-fork against upstream while preserving those three boundaries.
+The design carries small forks of `tailscale.com/tsnet` and
+`tailscale.com/net/netns` pinned to the module version in `go.mod`. The `tsnet`
+fork retains the packet-facing `Server.Tun` hook, exposes
+`Server.LocalBackend` for `ipnserver`, and makes remote log upload opt-in with
+a replaceable endpoint. The `netns` fork adds Darwin underlay publication
+without vendoring the rest of Tailscale. Updating Tailscale requires a clean
+upstream import followed by separate reconciliation commits for both forks.
 
 The effective-IP allocator must choose an address space that avoids collisions
 with canonical Tailscale addresses, host routes, and ordinary LAN routes. One

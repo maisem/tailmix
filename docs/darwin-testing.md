@@ -100,10 +100,11 @@ When an exit node is selected, tailmix installs global `0.0.0.0/1` and
 `128.0.0.0/1` routes on its aggregate `utun`. Darwin `netns` keeps tsnet
 control, DERP, and direct WireGuard sockets on the physical underlay with
 `IP_BOUND_IF`. The local tsnet fork publishes the interface owning the
-underlying `/0` route as netmon's OS-provided default, independently of the
-effective split default. The host router also installs one interface-scoped
-`/0` on that physical interface. This gives bound sockets a route in their
-interface scope without duplicating the aggregate `/1`s.
+underlying `/0` route through tailmix's `netns` fork into netmon's OS-provided
+default, independently of the effective split default. The host router also
+installs one interface-scoped `/0` on that physical interface. This gives bound
+sockets a route in their interface scope without duplicating the aggregate
+`/1`s.
 
 With `-verbose`, verify the aggregate routes and continued underlay
 connectivity:

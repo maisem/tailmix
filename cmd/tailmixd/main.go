@@ -945,9 +945,9 @@ func activeExitProfile(st state.State, statuses []tailmixprofile.Status) string 
 
 // Split defaults take precedence over the host's ordinary default without
 // replacing it. The tsnet fork publishes the interface owning the underlying
-// /0 route as Darwin's OS-provided default, and the Darwin host router gives
-// that interface its own scoped default. Together those keep netns-bound
-// underlay sockets out of these aggregate TUN routes.
+// /0 route through the netns fork, and the Darwin host router gives that
+// interface its own scoped default. Together those keep netns-bound underlay
+// sockets out of these aggregate TUN routes.
 func splitDefaultRoutes(ipv6 bool) []netip.Prefix {
 	if ipv6 {
 		return []netip.Prefix{
