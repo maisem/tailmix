@@ -21,3 +21,20 @@ node names, peer identities, packet endpoints, or similar identifiers.
 
 Sensitive logging may be added temporarily for local debugging only. Remove all
 such instrumentation, its tests, and its documentation before committing.
+
+## Upstream forks
+
+Keep the first commit that imports an upstream library as an unmodified
+snapshot of the selected upstream revision. Preserve upstream copyright
+headers and include its license. Do not mix tailmix adaptations, generated
+metadata, or unrelated changes into that import commit.
+
+Add tailmix-specific changes only in follow-up commits. Apply the same split
+when refreshing a fork: first commit the clean upstream update, then commit the
+adaptations needed to reconcile tailmix.
+
+Every fork directory must contain a README that links to the upstream
+repository and exact commit, identifies the upstream module version and source
+path when applicable, explains why the fork exists, and summarizes the
+behavioral differences carried by tailmix. Keep a machine-readable `UPSTREAM`
+record beside the README.
