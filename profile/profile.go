@@ -41,12 +41,17 @@ type Status struct {
 	AvailableRoutes []RouteStatus
 	DNSRoutes       []DNSRouteStatus
 	SearchDomains   []string
+	RouteAll        bool
+	ExitNodeID      string
 }
 
 type PeerStatus struct {
-	NodeID       string
-	DNSName      string
-	TailscaleIPs []netip.Addr
+	NodeID         string
+	DNSName        string
+	TailscaleIPs   []netip.Addr
+	Online         bool
+	ExitNode       bool
+	ExitNodeOption bool
 }
 
 type RouteStatus struct {
@@ -62,4 +67,8 @@ type DNSRouteStatus struct {
 
 type RoutePreferenceController interface {
 	SetRouteAll(context.Context, bool) error
+}
+
+type ExitNodePreferenceController interface {
+	SetExitNodeIP(context.Context, netip.Addr) error
 }

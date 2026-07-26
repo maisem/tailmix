@@ -68,6 +68,11 @@ func Normalize(st *State) {
 		search = append(search, domain)
 	}
 	st.SearchDomains = slices.Clip(search)
+
+	if st.ExitNode != nil &&
+		(st.ExitNode.ProfileID == "" || st.ExitNode.NodeID == "" || !st.ExitNode.PeerIP.IsValid()) {
+		st.ExitNode = nil
+	}
 }
 
 func normalizeDomain(raw string) string {

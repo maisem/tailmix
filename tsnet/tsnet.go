@@ -279,6 +279,7 @@ type Server struct {
 	sys                 *tsd.System
 	netstack            *netstack.Impl
 	netMon              *netmon.Monitor
+	underlayUnregister  func()
 	rootPath            string // the state directory
 	hostname            string
 	shutdownCtx         context.Context
@@ -616,6 +617,10 @@ func (s *Server) close() {
 	if s.lb != nil {
 		s.lb.Shutdown()
 	}
+	if s.underlayUnregister != nil {
+		s.underlayUnregister()
+		s.underlayUnregister = nil
+	}
 	if s.netMon != nil {
 		s.netMon.Close()
 	}
@@ -798,6 +803,7 @@ func (s *Server) start() (reterr error) {
 		return err
 	}
 	closePool.add(s.netMon)
+	s.underlayUnregister = trackSystemUnderlay(s.netMon, tsLogf)
 	if s.LogUpload {
 		if err := s.startLogger(&closePool, sys.HealthTracker.Get(), tsLogf); err != nil {
 			return err

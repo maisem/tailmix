@@ -40,10 +40,9 @@ type daemonConfig struct {
 }
 
 type managedProfile struct {
-	runtime  runtimeProfile
-	cancel   context.CancelFunc
-	status   tailmixprofile.Status
-	routeAll bool
+	runtime runtimeProfile
+	cancel  context.CancelFunc
+	status  tailmixprofile.Status
 }
 
 type runtimeUpdate struct {
@@ -100,14 +99,13 @@ func newSupervisor(store *state.JSONStore, st state.State, initial []runtimeProf
 	}
 }
 
-func (s *supervisor) Run(ctx context.Context) error {
+func (s *supervisor) Run(ctx context.Context) (retErr error) {
 	s.mu.Lock()
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.profileAPIs = newProfileAPIGroup(s.ctx, s.cfg.SocketDir, s.cfg.Stderr)
 	if err := s.startAggregateLocked(); err != nil {
 		s.mu.Unlock()
-		s.close()
-		return err
+		return errors.Join(err, s.close())
 	}
 	for _, configured := range s.st.Profiles {
 		if configured.Disabled || configured.Removed {
@@ -121,21 +119,21 @@ func (s *supervisor) Run(ctx context.Context) error {
 	}
 	if err := s.reconcileLocked(); err != nil {
 		s.mu.Unlock()
-		s.close()
-		return err
+		return errors.Join(err, s.close())
 	}
 	control, err := startControlServer(s.ctx, s.cfg.SocketDir, s)
 	if err != nil {
 		s.mu.Unlock()
-		s.close()
-		return err
+		return errors.Join(err, s.close())
 	}
 	s.control = control
 	fmt.Fprintf(s.cfg.Stderr, "daemon control socket %s\n", profilesocket.ControlPath(s.cfg.SocketDir))
 	fmt.Fprintf(s.cfg.Stderr, "started %d enabled profile runtime(s)\n", len(s.runtimes))
 	s.mu.Unlock()
 
-	defer s.close()
+	defer func() {
+		retErr = errors.Join(retErr, s.close())
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -315,7 +313,13 @@ func (s *supervisor) reconcileLocked() (err error) {
 	if err := s.setRoutePreferencesLocked(); err != nil {
 		return err
 	}
-	statuses := usableStatuses(observedStatuses)
+	if err := s.setExitNodePreferencesLocked(observedStatuses); err != nil {
+		return err
+	}
+	// Re-read preferences after applying them. Host default routes must not be
+	// published until the selected engine reports the requested stable
+	// exit-node ID.
+	statuses := usableStatuses(s.statusesLocked())
 
 	if s.cfg.Mode == "tun" {
 		plan, err := buildTUNPlan(s.st, statuses)
@@ -369,6 +373,18 @@ func (s *supervisor) reconcileLocked() (err error) {
 				Prefix: entry.Prefix, ProfileID: entry.ProfileID, Active: entry.Active,
 			})
 		}
+		if exitProfileID := activeExitProfile(s.st, statuses); exitProfileID != "" {
+			subnetRoutes = append(subnetRoutes,
+				socksproxy.SubnetRoute{
+					Prefix:    netip.PrefixFrom(netip.IPv4Unspecified(), 0),
+					ProfileID: exitProfileID, Active: true,
+				},
+				socksproxy.SubnetRoute{
+					Prefix:    netip.PrefixFrom(netip.IPv6Unspecified(), 0),
+					ProfileID: exitProfileID, Active: true,
+				},
+			)
+		}
 		var domainRoutes []socksproxy.DomainRoute
 		for _, entry := range s.dnsPolicy.Exact {
 			domainRoutes = append(domainRoutes, socksproxy.DomainRoute{
@@ -383,6 +399,11 @@ func (s *supervisor) reconcileLocked() (err error) {
 		for _, entry := range s.dnsPolicy.Automatic {
 			domainRoutes = append(domainRoutes, socksproxy.DomainRoute{
 				Suffix: entry.Domain, ProfileID: entry.ProfileID, Active: entry.Active, Automatic: true,
+			})
+		}
+		if exitProfileID := activeExitProfile(s.st, statuses); exitProfileID != "" {
+			domainRoutes = append(domainRoutes, socksproxy.DomainRoute{
+				Suffix: ".", ProfileID: exitProfileID, Active: true, Automatic: true,
 			})
 		}
 		router, err := socksproxy.NewRouterWithPolicies(profiles, active, subnetRoutes, domainRoutes)
@@ -435,34 +456,55 @@ func (s *supervisor) statusesLocked() []tailmixprofile.Status {
 }
 
 func (s *supervisor) setRoutePreferencesLocked() error {
-	wants := map[string]bool{}
-	for _, configured := range s.st.Profiles {
-		if configured.AcceptAllRoutes && !configured.Disabled && !configured.Removed {
-			wants[configured.ID] = true
-		}
-	}
-	for _, binding := range s.st.IPRouteBindings {
-		wants[binding.ProfileID] = true
-	}
-	for _, entry := range append(append([]routingpolicy.DNSEntry(nil), s.dnsPolicy.Exact...), s.dnsPolicy.Imported...) {
-		if entry.Active && len(entry.Resolvers) != 0 {
-			wants[entry.ProfileID] = true
-		}
-	}
 	for id, managed := range s.runtimes {
-		want := wants[id]
-		if managed.routeAll == want {
+		if managed.status.RouteAll {
+			continue
+		}
+		if managed.status.BackendState != "Running" {
 			continue
 		}
 		controller, ok := managed.runtime.Engine.(tailmixprofile.RoutePreferenceController)
-		if !ok || managed.status.BackendState != "Running" {
-			continue
+		if !ok {
+			return fmt.Errorf("profile %q does not support route acceptance", s.nameForIDLocked(id))
 		}
-		if err := controller.SetRouteAll(s.ctx, want); err != nil {
+		if err := controller.SetRouteAll(s.ctx, true); err != nil {
 			s.lastErrors[id] = fmt.Sprintf("set accept-routes: %v", err)
+			return fmt.Errorf("enable route acceptance for profile %q: %w", s.nameForIDLocked(id), err)
+		}
+		managed.status.RouteAll = true
+	}
+	return nil
+}
+
+func (s *supervisor) setExitNodePreferencesLocked(statuses []tailmixprofile.Status) error {
+	current := make(map[string]string, len(statuses))
+	for _, status := range statuses {
+		current[status.ProfileID] = status.ExitNodeID
+	}
+	for id, managed := range s.runtimes {
+		wantID := ""
+		var wantIP netip.Addr
+		if s.st.ExitNode != nil && s.st.ExitNode.ProfileID == id {
+			wantID = s.st.ExitNode.NodeID
+			wantIP = s.st.ExitNode.PeerIP
+		}
+		if current[id] == wantID {
 			continue
 		}
-		managed.routeAll = want
+		if managed.status.BackendState != "Running" {
+			continue
+		}
+		controller, ok := managed.runtime.Engine.(tailmixprofile.ExitNodePreferenceController)
+		if !ok {
+			if wantID == "" {
+				continue
+			}
+			return fmt.Errorf("profile %q does not support exit nodes", s.nameForIDLocked(id))
+		}
+		if err := controller.SetExitNodeIP(s.ctx, wantIP); err != nil {
+			s.lastErrors[id] = fmt.Sprintf("set exit node: %v", err)
+			return fmt.Errorf("set exit node for profile %q: %w", s.nameForIDLocked(id), err)
+		}
 	}
 	return nil
 }
@@ -502,9 +544,10 @@ func closeForwarders(forwarders []*tailmixdns.Forwarder) {
 	}
 }
 
-func (s *supervisor) close() {
+func (s *supervisor) close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var errs []error
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -526,12 +569,17 @@ func (s *supervisor) close() {
 		s.socksListener = nil
 	}
 	if s.host != nil {
-		_ = s.host.Close()
+		if err := s.host.Close(); err != nil {
+			err = fmt.Errorf("close host TUN: %w", err)
+			fmt.Fprintln(s.cfg.Stderr, err)
+			errs = append(errs, err)
+		}
 		s.host = nil
 	}
 	if s.profileAPIs != nil {
 		_ = s.profileAPIs.Close()
 	}
+	return errors.Join(errs...)
 }
 
 func (s *supervisor) nameForIDLocked(profileID string) string {

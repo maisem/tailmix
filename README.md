@@ -64,6 +64,7 @@ List everything before changing policy:
 
 ```sh
 sudo tailmix routes list
+sudo tailmix exit-node list
 sudo tailmix dns routes list
 sudo tailmix dns search list
 ```
@@ -80,6 +81,16 @@ Pin one subnet to a profile:
 ```sh
 sudo tailmix routes bind --profile work 10.20.0.0/16
 ```
+
+Send default traffic through one exit node:
+
+```sh
+sudo tailmix exit-node set --profile work gateway
+```
+
+`gateway` may be the node's short hostname, full DNS name, stable node ID, or
+Tailscale IP. Run `sudo tailmix exit-node clear` to return to the host's normal
+default route.
 
 Route a DNS suffix through a profile, then make it a search domain so short
 names such as `printer` can expand to `printer.corp.example.com`:
@@ -102,12 +113,13 @@ uses your route and DNS bindings to choose the right profile. `tailmix` changes
 that policy through a local socket, so adding profiles or changing bindings
 does not restart unrelated profiles.
 
-Exit nodes are not yet supported.
+One exit node can be selected across all profiles. Direct peer and accepted
+subnet routes remain profile-specific and take precedence over that default.
 
 ## More information
 
 - [Linux service setup and troubleshooting](docs/linux-install.md)
-- [Profile, route, and DNS command reference](docs/profile-management.md)
+- [Profile, route, exit-node, and DNS command reference](docs/profile-management.md)
 - [Architecture](docs/architecture.md)
 - [Development workflows](DEVELOPMENT.md)
 

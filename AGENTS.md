@@ -12,3 +12,12 @@ created safely, explain the blocker in the final response.
 
 Do not amend, rewrite, force-push, or otherwise alter existing history unless
 the user explicitly requests it.
+
+## Logging and privacy
+
+Do not add logs containing information that Tailscale does not already log for
+the equivalent operation. In particular, do not log IP addresses, DNS names,
+node names, peer identities, packet endpoints, or similar identifiers.
+
+Sensitive logging may be added temporarily for local debugging only. Remove all
+such instrumentation, its tests, and its documentation before committing.

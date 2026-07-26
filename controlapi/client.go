@@ -80,6 +80,24 @@ func (c *Client) PatchIPRoutes(ctx context.Context, request PatchIPRoutesRequest
 	return out, err
 }
 
+func (c *Client) ExitNodes(ctx context.Context) (ExitNodes, error) {
+	var out ExitNodes
+	err := c.do(ctx, http.MethodGet, "/v1/exit-node", nil, &out)
+	return out, err
+}
+
+func (c *Client) SetExitNode(ctx context.Context, request SetExitNodeRequest) (ExitNodes, error) {
+	var out ExitNodes
+	err := c.do(ctx, http.MethodPut, "/v1/exit-node", request, &out)
+	return out, err
+}
+
+func (c *Client) ClearExitNode(ctx context.Context) (ExitNodes, error) {
+	var out ExitNodes
+	err := c.do(ctx, http.MethodDelete, "/v1/exit-node", nil, &out)
+	return out, err
+}
+
 func (c *Client) DNSRoutes(ctx context.Context, available bool) (DNSRoutes, error) {
 	path := "/v1/dns/routes"
 	if available {

@@ -24,6 +24,10 @@ type Backend interface {
 	ReplaceIPRoutes(context.Context, ReplaceIPRoutesRequest) (IPRoutes, error)
 	ClearIPRoutes(context.Context) (IPRoutes, error)
 
+	ExitNodes(context.Context) (ExitNodes, error)
+	SetExitNode(context.Context, SetExitNodeRequest) (ExitNodes, error)
+	ClearExitNode(context.Context) (ExitNodes, error)
+
 	DNSRoutes(context.Context, bool) (DNSRoutes, error)
 	PatchDNSRoutes(context.Context, PatchDNSRoutesRequest) (DNSRoutes, error)
 	ReplaceDNSRoutes(context.Context, ReplaceDNSRoutesRequest) (DNSRoutes, error)
@@ -112,6 +116,23 @@ func Handler(backend Backend) http.Handler {
 	})
 	mux.HandleFunc("DELETE /v1/routes", func(w http.ResponseWriter, r *http.Request) {
 		result, err := backend.ClearIPRoutes(r.Context())
+		writeResult(w, result, err)
+	})
+
+	mux.HandleFunc("GET /v1/exit-node", func(w http.ResponseWriter, r *http.Request) {
+		result, err := backend.ExitNodes(r.Context())
+		writeResult(w, result, err)
+	})
+	mux.HandleFunc("PUT /v1/exit-node", func(w http.ResponseWriter, r *http.Request) {
+		var request SetExitNodeRequest
+		if !decodeRequest(w, r, &request) {
+			return
+		}
+		result, err := backend.SetExitNode(r.Context(), request)
+		writeResult(w, result, err)
+	})
+	mux.HandleFunc("DELETE /v1/exit-node", func(w http.ResponseWriter, r *http.Request) {
+		result, err := backend.ClearExitNode(r.Context())
 		writeResult(w, result, err)
 	})
 

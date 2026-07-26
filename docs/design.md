@@ -54,7 +54,8 @@ Outbound packet flow supports direct peers and accepted subnets:
 
 1. A local process sends traffic to an effective peer IP or an explicitly
    accepted subnet destination.
-2. The OS routes that traffic to the shared daemon-owned TUN.
+2. The OS routes that traffic to the shared daemon-owned TUN using the shared
+   host NAT address as its source.
 3. A BART longest-prefix-match table maps the destination to a profile and
    route kind.
 4. The daemon SNATs the shared host NAT address to that profile's canonical
@@ -114,9 +115,9 @@ Effective IPs are:
 - Never used as ACL subjects.
 
 Effective IPv4 and IPv6 addresses and the host NAT addresses come from
-daemon-configurable pools. Pool selection is persisted alongside the leases.
-Changing a pool retires the old leases and host NAT address for that family and
-allocates replacements.
+daemon-configurable pools. The prefix base remains unassigned. Pool selection
+is persisted alongside the leases. Changing a pool retires the old leases and
+host NAT address for that family and allocates replacements.
 
 Effective IPs map to canonical tailnet identity:
 

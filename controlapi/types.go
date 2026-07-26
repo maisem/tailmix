@@ -118,6 +118,37 @@ type ReplaceIPRoutesRequest struct {
 	AcceptAll []string          `json:"acceptAll,omitempty"`
 }
 
+type AvailableExitNode struct {
+	ProfileID   string       `json:"profileId"`
+	ProfileName string       `json:"profileName"`
+	NodeID      string       `json:"nodeId"`
+	DNSName     string       `json:"dnsName,omitempty"`
+	IPs         []netip.Addr `json:"ips,omitempty"`
+	Online      bool         `json:"online"`
+}
+
+type SelectedExitNode struct {
+	ProfileID   string     `json:"profileId"`
+	ProfileName string     `json:"profileName"`
+	NodeID      string     `json:"nodeId"`
+	DNSName     string     `json:"dnsName,omitempty"`
+	PeerIP      netip.Addr `json:"peerIp"`
+	Online      bool       `json:"online"`
+	State       string     `json:"state"`
+	Reason      string     `json:"reason,omitempty"`
+}
+
+type ExitNodes struct {
+	Selected       *SelectedExitNode   `json:"selected,omitempty"`
+	Available      []AvailableExitNode `json:"available,omitempty"`
+	ReconcileError string              `json:"reconcileError,omitempty"`
+}
+
+type SetExitNodeRequest struct {
+	ProfileName string `json:"profileName"`
+	Peer        string `json:"peer"`
+}
+
 type DNSResolver struct {
 	Addr                string       `json:"addr"`
 	BootstrapResolution []netip.Addr `json:"bootstrapResolution,omitempty"`

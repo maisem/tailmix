@@ -18,6 +18,9 @@ type fakeManagementClient struct {
 	profile        controlapi.Profile
 	profileName    string
 	ipPatch        controlapi.PatchIPRoutesRequest
+	exitSet        controlapi.SetExitNodeRequest
+	exitCleared    bool
+	exitNodes      controlapi.ExitNodes
 	dnsPatch       controlapi.PatchDNSRoutesRequest
 	searchReplace  []string
 	statusProfiles []controlapi.Profile
@@ -51,6 +54,17 @@ func (f *fakeManagementClient) IPRoutes(context.Context, bool) (controlapi.IPRou
 func (f *fakeManagementClient) PatchIPRoutes(_ context.Context, request controlapi.PatchIPRoutesRequest) (controlapi.IPRoutes, error) {
 	f.ipPatch = request
 	return controlapi.IPRoutes{}, nil
+}
+func (f *fakeManagementClient) ExitNodes(context.Context) (controlapi.ExitNodes, error) {
+	return f.exitNodes, nil
+}
+func (f *fakeManagementClient) SetExitNode(_ context.Context, request controlapi.SetExitNodeRequest) (controlapi.ExitNodes, error) {
+	f.exitSet = request
+	return f.exitNodes, nil
+}
+func (f *fakeManagementClient) ClearExitNode(context.Context) (controlapi.ExitNodes, error) {
+	f.exitCleared = true
+	return f.exitNodes, nil
 }
 func (f *fakeManagementClient) DNSRoutes(context.Context, bool) (controlapi.DNSRoutes, error) {
 	return controlapi.DNSRoutes{}, nil
@@ -179,7 +193,7 @@ func TestRootHelpShowsFullSubcommandSpace(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	for _, command := range []string{"status", "profiles", "routes", "dns routes", "dns search", "tailscale", "ts"} {
+	for _, command := range []string{"status", "profiles", "routes", "exit-node", "dns routes", "dns search", "tailscale", "ts"} {
 		if !strings.Contains(stdout.String(), command) {
 			t.Errorf("help does not contain %q:\n%s", command, stdout.String())
 		}
@@ -262,6 +276,52 @@ func TestRouteBindingAndAcceptAllRequests(t *testing.T) {
 		testDependencies(client, io.Discard, io.Discard, nil))
 	if code != 0 || !client.ipPatch.AcceptAll["work"] {
 		t.Fatalf("accept-all exit = %d, request = %+v", code, client.ipPatch)
+	}
+}
+
+func TestExitNodeSetAndClearRequests(t *testing.T) {
+	client := &fakeManagementClient{}
+	code := runWithDependencies(context.Background(),
+		[]string{"exit-node", "set", "--profile", "work", "gateway"},
+		testDependencies(client, io.Discard, io.Discard, nil))
+	if code != 0 {
+		t.Fatalf("set exit code = %d", code)
+	}
+	if client.exitSet.ProfileName != "work" || client.exitSet.Peer != "gateway" {
+		t.Fatalf("set request = %+v", client.exitSet)
+	}
+
+	code = runWithDependencies(context.Background(),
+		[]string{"exit-node", "clear"},
+		testDependencies(client, io.Discard, io.Discard, nil))
+	if code != 0 || !client.exitCleared {
+		t.Fatalf("clear exit code = %d, cleared = %v", code, client.exitCleared)
+	}
+}
+
+func TestExitNodeListShowsSelectedAndAvailableNodes(t *testing.T) {
+	nodeIP := netip.MustParseAddr("100.64.0.20")
+	client := &fakeManagementClient{exitNodes: controlapi.ExitNodes{
+		Selected: &controlapi.SelectedExitNode{
+			ProfileID: "work-id", ProfileName: "work", NodeID: "node-id",
+			DNSName: "gateway.tailnet.ts.net", PeerIP: nodeIP, Online: true, State: "installed",
+		},
+		Available: []controlapi.AvailableExitNode{{
+			ProfileID: "work-id", ProfileName: "work", NodeID: "node-id",
+			DNSName: "gateway.tailnet.ts.net", IPs: []netip.Addr{nodeIP}, Online: true,
+		}},
+	}}
+	var stdout bytes.Buffer
+	code := runWithDependencies(context.Background(),
+		[]string{"exit-node", "list"},
+		testDependencies(client, &stdout, io.Discard, nil))
+	if code != 0 {
+		t.Fatalf("list exit code = %d", code)
+	}
+	for _, want := range []string{"PROFILE", "gateway.tailnet.ts.net", nodeIP.String(), "yes", "✓"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("exit-node list does not contain %q:\n%s", want, stdout.String())
+		}
 	}
 }
 

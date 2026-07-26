@@ -34,6 +34,7 @@ type Router struct {
 	effectiveIPs   map[netip.Addr]effectiveRoute
 	exactRoutes    *bart.Table[SubnetRoute]
 	importedRoutes *bart.Table[SubnetRoute]
+	exitRoutes     *bart.Table[SubnetRoute]
 	exactDNS       []DomainRoute
 	importedDNS    []DomainRoute
 	automaticDNS   []DomainRoute
@@ -99,6 +100,7 @@ func NewRouterWithPolicies(profiles []Profile, leases []effectiveip.Lease, subne
 		effectiveIPs:   map[netip.Addr]effectiveRoute{},
 		exactRoutes:    new(bart.Table[SubnetRoute]),
 		importedRoutes: new(bart.Table[SubnetRoute]),
+		exitRoutes:     new(bart.Table[SubnetRoute]),
 	}
 	for _, p := range profiles {
 		if p.ID == "" {
@@ -138,7 +140,7 @@ func NewRouterWithPolicies(profiles []Profile, leases []effectiveip.Lease, subne
 		}
 	}
 	for _, route := range subnetRoutes {
-		if !route.Prefix.IsValid() || route.Prefix.Bits() == 0 {
+		if !route.Prefix.IsValid() {
 			continue
 		}
 		route.Prefix = route.Prefix.Masked()
@@ -147,7 +149,9 @@ func NewRouterWithPolicies(profiles []Profile, leases []effectiveip.Lease, subne
 				route.Active = false
 			}
 		}
-		if route.Exact {
+		if route.Prefix.Bits() == 0 {
+			r.exitRoutes.Insert(route.Prefix, route)
+		} else if route.Exact {
 			r.exactRoutes.Insert(route.Prefix, route)
 		} else {
 			r.importedRoutes.Insert(route.Prefix, route)
@@ -209,6 +213,12 @@ func (r *Router) Resolve(network, addr string) (Decision, error) {
 		if route, ok := r.importedRoutes.Lookup(ip); ok {
 			if !route.Active || route.ProfileID == "" {
 				return Decision{}, fmt.Errorf("imported route for SOCKS destination %v is ambiguous or unavailable", ip)
+			}
+			return Decision{ProfileID: route.ProfileID, DialAddr: net.JoinHostPort(ip.String(), port)}, nil
+		}
+		if route, ok := r.exitRoutes.Lookup(ip); ok {
+			if !route.Active || route.ProfileID == "" {
+				return Decision{}, fmt.Errorf("exit-node route for SOCKS destination %v is unavailable", ip)
 			}
 			return Decision{ProfileID: route.ProfileID, DialAddr: net.JoinHostPort(ip.String(), port)}, nil
 		}

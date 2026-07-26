@@ -1,9 +1,11 @@
 package profile
 
 import (
+	"net/netip"
 	"testing"
 
 	"github.com/maisem/tailmix/tunmux"
+	"tailscale.com/ipn"
 )
 
 func TestTSNetEngineAcceptsProvidedTunBeforeStart(t *testing.T) {
@@ -17,6 +19,44 @@ func TestTSNetEngineAcceptsProvidedTunBeforeStart(t *testing.T) {
 	})
 	if engine == nil {
 		t.Fatal("engine is nil")
+	}
+}
+
+func TestExitNodePrefsUsesBackendResolutionPath(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		peerIP netip.Addr
+	}{
+		{name: "select", peerIP: netip.MustParseAddr("100.64.0.20")},
+		{name: "clear"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mp := exitNodePrefs(test.peerIP)
+			if mp.ExitNodeIP != test.peerIP {
+				t.Fatalf("exit node IP = %v, want %v", mp.ExitNodeIP, test.peerIP)
+			}
+			if mp.ExitNodeID != "" {
+				t.Fatalf("exit node ID = %q, want backend resolution", mp.ExitNodeID)
+			}
+			if !mp.ExitNodeIDSet || !mp.ExitNodeIPSet {
+				t.Fatalf("exit node masks are not both set: %+v", mp)
+			}
+			if mp.AutoExitNodeSet || mp.RouteAllSet {
+				t.Fatalf("exit selection changes unrelated preferences: %+v", mp)
+			}
+			prefs := ipn.Prefs{
+				RouteAll:   true,
+				ExitNodeID: "previous-node",
+				ExitNodeIP: netip.MustParseAddr("100.64.0.99"),
+			}
+			prefs.ApplyEdits(mp)
+			if prefs.ExitNodeID != "" || prefs.ExitNodeIP != test.peerIP {
+				t.Fatalf("applied exit preferences = ID %q, IP %v", prefs.ExitNodeID, prefs.ExitNodeIP)
+			}
+			if !prefs.RouteAll {
+				t.Fatal("exit selection disabled RouteAll")
+			}
+		})
 	}
 }
 

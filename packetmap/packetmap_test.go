@@ -24,6 +24,13 @@ func udp6(src, dst netip.Addr, sport, dport uint16) []byte {
 	}, []byte("hello"))
 }
 
+func icmp4(src, dst netip.Addr, typ packet.ICMP4Type) []byte {
+	return packet.Generate(packet.ICMP4Header{
+		IP4Header: packet.IP4Header{Src: src, Dst: dst},
+		Type:      typ,
+	}, []byte("echo"))
+}
+
 func TestOutboundMapsEffectiveDestinationToCanonicalProfile(t *testing.T) {
 	effectiveDst := netip.MustParseAddr("100.127.0.1")
 	canonicalDst := netip.MustParseAddr("100.64.0.1")
@@ -151,5 +158,90 @@ func TestWaitingExplicitSubnetRouteDoesNotFallBack(t *testing.T) {
 		1111, 2222))
 	if err == nil {
 		t.Fatal("waiting explicit route unexpectedly fell back to imported route")
+	}
+}
+
+func TestExitNodeRouteIsDefaultFallback(t *testing.T) {
+	hostNAT := netip.MustParseAddr("10.250.0.10")
+	exitSelf := netip.MustParseAddr("100.65.0.10")
+	exitRoutes := new(bart.Table[SubnetRoute])
+	exitRoutes.Insert(netip.MustParsePrefix("0.0.0.0/0"), SubnetRoute{ProfileID: "exit", Active: true})
+	mapper := New(Table{
+		Destinations: new(bart.Table[Destination]),
+		ExitRoutes:   exitRoutes,
+		Sources: map[SourceKey]Source{
+			{ProfileID: "exit"}: {HostIP: hostNAT, CanonicalIP: exitSelf},
+		},
+	})
+	destination := netip.MustParseAddr("203.0.113.10")
+	translated, route, err := mapper.Outbound(udp4(hostNAT, destination, 1111, 443))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.ProfileID != "exit" || !route.PreserveDestination {
+		t.Fatalf("route = %+v, want preserved exit-node route", route)
+	}
+	var parsed packet.Parsed
+	parsed.Decode(translated)
+	if parsed.Src.Addr() != exitSelf || parsed.Dst.Addr() != destination {
+		t.Fatalf("translated packet = %v > %v", parsed.Src.Addr(), parsed.Dst.Addr())
+	}
+}
+
+func TestExitNodeICMPSNATAndDNAT(t *testing.T) {
+	hostNAT := netip.MustParseAddr("10.250.0.2")
+	exitSelf := netip.MustParseAddr("100.65.0.10")
+	internet := netip.MustParseAddr("1.1.1.1")
+	exitRoutes := new(bart.Table[SubnetRoute])
+	exitRoutes.Insert(netip.MustParsePrefix("0.0.0.0/0"), SubnetRoute{ProfileID: "exit", Active: true})
+	mapper := New(Table{
+		Destinations: new(bart.Table[Destination]),
+		ExitRoutes:   exitRoutes,
+		Sources: map[SourceKey]Source{
+			{ProfileID: "exit"}: {HostIP: hostNAT, CanonicalIP: exitSelf},
+		},
+	})
+
+	outbound, _, err := mapper.Outbound(icmp4(hostNAT, internet, packet.ICMP4EchoRequest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed packet.Parsed
+	parsed.Decode(outbound)
+	if parsed.Src.Addr() != exitSelf || parsed.Dst.Addr() != internet {
+		t.Fatalf("SNAT packet = %v > %v, want %v > %v", parsed.Src.Addr(), parsed.Dst.Addr(), exitSelf, internet)
+	}
+
+	inbound, err := mapper.Inbound("exit", icmp4(internet, exitSelf, packet.ICMP4EchoReply))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed.Decode(inbound)
+	if parsed.Src.Addr() != internet || parsed.Dst.Addr() != hostNAT {
+		t.Fatalf("DNAT packet = %v > %v, want %v > %v", parsed.Src.Addr(), parsed.Dst.Addr(), internet, hostNAT)
+	}
+}
+
+func TestSubnetRouteOverridesExitNodeFallback(t *testing.T) {
+	hostNAT := netip.MustParseAddr("10.250.0.10")
+	workSelf := netip.MustParseAddr("100.65.0.10")
+	imported := new(bart.Table[SubnetRoute])
+	imported.Insert(netip.MustParsePrefix("10.0.0.0/8"), SubnetRoute{ProfileID: "work", Active: true})
+	exitRoutes := new(bart.Table[SubnetRoute])
+	exitRoutes.Insert(netip.MustParsePrefix("0.0.0.0/0"), SubnetRoute{ProfileID: "exit", Active: true})
+	mapper := New(Table{
+		Destinations:   new(bart.Table[Destination]),
+		ImportedRoutes: imported,
+		ExitRoutes:     exitRoutes,
+		Sources: map[SourceKey]Source{
+			{ProfileID: "work"}: {HostIP: hostNAT, CanonicalIP: workSelf},
+		},
+	})
+	_, route, err := mapper.Outbound(udp4(hostNAT, netip.MustParseAddr("10.20.1.2"), 1111, 443))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.ProfileID != "work" {
+		t.Fatalf("route profile = %q, want work", route.ProfileID)
 	}
 }

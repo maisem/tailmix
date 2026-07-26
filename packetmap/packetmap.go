@@ -33,6 +33,7 @@ type Table struct {
 	Destinations   *bart.Table[Destination]
 	ExactRoutes    *bart.Table[SubnetRoute]
 	ImportedRoutes *bart.Table[SubnetRoute]
+	ExitRoutes     *bart.Table[SubnetRoute]
 	Sources        map[SourceKey]Source
 	InboundPeers   map[string]*bart.Table[netip.Addr]
 }
@@ -136,6 +137,12 @@ func (m *Mapper) outboundDestination(ip netip.Addr) (Destination, bool, error) {
 		}
 		return Destination{ProfileID: route.ProfileID, CanonicalIP: ip}, true, nil
 	}
+	if route, ok := lookupSubnet(m.table.ExitRoutes, ip); ok {
+		if !route.Active || route.ProfileID == "" {
+			return Destination{}, false, fmt.Errorf("exit-node route for destination %v is unavailable", ip)
+		}
+		return Destination{ProfileID: route.ProfileID, CanonicalIP: ip}, true, nil
+	}
 	return Destination{}, false, fmt.Errorf("no profile route for destination %v", ip)
 }
 
@@ -149,6 +156,12 @@ func (m *Mapper) inboundSubnetRoute(ip netip.Addr) (SubnetRoute, error) {
 	if route, ok := lookupSubnet(m.table.ImportedRoutes, ip); ok {
 		if !route.Active || route.ProfileID == "" {
 			return SubnetRoute{}, fmt.Errorf("imported route for subnet source %v is ambiguous or unavailable", ip)
+		}
+		return route, nil
+	}
+	if route, ok := lookupSubnet(m.table.ExitRoutes, ip); ok {
+		if !route.Active || route.ProfileID == "" {
+			return SubnetRoute{}, fmt.Errorf("exit-node route for source %v is unavailable", ip)
 		}
 		return route, nil
 	}

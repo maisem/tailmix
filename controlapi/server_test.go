@@ -12,8 +12,9 @@ import (
 
 type recordingBackend struct {
 	Backend
-	ipPatch  PatchIPRoutesRequest
-	profiles Profiles
+	ipPatch     PatchIPRoutesRequest
+	exitRequest SetExitNodeRequest
+	profiles    Profiles
 }
 
 func (b *recordingBackend) PatchIPRoutes(_ context.Context, request PatchIPRoutesRequest) (IPRoutes, error) {
@@ -27,6 +28,15 @@ func (b *recordingBackend) PatchIPRoutes(_ context.Context, request PatchIPRoute
 
 func (b *recordingBackend) ListProfiles(context.Context, bool) (Profiles, error) {
 	return b.profiles, nil
+}
+
+func (b *recordingBackend) SetExitNode(_ context.Context, request SetExitNodeRequest) (ExitNodes, error) {
+	b.exitRequest = request
+	return ExitNodes{Selected: &SelectedExitNode{
+		ProfileName: request.ProfileName,
+		DNSName:     request.Peer,
+		State:       "installed",
+	}}, nil
 }
 
 func TestHandlerDecodesAtomicRoutePatch(t *testing.T) {
@@ -69,6 +79,29 @@ func TestHandlerRejectsUnknownRequestFields(t *testing.T) {
 	}
 	if got.Code != "invalid_request" {
 		t.Fatalf("error = %+v", got)
+	}
+}
+
+func TestHandlerSetsExitNode(t *testing.T) {
+	backend := &recordingBackend{}
+	request := httptest.NewRequest(http.MethodPut, "/v1/exit-node", strings.NewReader(`{
+		"profileName":"work",
+		"peer":"gateway"
+	}`))
+	response := httptest.NewRecorder()
+	Handler(backend).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if backend.exitRequest.ProfileName != "work" || backend.exitRequest.Peer != "gateway" {
+		t.Fatalf("request = %+v", backend.exitRequest)
+	}
+	var got ExitNodes
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Selected == nil || got.Selected.State != "installed" {
+		t.Fatalf("response = %+v", got)
 	}
 }
 

@@ -32,17 +32,6 @@ type profileAPIGroup struct {
 	errs    chan error
 }
 
-func startProfileAPIs(ctx context.Context, dir string, profiles []runtimeProfile, stderr io.Writer) (*profileAPIGroup, error) {
-	group := newProfileAPIGroup(ctx, dir, stderr)
-	for _, rp := range profiles {
-		if err := group.Start(rp); err != nil {
-			_ = group.Close()
-			return nil, err
-		}
-	}
-	return group, nil
-}
-
 func newProfileAPIGroup(ctx context.Context, dir string, stderr io.Writer) *profileAPIGroup {
 	return &profileAPIGroup{
 		ctx:     ctx,

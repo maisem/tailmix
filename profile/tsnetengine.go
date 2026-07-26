@@ -128,7 +128,7 @@ func (e *TSNetEngine) WatchUpdates(ctx context.Context, notify func()) error {
 		if n.ErrMessage != nil {
 			return fmt.Errorf("backend: %s", *n.ErrMessage)
 		}
-		changed := n.InitialStatus != nil || n.SelfChange != nil || len(n.PeersChanged) != 0 || len(n.PeersRemoved) != 0
+		changed := n.InitialStatus != nil || n.Prefs != nil || n.SelfChange != nil || len(n.PeersChanged) != 0 || len(n.PeersRemoved) != 0
 		if n.State != nil && *n.State == ipn.Running {
 			changed = true
 		}
@@ -170,9 +170,12 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		}
 		advertiser := routeAdvertiserName(peer.HostName, peer.DNSName, nodeID)
 		peers = append(peers, PeerStatus{
-			NodeID:       nodeID,
-			DNSName:      normalizeDNSRoute(peer.DNSName),
-			TailscaleIPs: append([]netip.Addr(nil), peer.TailscaleIPs...),
+			NodeID:         nodeID,
+			DNSName:        normalizeDNSRoute(peer.DNSName),
+			TailscaleIPs:   append([]netip.Addr(nil), peer.TailscaleIPs...),
+			Online:         peer.Online,
+			ExitNode:       peer.ExitNode,
+			ExitNodeOption: peer.ExitNodeOption,
 		})
 		if peer.PrimaryRoutes != nil {
 			for _, prefix := range peer.PrimaryRoutes.All() {
@@ -199,8 +202,12 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		return availableRoutes[i].PrimaryRouter < availableRoutes[j].PrimaryRouter
 	})
 	shieldsUp := false
+	routeAll := false
+	exitNodeID := ""
 	if prefs, err := lc.GetPrefs(ctx); err == nil {
 		shieldsUp = prefs.ShieldsUp
+		routeAll = prefs.RouteAll
+		exitNodeID = string(prefs.ExitNodeID)
 	}
 	var dnsRoutes []DNSRouteStatus
 	var searchDomains []string
@@ -264,6 +271,8 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		AvailableRoutes: availableRoutes,
 		DNSRoutes:       dnsRoutes,
 		SearchDomains:   searchDomains,
+		RouteAll:        routeAll,
+		ExitNodeID:      exitNodeID,
 	}, nil
 }
 
@@ -280,6 +289,30 @@ func (e *TSNetEngine) SetRouteAll(ctx context.Context, enabled bool) error {
 		RouteAllSet: true,
 	})
 	return err
+}
+
+func (e *TSNetEngine) SetExitNodeIP(ctx context.Context, peerIP netip.Addr) error {
+	if e.server == nil {
+		return fmt.Errorf("tsnet server is not started")
+	}
+	lc, err := e.server.LocalClient()
+	if err != nil {
+		return err
+	}
+	_, err = lc.EditPrefs(ctx, exitNodePrefs(peerIP))
+	return err
+}
+
+func exitNodePrefs(peerIP netip.Addr) *ipn.MaskedPrefs {
+	// Match `tailscale set --exit-node`: select by peer IP, clear any stale
+	// stable ID, and let LocalBackend resolve and persist the current ID.
+	return &ipn.MaskedPrefs{
+		Prefs: ipn.Prefs{
+			ExitNodeIP: peerIP,
+		},
+		ExitNodeIDSet: true,
+		ExitNodeIPSet: true,
+	}
 }
 
 func normalizeDNSRoute(domain string) string {

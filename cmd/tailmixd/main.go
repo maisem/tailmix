@@ -24,7 +24,6 @@ import (
 	tailmixprofile "github.com/maisem/tailmix/profile"
 	"github.com/maisem/tailmix/profilesocket"
 	"github.com/maisem/tailmix/routingpolicy"
-	"github.com/maisem/tailmix/socksproxy"
 	"github.com/maisem/tailmix/state"
 	"github.com/maisem/tailmix/tunmux"
 	"tailscale.com/net/tsaddr"
@@ -255,12 +254,16 @@ func ensureNATIPs(st *state.State) error {
 			return fmt.Errorf("parse effective %s pool %q: %w", family.name, family.poolRaw, err)
 		}
 		pool = pool.Masked()
-		if current := *family.current; current.IsValid() && current.Is6() == family.ipv6 && pool.Contains(current) && !used[current] {
+		// Keep the prefix base unassigned. In particular, using the IPv4
+		// network address as the aggregate TUN's point-to-point identity can
+		// make Darwin route packets DNATed to that address back out the TUN
+		// instead of delivering them locally.
+		if current := *family.current; current.IsValid() && current != pool.Addr() && current.Is6() == family.ipv6 && pool.Contains(current) && !used[current] {
 			used[current] = true
 			continue
 		}
 		*family.current = netip.Addr{}
-		for ip := pool.Addr(); pool.Contains(ip); ip = ip.Next() {
+		for ip := pool.Addr().Next(); pool.Contains(ip); ip = ip.Next() {
 			if !ip.IsValid() {
 				break
 			}
@@ -614,86 +617,6 @@ func buildTUNPlan(st state.State, statuses []tailmixprofile.Status) (tunPlan, er
 	}, nil
 }
 
-func runTUN(ctx context.Context, tunName string, profiles []runtimeProfile, mgr *tailmixprofile.Manager, store *state.JSONStore, plan tunPlan, profileAPIErrs <-chan error, stderr io.Writer) error {
-	logf := prefixedLogf(stderr, "tun")
-	host, err := hosttun.Open(hosttun.OpenConfig{Name: tunName, Logf: logf})
-	if err != nil {
-		return err
-	}
-	defer host.Close()
-	if err := host.Configure(plan.HostConfig); err != nil {
-		return fmt.Errorf("configure host TUN %s: %w", host.Name(), err)
-	}
-	profileTUNs := make(map[string]*tunmux.ChanTUN, len(profiles))
-	for _, rp := range profiles {
-		if rp.Tun == nil {
-			return fmt.Errorf("profile %q has no packet TUN", rp.State.ID)
-		}
-		profileTUNs[rp.State.ID] = rp.Tun
-	}
-	dnsService, err := tailmixdns.StartService(tailmixdns.ServiceConfig{
-		TunName:       host.Name(),
-		Domains:       plan.DNSConfig.Domains,
-		Records:       plan.DNSConfig.Records,
-		Routes:        plan.DNSConfig.Routes,
-		SearchDomains: plan.DNSConfig.SearchDomains,
-		Logf:          prefixedLogf(stderr, "dns"),
-	})
-	if err != nil {
-		return err
-	}
-	defer dnsService.Close()
-	fmt.Fprintf(stderr, "TUN %s configured with %d local address(es) and %d peer route(s)\n", host.Name(), len(plan.HostConfig.LocalAddrs), plan.Table.Destinations.Size())
-	fmt.Fprintf(stderr, "MagicDNS serving %s inside the TUN for %s\n", dnsService.Addr(), magicDNSSuffixes(plan.DNSConfig.Domains))
-	logTUNRoutes(stderr, plan.Statuses, plan.ActiveLeases)
-	mux := tunmux.NewMux(host.Device(), profileTUNs, packetmap.New(plan.Table), logf)
-	mux.SetLocalPacketHandler(dnsService)
-
-	muxErr := make(chan error, 1)
-	go func() { muxErr <- mux.Run(ctx) }()
-	updates := mgr.WatchUpdates(ctx)
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case err := <-muxErr:
-			return err
-		case err := <-profileAPIErrs:
-			return err
-		case update, ok := <-updates:
-			if !ok {
-				if ctx.Err() != nil {
-					return nil
-				}
-				return errors.New("tailnet update watchers stopped")
-			}
-			if update.Err != nil {
-				return update.Err
-			}
-			statuses, err := mgr.Status(ctx)
-			if err != nil {
-				return fmt.Errorf("refresh tailnet state after profile %q update: %w", update.ProfileID, err)
-			}
-			next, err := buildTUNPlan(plan.State, statuses)
-			if err != nil {
-				return fmt.Errorf("rebuild TUN config after profile %q update: %w", update.ProfileID, err)
-			}
-			if err := host.Configure(next.HostConfig); err != nil {
-				return fmt.Errorf("reconfigure host TUN %s: %w", host.Name(), err)
-			}
-			mux.SetMapper(packetmap.New(next.Table))
-			if err := dnsService.ConfigureFull(next.DNSConfig); err != nil {
-				return err
-			}
-			if err := store.Save(next.State); err != nil {
-				return fmt.Errorf("save refreshed state: %w", err)
-			}
-			plan = next
-			fmt.Fprintf(stderr, "profile %s updated: TUN now has %d local address(es), %d peer route(s), and %d MagicDNS record(s)\n", update.ProfileID, len(plan.HostConfig.LocalAddrs), plan.Table.Destinations.Size(), len(plan.DNSConfig.Records))
-		}
-	}
-}
-
 func tunDNSConfig(st state.State, statuses []tailmixprofile.Status, leases []effectiveip.Lease) ([]tailmixdns.Domain, []tailmixdns.Record, error) {
 	cfg, err := tunDNSLiveConfig(st, statuses, leases, routingpolicy.BuildDNS(st, statuses))
 	if err != nil {
@@ -867,54 +790,6 @@ func coveredByDNSPolicy(domain string, entries []routingpolicy.DNSEntry) bool {
 	return false
 }
 
-func magicDNSSuffixes(domains []tailmixdns.Domain) string {
-	suffixes := make([]string, 0, len(domains))
-	for _, domain := range domains {
-		suffixes = append(suffixes, strings.TrimSuffix(domain.Suffix, "."))
-	}
-	sort.Strings(suffixes)
-	return strings.Join(suffixes, ", ")
-}
-
-func logTUNRoutes(w io.Writer, statuses []tailmixprofile.Status, leases []effectiveip.Lease) {
-	type route struct {
-		profile   string
-		name      string
-		canonical netip.Addr
-		effective netip.Addr
-	}
-	names := map[effectiveip.NodeKey]string{}
-	for _, ps := range statuses {
-		for _, peer := range ps.Peers {
-			for _, canonical := range peer.TailscaleIPs {
-				names[effectiveip.NodeKey{ProfileID: ps.ProfileID, NodeID: peer.NodeID, CanonicalIP: canonical}] = peer.DNSName
-			}
-		}
-	}
-	var routes []route
-	for _, lease := range leases {
-		name, ok := names[lease.NodeKey]
-		if !ok {
-			continue
-		}
-		routes = append(routes, route{
-			profile:   lease.NodeKey.ProfileID,
-			name:      name,
-			canonical: lease.NodeKey.CanonicalIP,
-			effective: lease.EffectiveIP,
-		})
-	}
-	sort.Slice(routes, func(i, j int) bool {
-		if routes[i].profile != routes[j].profile {
-			return routes[i].profile < routes[j].profile
-		}
-		return routes[i].effective.Compare(routes[j].effective) < 0
-	})
-	for _, route := range routes {
-		fmt.Fprintf(w, "route profile=%s name=%s effective=%v canonical=%v\n", route.profile, route.name, route.effective, route.canonical)
-	}
-}
-
 func tunConfig(st state.State, statuses []tailmixprofile.Status, leases []effectiveip.Lease) (packetmap.Table, hosttun.Config, error) {
 	return tunConfigWithPolicy(st, statuses, leases, routingpolicy.BuildIP(st, statuses))
 }
@@ -931,6 +806,7 @@ func tunConfigWithPolicy(st state.State, statuses []tailmixprofile.Status, lease
 		Destinations:   new(bart.Table[packetmap.Destination]),
 		ExactRoutes:    new(bart.Table[packetmap.SubnetRoute]),
 		ImportedRoutes: new(bart.Table[packetmap.SubnetRoute]),
+		ExitRoutes:     new(bart.Table[packetmap.SubnetRoute]),
 		Sources:        map[packetmap.SourceKey]packetmap.Source{},
 		InboundPeers:   map[string]*bart.Table[netip.Addr]{},
 	}
@@ -969,10 +845,14 @@ func tunConfigWithPolicy(st state.State, statuses []tailmixprofile.Status, lease
 					return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q canonical peer IP %v maps to multiple effective IPs", ps.ProfileID, canonical)
 				}
 				inbound.Insert(canonicalPrefix, effective)
-				if _, ok := table.Sources[packetmap.SourceKey{ProfileID: ps.ProfileID, IPv6: canonical.Is6()}]; !ok {
+				source, ok := table.Sources[packetmap.SourceKey{ProfileID: ps.ProfileID, IPv6: canonical.Is6()}]
+				if !ok {
 					return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q peer %v has no matching %s self address", ps.ProfileID, canonical, ipFamily(canonical))
 				}
-				hostCfg.Routes = append(hostCfg.Routes, hosttun.Route{Destination: effectivePrefix})
+				hostCfg.Routes = append(hostCfg.Routes, hosttun.Route{
+					Destination: effectivePrefix,
+					Source:      source.HostIP,
+				})
 			}
 		}
 	}
@@ -985,7 +865,10 @@ func tunConfigWithPolicy(st state.State, statuses []tailmixprofile.Status, lease
 			if _, ok := table.Sources[packetmap.SourceKey{ProfileID: entry.ProfileID, IPv6: entry.Prefix.Addr().Is6()}]; !ok {
 				return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q route %v has no matching self address", entry.ProfileID, entry.Prefix)
 			}
-			hostCfg.Routes = append(hostCfg.Routes, hosttun.Route{Destination: entry.Prefix})
+			hostCfg.Routes = append(hostCfg.Routes, hosttun.Route{
+				Destination: entry.Prefix,
+				Source:      natIPFor(st, entry.Prefix.Addr()),
+			})
 		}
 	}
 	for _, entry := range policy.Imported {
@@ -995,7 +878,29 @@ func tunConfigWithPolicy(st state.State, statuses []tailmixprofile.Status, lease
 			if _, ok := table.Sources[packetmap.SourceKey{ProfileID: entry.ProfileID, IPv6: entry.Prefix.Addr().Is6()}]; !ok {
 				return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q imported route %v has no matching self address", entry.ProfileID, entry.Prefix)
 			}
-			hostCfg.Routes = append(hostCfg.Routes, hosttun.Route{Destination: entry.Prefix})
+			hostCfg.Routes = append(hostCfg.Routes, hosttun.Route{
+				Destination: entry.Prefix,
+				Source:      natIPFor(st, entry.Prefix.Addr()),
+			})
+		}
+	}
+	if exitProfileID := activeExitProfile(st, statuses); exitProfileID != "" {
+		for _, ipv6 := range []bool{false, true} {
+			if _, ok := table.Sources[packetmap.SourceKey{ProfileID: exitProfileID, IPv6: ipv6}]; !ok {
+				continue
+			}
+			defaultRoute := netip.PrefixFrom(netip.IPv4Unspecified(), 0)
+			if ipv6 {
+				defaultRoute = netip.PrefixFrom(netip.IPv6Unspecified(), 0)
+			}
+			table.ExitRoutes.Insert(defaultRoute, packetmap.SubnetRoute{ProfileID: exitProfileID, Active: true})
+			for _, route := range splitDefaultRoutes(ipv6) {
+				hostCfg.Routes = append(hostCfg.Routes, hosttun.Route{
+					Destination: route,
+					Source:      natIPFor(st, route.Addr()),
+					Exit:        true,
+				})
+			}
 		}
 	}
 	serviceIP := tailmixdns.ServiceIP()
@@ -1017,8 +922,43 @@ func tunConfigWithPolicy(st state.State, statuses []tailmixprofile.Status, lease
 			break
 		}
 	}
-	hostCfg.Routes = append(hostCfg.Routes, hosttun.Route{Destination: netip.PrefixFrom(serviceIP, serviceIP.BitLen())})
+	hostCfg.Routes = append(hostCfg.Routes, hosttun.Route{
+		Destination: netip.PrefixFrom(serviceIP, serviceIP.BitLen()),
+		Source:      st.NATIP,
+	})
 	return table, hostCfg, nil
+}
+
+func activeExitProfile(st state.State, statuses []tailmixprofile.Status) string {
+	if st.ExitNode == nil {
+		return ""
+	}
+	for _, status := range statuses {
+		if status.ProfileID == st.ExitNode.ProfileID &&
+			(status.BackendState == "" || status.BackendState == "Running") &&
+			status.ExitNodeID == st.ExitNode.NodeID {
+			return status.ProfileID
+		}
+	}
+	return ""
+}
+
+// Split defaults take precedence over the host's ordinary default without
+// replacing it. The tsnet fork publishes the interface owning the underlying
+// /0 route as Darwin's OS-provided default, and the Darwin host router gives
+// that interface its own scoped default. Together those keep netns-bound
+// underlay sockets out of these aggregate TUN routes.
+func splitDefaultRoutes(ipv6 bool) []netip.Prefix {
+	if ipv6 {
+		return []netip.Prefix{
+			netip.MustParsePrefix("::/1"),
+			netip.MustParsePrefix("8000::/1"),
+		}
+	}
+	return []netip.Prefix{
+		netip.MustParsePrefix("0.0.0.0/1"),
+		netip.MustParsePrefix("128.0.0.0/1"),
+	}
 }
 
 func routeOverlapsReserved(st state.State, prefix netip.Prefix) bool {
@@ -1074,27 +1014,4 @@ func leasesToState(leases []effectiveip.Lease) []state.EffectiveLease {
 		})
 	}
 	return out
-}
-
-func socksProfiles(profiles []runtimeProfile, statuses []tailmixprofile.Status) ([]socksproxy.Profile, error) {
-	byID := map[string]tailmixprofile.Status{}
-	for _, ps := range statuses {
-		byID[ps.ProfileID] = ps
-	}
-	out := make([]socksproxy.Profile, 0, len(profiles))
-	for _, rp := range profiles {
-		suffix := rp.State.MagicDNSSuffix
-		if ps, ok := byID[rp.State.ID]; ok && ps.MagicDNSSuffix != "" {
-			suffix = ps.MagicDNSSuffix
-		}
-		if suffix == "" {
-			return nil, fmt.Errorf("profile %q has no MagicDNS suffix", rp.State.ID)
-		}
-		out = append(out, socksproxy.Profile{
-			ID:             rp.State.ID,
-			MagicDNSSuffix: suffix,
-			Dialer:         rp.Engine,
-		})
-	}
-	return out, nil
 }

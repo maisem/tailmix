@@ -131,14 +131,15 @@ local routes.
 
 | Stage | Source | Destination |
 | --- | --- | --- |
-| Host emits | `100.127.0.0` host NAT | `100.127.0.8` effective peer |
+| Host emits | `100.127.0.1` host NAT | `100.127.0.8` effective peer |
 | work engine receives | `100.64.0.1` canonical self | `100.64.0.42` canonical peer |
 | work engine replies | `100.64.0.42` | `100.64.0.1` |
-| Host receives | `100.127.0.8` | `100.127.0.0` |
+| Host receives | `100.127.0.8` | `100.127.0.1` |
 
-The values are illustrative. tailmix reserves the first available address for
-host NAT, excludes it from peer allocation, and installs host routes only for
-active peers and selected subnet routes.
+The values are illustrative. tailmix leaves the pool's prefix base unassigned,
+reserves the first available non-base address for host NAT, excludes it from
+peer allocation, and selects it as the preferred source for host TUN routes.
+Host routes are installed only for active peers and selected subnet routes.
 
 ## Route policy
 
@@ -155,7 +156,9 @@ flowchart TD
     Exact -->|none| Imported{"One active accept-all<br/>import?"}
     Imported -->|yes| Accepted["Use importing profile"]
     Imported -->|ambiguous or unavailable| Drop
-    Imported -->|none| Drop
+    Imported -->|none| Exit{"Selected exit node?"}
+    Exit -->|yes| Default["Use selected exit-node profile"]
+    Exit -->|no| Drop
 ```
 
 - `routes bind` creates an explicit prefix-to-profile override.
@@ -167,7 +170,10 @@ flowchart TD
   remains disabled until an explicit binding resolves it.
 - Routes that overlap Tailscale's canonical ranges, the effective pools, host
   NAT addresses, or the MagicDNS service address fail closed.
-- Default routes remain reserved for future exit-node policy.
+- One explicit profile-and-peer exit-node selection supplies the fallback
+  default route after direct-peer and subnet policy.
+- Disabling the selected profile withdraws the default; no other profile is
+  selected automatically.
 
 ### DNS routes
 
@@ -334,7 +340,7 @@ Profiles share the host network but not identity or authentication material.
 - per-profile accept-all settings;
 - the ordered search-domain list;
 - historical effective leases;
-- the reserved exit-node state shape.
+- the selected exit-node profile ID, stable peer ID, and canonical peer IP.
 
 The file is written with mode `0600` through a temporary file and rename. Each
 `profiles/<id>` directory separately stores that profile's machine identity,
@@ -356,8 +362,9 @@ Remote logtail upload is disabled by default. `-log-upload` opts in, and
 | Privileges | Root | Root or `CAP_NET_ADMIN` |
 | Profile LocalAPI | Unix sockets served by `ipnserver` | Unix sockets served by `ipnserver` |
 | Address and route application | `ifconfig` and `route` | Netlink |
+| Exit-node defaults | Split defaults plus a scoped physical `/0`; underlay sockets bind that interface | Split defaults in a dedicated policy table; marked underlay sockets bypass it |
 | DNS | Native split-DNS configurator | Upstream Linux configurator selection |
-| Cleanup | Routes and aliases removed before TUN close | Routes and addresses removed before TUN close |
+| Cleanup | Routes and addresses removed before TUN close | Routes and addresses removed before TUN close |
 
 The default `-mode tun` provides system-wide IPv4/IPv6 connectivity, inbound
 delivery, dynamic policy reconciliation, and DNS integration.
@@ -395,6 +402,7 @@ Implemented:
 - shared host SNAT/DNAT and selected subnet routes;
 - live profile add, enable, disable, restart, rename, and removal;
 - explicit and accept-all IP route policy with fail-closed overrides;
+- one explicit cross-profile exit-node selection with TUN and SOCKS fallback;
 - explicit, accept-all, and automatic DNS suffix policy;
 - profile-scoped forwarding to advertised DNS resolvers;
 - ordered OS search domains backed by active DNS routes;
@@ -405,7 +413,6 @@ Implemented:
 
 Deliberate current limits:
 
-- exit nodes and default-route application are not supported;
 - SOCKS mode is TCP-only;
 - policy does not provide cross-profile failover;
 - tailmix does not automatically bridge one tailnet into another;

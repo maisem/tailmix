@@ -165,3 +165,50 @@ func TestWaitingExplicitDomainRouteFailsClosed(t *testing.T) {
 		t.Fatal("waiting explicit route unexpectedly fell back to imported route")
 	}
 }
+
+func TestExitNodeRoutesUnboundDestinationsAsFallback(t *testing.T) {
+	r, err := NewRouterWithPolicies([]Profile{
+		{ID: "exit", Dialer: &recordingDialer{}},
+	}, nil, []SubnetRoute{{
+		Prefix: netip.MustParsePrefix("0.0.0.0/0"), ProfileID: "exit", Active: true,
+	}}, []DomainRoute{{
+		Suffix: ".", ProfileID: "exit", Active: true, Automatic: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"203.0.113.10:443", "example.com:443"} {
+		got, err := r.Resolve("tcp", target)
+		if err != nil {
+			t.Fatalf("Resolve(%q): %v", target, err)
+		}
+		if got.ProfileID != "exit" || got.DialAddr != target {
+			t.Fatalf("Resolve(%q) = %+v", target, got)
+		}
+	}
+}
+
+func TestExplicitRoutesOverrideExitNodeFallback(t *testing.T) {
+	r, err := NewRouterWithPolicies([]Profile{
+		{ID: "work", Dialer: &recordingDialer{}},
+		{ID: "exit", Dialer: &recordingDialer{}},
+	}, nil, []SubnetRoute{
+		{Prefix: netip.MustParsePrefix("10.0.0.0/8"), ProfileID: "work", Active: true},
+		{Prefix: netip.MustParsePrefix("0.0.0.0/0"), ProfileID: "exit", Active: true},
+	}, []DomainRoute{
+		{Suffix: "corp.example", ProfileID: "work", Active: true, Exact: true},
+		{Suffix: ".", ProfileID: "exit", Active: true, Automatic: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"10.20.1.2:443", "db.corp.example:443"} {
+		got, err := r.Resolve("tcp", target)
+		if err != nil {
+			t.Fatalf("Resolve(%q): %v", target, err)
+		}
+		if got.ProfileID != "work" {
+			t.Fatalf("Resolve(%q) profile = %q, want work", target, got.ProfileID)
+		}
+	}
+}

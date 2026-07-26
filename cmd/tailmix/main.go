@@ -32,6 +32,9 @@ type managementClient interface {
 	RemoveProfile(context.Context, string, bool) (controlapi.Profile, error)
 	IPRoutes(context.Context, bool) (controlapi.IPRoutes, error)
 	PatchIPRoutes(context.Context, controlapi.PatchIPRoutesRequest) (controlapi.IPRoutes, error)
+	ExitNodes(context.Context) (controlapi.ExitNodes, error)
+	SetExitNode(context.Context, controlapi.SetExitNodeRequest) (controlapi.ExitNodes, error)
+	ClearExitNode(context.Context) (controlapi.ExitNodes, error)
 	DNSRoutes(context.Context, bool) (controlapi.DNSRoutes, error)
 	PatchDNSRoutes(context.Context, controlapi.PatchDNSRoutesRequest) (controlapi.DNSRoutes, error)
 	SearchDomains(context.Context) (controlapi.SearchDomains, error)
@@ -58,10 +61,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	os.Exit(runWithIO(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, cli.RunWithContext))
-}
-
-func run(ctx context.Context, args []string, stdout, stderr io.Writer, runCLI cliRunner) int {
-	return runWithIO(ctx, args, strings.NewReader(""), stdout, stderr, runCLI)
 }
 
 func runWithIO(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, runCLI cliRunner) int {
@@ -100,6 +99,8 @@ func runWithDependencies(ctx context.Context, args []string, deps dependencies) 
 		err = runProfiles(ctx, client, args[1:], deps)
 	case "routes":
 		err = runRoutes(ctx, client, args[1:], deps)
+	case "exit-node":
+		err = runExitNode(ctx, client, args[1:], deps)
 	case "dns":
 		err = runDNS(ctx, client, args[1:], deps)
 	case "tailscale", "ts":
@@ -485,6 +486,57 @@ func runRoutes(ctx context.Context, client managementClient, args []string, deps
 	default:
 		return usageError{fmt.Sprintf("unknown routes command %q", args[0])}
 	}
+}
+
+func runExitNode(ctx context.Context, client managementClient, args []string, deps dependencies) error {
+	if len(args) == 0 || isHelp(args[0]) {
+		fmt.Fprint(deps.stdout, exitNodeHelp)
+		return nil
+	}
+	rest := args[1:]
+	jsonOutput, err := takeBool(&rest, "--json")
+	if err != nil {
+		return err
+	}
+	var result controlapi.ExitNodes
+	switch args[0] {
+	case "list":
+		if err := noOperands(rest); err != nil {
+			return err
+		}
+		result, err = client.ExitNodes(ctx)
+	case "set":
+		profileName, set, parseErr := takeString(&rest, "--profile")
+		if parseErr != nil {
+			return parseErr
+		}
+		if !set || strings.TrimSpace(profileName) == "" {
+			return usageError{"exit-node set requires --profile"}
+		}
+		peer, parseErr := oneOperand(rest, "exit node peer")
+		if parseErr != nil {
+			return parseErr
+		}
+		result, err = client.SetExitNode(ctx, controlapi.SetExitNodeRequest{
+			ProfileName: profileName,
+			Peer:        peer,
+		})
+	case "clear":
+		if err := noOperands(rest); err != nil {
+			return err
+		}
+		result, err = client.ClearExitNode(ctx)
+	default:
+		return usageError{fmt.Sprintf("unknown exit-node command %q", args[0])}
+	}
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(deps.stdout, result)
+	}
+	writeExitNodes(deps.stdout, result)
+	return nil
 }
 
 func runDNS(ctx context.Context, client managementClient, args []string, deps dependencies) error {
@@ -978,6 +1030,52 @@ func writeIPRoutes(w io.Writer, routes controlapi.IPRoutes, available bool) {
 	_ = table.Flush()
 }
 
+func writeExitNodes(w io.Writer, nodes controlapi.ExitNodes) {
+	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(table, "PROFILE\tEXIT NODE\tIPS\tONLINE\tSTATE")
+	selectedKey := ""
+	if nodes.Selected != nil {
+		selectedKey = nodes.Selected.ProfileID + "\x00" + nodes.Selected.NodeID
+	}
+	selectedShown := false
+	for _, node := range nodes.Available {
+		state := ""
+		if node.ProfileID+"\x00"+node.NodeID == selectedKey {
+			state = stateLabel(nodes.Selected.State, nodes.Selected.Reason)
+			selectedShown = true
+		}
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n",
+			node.ProfileName, exitNodeName(node.DNSName, node.NodeID),
+			addressList(node.IPs), yesNo(node.Online), state)
+	}
+	if nodes.Selected != nil && !selectedShown {
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n",
+			nodes.Selected.ProfileName,
+			exitNodeName(nodes.Selected.DNSName, nodes.Selected.NodeID),
+			nodes.Selected.PeerIP, yesNo(nodes.Selected.Online),
+			stateLabel(nodes.Selected.State, nodes.Selected.Reason))
+	}
+	if nodes.ReconcileError != "" {
+		fmt.Fprintf(table, "!\t\t\t\tfailed:%s\n", nodes.ReconcileError)
+	}
+	_ = table.Flush()
+}
+
+func exitNodeName(dnsName, nodeID string) string {
+	if dnsName != "" {
+		return dnsName
+	}
+	return nodeID
+}
+
+func addressList(ips []netip.Addr) string {
+	values := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		values = append(values, ip.String())
+	}
+	return strings.Join(values, ",")
+}
+
 func writeDNSRoutes(w io.Writer, routes controlapi.DNSRoutes, available bool) {
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	if available {
@@ -1110,6 +1208,7 @@ Commands:
   status       List active profiles and their runtime status
   profiles     Manage profile lifecycle and configuration
   routes       Accept IP routes and pin prefixes to profiles
+  exit-node    Select one profile's exit node for default traffic
   dns routes   Route DNS suffixes through selected profiles
   dns search   Manage the ordered OS search-domain list
   tailscale    Run an upstream Tailscale command for one profile
@@ -1160,6 +1259,16 @@ accept-all import. Overridden and conflicting imports are shown by "routes list"
 The default list also includes every detected route; --available shows only
 detected routes.
 Default routes use exit-node policy.
+`
+
+const exitNodeHelp = `Usage:
+  tailmix exit-node list [--json]
+  tailmix exit-node set --profile <profile> <peer> [--json]
+  tailmix exit-node clear [--json]
+
+The peer may be an exit node's DNS name, short hostname, stable node ID, or
+Tailscale IP. Only one exit node can be selected across all profiles. Explicit
+peer and subnet routes keep precedence over the selected default route.
 `
 
 const dnsHelp = `Usage:

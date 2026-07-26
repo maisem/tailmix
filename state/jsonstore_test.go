@@ -21,6 +21,11 @@ func TestStoreRoundTripPreservesEffectiveLeases(t *testing.T) {
 			CanonicalIP: netip.MustParseAddr("100.64.0.1"),
 			EffectiveIP: netip.MustParseAddr("100.127.0.1"),
 		}},
+		ExitNode: &ExitNode{
+			ProfileID: "work",
+			NodeID:    "exit-node",
+			PeerIP:    netip.MustParseAddr("100.64.0.20"),
+		},
 	}
 	if err := store.Save(want); err != nil {
 		t.Fatal(err)
@@ -34,6 +39,9 @@ func TestStoreRoundTripPreservesEffectiveLeases(t *testing.T) {
 	}
 	if got.NATIP != want.NATIP {
 		t.Fatalf("host NAT IP did not round trip: got %v want %v", got.NATIP, want.NATIP)
+	}
+	if got.ExitNode == nil || *got.ExitNode != *want.ExitNode {
+		t.Fatalf("exit node did not round trip: got %+v want %+v", got.ExitNode, want.ExitNode)
 	}
 }
 

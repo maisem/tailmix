@@ -232,6 +232,54 @@ engine accepts the covering route while it is needed. That internal preference
 is only a transport mechanism and does not expose any unbound route to the
 host.
 
+### Exit-node selection
+
+Exit-node policy is daemon-wide because a host can have only one selected
+default path:
+
+```text
+tailmix exit-node list [--json]
+tailmix exit-node set --profile <name> <peer> [--json]
+tailmix exit-node clear [--json]
+```
+
+`list` shows every approved exit-node peer observed in every active profile and
+marks the current selection. `set` requires both naming domains: the profile
+selects one tailnet, and the peer selector identifies one exit node inside it.
+The peer may be a full DNS name, short hostname, stable node ID, or canonical
+Tailscale IP. Ambiguous short names fail instead of selecting arbitrarily.
+
+The daemon persists the profile's stable ID, the peer's stable node ID, and a
+canonical peer IP. It applies that peer IP to the selected profile engine and
+clears exit-node preferences from the other active engines. Profile renames
+therefore do not disturb the selection. Every profile engine keeps
+Tailscale route acceptance enabled so its internal WireGuard configuration has
+the routes tailmix may select; this does not expose those routes on the host
+unless they are separately selected by tailmix policy. Tailmix selects the
+peer through the profile's Tailscale `ExitNodeIP` preference and clears the
+previous `ExitNodeID`, matching `tailscale set --exit-node`; Tailscale resolves
+that IP back to the peer's stable ID. Tailmix waits until the profile reports
+the expected resolved ID before installing host default routes; while the
+preference is pending, the selection reports `waiting` with reason
+`exit_node_not_applied`. Clearing an exit node clears both exit-node preference
+fields and leaves route acceptance enabled.
+
+In TUN mode, tailmix installs split IPv4 and IPv6 defaults so it can withdraw
+only its own routes and leave the host's original defaults intact. On Linux,
+the defaults use a dedicated policy table so Tailscale's marked transport
+sockets continue to use the ordinary underlay route. Direct effective-peer
+routes, explicit subnet bindings, and accept-all subnet imports remain more
+specific and keep their selected profiles.
+
+In SOCKS mode, the selected exit node is the fallback for otherwise-unmatched
+IP literals and DNS names. Explicit IP and DNS policy still wins. Clearing the
+selection removes the fallback in both modes.
+
+Disabling the selected profile withdraws its default route but retains the
+desired selection, which resumes when the same profile is enabled. Removing
+the selected profile clears the selection. There is no automatic failover to
+an exit node in another profile.
+
 ### DNS route bindings
 
 A DNS route binding sends queries for a suffix through one selected profile:
@@ -534,6 +582,8 @@ Initial codes should include `invalid_request`, `profile_exists`,
 `profile_not_found`, `profile_disabled`, `transition_in_progress`,
 `invalid_prefix`, `route_binding_conflict`, `invalid_dns_name`,
 `dns_route_binding_conflict`, `binding_profile_mismatch`,
+`exit_node_not_found`, `exit_node_ambiguous`, `exit_node_unavailable`,
+`profile_unavailable`,
 `profile_has_bindings`, `permission_denied`, `runtime_start_failed`,
 `dns_configuration_failed`, `reconcile_failed`, and `purge_failed`.
 
@@ -573,6 +623,10 @@ PUT    /v1/routes
 PATCH  /v1/routes
 DELETE /v1/routes
 GET    /v1/routes/available
+
+GET    /v1/exit-node
+PUT    /v1/exit-node
+DELETE /v1/exit-node
 
 GET    /v1/dns/routes
 PUT    /v1/dns/routes
@@ -677,6 +731,11 @@ binding table and accept-all profile set. `PATCH` accepts atomic `bind` and
 name to boolean. `DELETE` clears exact bindings and accept-all policy. Mutation
 entries use a profile name; the daemon resolves it under the lifecycle lock and
 persists the stable profile ID. Profile renames therefore change display only.
+
+The exit-node resource contains one optional `selected` object and an
+observational `available` list. `PUT` accepts `profileName` and `peer`, resolves
+the peer against the profile's current approved exit nodes, and atomically
+replaces the selection. `DELETE` clears it.
 
 The search-domain resource reports desired and observed state separately:
 

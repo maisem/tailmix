@@ -5,10 +5,11 @@ address per active address family, installs ordinary interface routes for peer
 effective addresses, and forwards packets through the selected profile engine.
 tailmix performs SNAT to the selected profile's canonical self address on outbound
 packets and DNAT back to the host NAT address on inbound packets; host routes do
-not select profile source addresses. It also uses Tailscale's DNS manager and
-resolver to serve every profile's MagicDNS zone at `100.100.100.100`, with
-macOS split-DNS entries for each tailnet suffix. DNS packets are terminated
-inside the shared TUN; tailmix does not open a kernel DNS listener.
+select the shared host NAT address, never a profile-specific source address. It
+also uses Tailscale's DNS manager and resolver to serve every profile's MagicDNS
+zone at `100.100.100.100`, with macOS split-DNS entries for each tailnet suffix.
+DNS packets are terminated inside the shared TUN; tailmix does not open a
+kernel DNS listener.
 
 ## Before starting
 
@@ -42,7 +43,8 @@ the upload endpoint.
 
 The effective IPv4 pool is persisted in daemon state; omit the flag on later
 runs to reuse it. Every peer and the host NAT receive an address from this
-pool. Choose a CIDR that does not overlap LAN, VPN, or other host routes.
+pool, while the prefix base remains unassigned. Choose a CIDR that does not
+overlap LAN, VPN, or other host routes.
 Changing the flag retires old IPv4 leases and allocates new ones. The
 corresponding IPv6 flag is `-synthetic-pool-v6`. These flags do not change
 MagicDNS's Tailscale-defined service address, `100.100.100.100`.
@@ -79,15 +81,41 @@ profile's `ipnserver` socket. The socket applies normal Unix peer credentials
 and Tailscale operator permissions; use `sudo tailmix ...` for write commands
 unless your user is a local administrator or the profile's configured operator.
 
-`route -n get` should show the tailmix `utun`; it should not contain a
-profile-specific preferred source. Test one peer in each tailnet without
-restarting or switching profiles. Use fully-qualified names: tailmix intentionally
-does not add tailnet search domains because a short name can be ambiguous
-across profiles. Then stop tailmixd with Ctrl-C and confirm its `utun`, host routes,
-and tailmix-created files under `/etc/resolver` disappear.
+`route -n get` should show the tailmix `utun` and the shared host NAT address as
+its preferred source; it must not contain a profile-specific source. Test one
+peer in each tailnet without restarting or switching profiles. Use
+fully-qualified names: tailmix intentionally does not add tailnet search domains
+because a short name can be ambiguous across profiles. Then stop tailmixd with
+Ctrl-C and confirm its `utun`, host routes, and tailmix-created files under
+`/etc/resolver` disappear.
 
 tailmixd watches all profile netmaps. After adding or removing a peer, wait for a
 `profile ... updated` line and repeat the route and DNS checks without
 restarting the daemon. The route, packet translation, and MagicDNS tables
-should all reflect the new peer set. Subnet routes and exit nodes are not part
-of this Darwin TUN test.
+should all reflect the new peer set.
+
+## Exit-node checks
+
+When an exit node is selected, tailmix installs global `0.0.0.0/1` and
+`128.0.0.0/1` routes on its aggregate `utun`. Darwin `netns` keeps tsnet
+control, DERP, and direct WireGuard sockets on the physical underlay with
+`IP_BOUND_IF`. The local tsnet fork publishes the interface owning the
+underlying `/0` route as netmon's OS-provided default, independently of the
+effective split default. The host router also installs one interface-scoped
+`/0` on that physical interface. This gives bound sockets a route in their
+interface scope without duplicating the aggregate `/1`s.
+
+With `-verbose`, verify the aggregate routes and continued underlay
+connectivity:
+
+```sh
+route -n get 1.1.1.1
+route -n get -ifscope en0 1.1.1.1
+netstat -rn -f inet | grep -E '(^default|^0/1|^128\.0/1)'
+ping 1.1.1.1
+```
+
+The ordinary lookup should use tailmix's `utun`, while the scoped lookup should
+use the physical gateway. There should be one tailmix-created scoped `/0`, not
+scoped copies of both `/1`s. The verbose log should continue to report
+successful DERP or direct peer connectivity while the exit node is active.

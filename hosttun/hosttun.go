@@ -11,6 +11,8 @@ import (
 
 type Route struct {
 	Destination netip.Prefix
+	Source      netip.Addr
+	Exit        bool
 }
 
 type Config struct {
@@ -50,6 +52,15 @@ func normalizeConfig(cfg Config) ([]netip.Prefix, []Route, error) {
 			return nil, nil, fmt.Errorf("TUN route must be a valid prefix: %v", route.Destination)
 		}
 		route.Destination = route.Destination.Masked()
+		if !route.Source.IsValid() || route.Source.Is6() != route.Destination.Addr().Is6() {
+			return nil, nil, fmt.Errorf("route %v has invalid source %v", route.Destination, route.Source)
+		}
+		if _, ok := localSet[route.Source]; !ok {
+			return nil, nil, fmt.Errorf("route %v source %v is not a local TUN address", route.Destination, route.Source)
+		}
+		if existing, ok := routeSet[route.Destination]; ok && existing.Source != route.Source {
+			return nil, nil, fmt.Errorf("route %v has conflicting sources %v and %v", route.Destination, existing.Source, route.Source)
+		}
 		routeSet[route.Destination] = route
 	}
 	routes := make([]Route, 0, len(routeSet))

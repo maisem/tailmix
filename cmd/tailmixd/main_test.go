@@ -150,6 +150,36 @@ func TestConfigureSyntheticPoolsRejectsInvalidOverrides(t *testing.T) {
 	}
 }
 
+func TestEnsureNATIPsSkipsAndMigratesPrefixBase(t *testing.T) {
+	st := state.State{
+		SyntheticPool:   "10.250.0.0/29",
+		SyntheticPoolV6: "fd6d:6e65:7400::/125",
+		NATIP:           netip.MustParseAddr("10.250.0.0"),
+		NATIPv6:         netip.MustParseAddr("fd6d:6e65:7400::"),
+		Leases: []state.EffectiveLease{{
+			ProfileID:   "work",
+			NodeID:      "peer-v4",
+			CanonicalIP: netip.MustParseAddr("100.64.0.2"),
+			EffectiveIP: netip.MustParseAddr("10.250.0.1"),
+		}, {
+			ProfileID:   "work",
+			NodeID:      "peer-v6",
+			CanonicalIP: netip.MustParseAddr("fd7a:115c:a1e0::2"),
+			EffectiveIP: netip.MustParseAddr("fd6d:6e65:7400::1"),
+		}},
+	}
+
+	if err := ensureNATIPs(&st); err != nil {
+		t.Fatal(err)
+	}
+	if want := netip.MustParseAddr("10.250.0.2"); st.NATIP != want {
+		t.Fatalf("migrated IPv4 NAT address = %v, want %v", st.NATIP, want)
+	}
+	if want := netip.MustParseAddr("fd6d:6e65:7400::2"); st.NATIPv6 != want {
+		t.Fatalf("migrated IPv6 NAT address = %v, want %v", st.NATIPv6, want)
+	}
+}
+
 func TestLeaseNodesIncludesPeersInStableOrder(t *testing.T) {
 	statuses := []tailmixprofile.Status{{
 		ProfileID:  "work",
@@ -258,7 +288,7 @@ func TestAssignEffectiveIPsSynthesizesIPv6CollisionsFromIPv6Pool(t *testing.T) {
 	}
 }
 
-func TestTunConfigUsesSharedNATWithoutRouteSourceSelection(t *testing.T) {
+func TestTunConfigUsesSharedNATRouteSource(t *testing.T) {
 	canonicalSelf := netip.MustParseAddr("100.64.0.10")
 	canonicalPeer := netip.MustParseAddr("100.64.0.20")
 	statuses := []tailmixprofile.Status{{
@@ -307,6 +337,11 @@ func TestTunConfigUsesSharedNATWithoutRouteSourceSelection(t *testing.T) {
 	}
 	if !foundDNSRoute {
 		t.Fatalf("host routes %v do not route MagicDNS through the TUN", hostCfg.Routes)
+	}
+	for _, route := range hostCfg.Routes {
+		if route.Source != st.NATIP {
+			t.Fatalf("host route %+v does not select shared NAT source %v", route, st.NATIP)
+		}
 	}
 	for key, source := range table.Sources {
 		if source.HostIP != st.NATIP || source.CanonicalIP != canonicalSelf {
@@ -476,6 +511,77 @@ func TestTUNPlanTracksPeerAddAndRemoveAcrossNetmapUpdates(t *testing.T) {
 	}
 	if foundDormantLeases != 2 {
 		t.Fatalf("peer lease was not preserved for stable reuse: %v", removed.State.Leases)
+	}
+}
+
+func TestTUNPlanInstallsSelectedExitNodeDefaults(t *testing.T) {
+	st := state.State{
+		SyntheticPool:   "10.250.0.0/16",
+		SyntheticPoolV6: "fd6d:6e65:7400::/120",
+		Profiles:        []state.Profile{{ID: "work", Name: "work"}},
+		ExitNode: &state.ExitNode{
+			ProfileID: "work",
+			NodeID:    "exit-node",
+			PeerIP:    netip.MustParseAddr("100.64.0.20"),
+		},
+	}
+	status := tailmixprofile.Status{
+		ProfileID:    "work",
+		BackendState: "Running",
+		ExitNodeID:   "exit-node",
+		SelfNodeID:   "self",
+		SelfIPs: []netip.Addr{
+			netip.MustParseAddr("100.64.0.10"),
+			netip.MustParseAddr("fd7a:115c:a1e0::10"),
+		},
+	}
+	plan, err := buildTUNPlan(st, []tailmixprofile.Status{status})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []netip.Prefix{
+		netip.MustParsePrefix("0.0.0.0/1"),
+		netip.MustParsePrefix("128.0.0.0/1"),
+		netip.MustParsePrefix("::/1"),
+		netip.MustParsePrefix("8000::/1"),
+	} {
+		found := false
+		for _, route := range plan.HostConfig.Routes {
+			if route.Destination != prefix {
+				continue
+			}
+			found = true
+			if want := natIPFor(plan.State, prefix.Addr()); route.Source != want {
+				t.Fatalf("exit route %v source = %v, want shared NAT %v", prefix, route.Source, want)
+			}
+		}
+		if !found {
+			t.Fatalf("host routes %v do not contain exit route %v", plan.HostConfig.Routes, prefix)
+		}
+	}
+	for _, ip := range []netip.Addr{
+		netip.MustParseAddr("203.0.113.10"),
+		netip.MustParseAddr("2001:db8::10"),
+	} {
+		route, ok := plan.Table.ExitRoutes.Lookup(ip)
+		if !ok || !route.Active || route.ProfileID != "work" {
+			t.Fatalf("exit route for %v = %+v, %v", ip, route, ok)
+		}
+	}
+
+	pending := status
+	pending.ExitNodeID = ""
+	plan, err = buildTUNPlan(st, []tailmixprofile.Status{pending})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Table.ExitRoutes.Size() != 0 {
+		t.Fatalf("exit routes installed before profile preference applied: %+v", plan.Table.ExitRoutes)
+	}
+	for _, route := range plan.HostConfig.Routes {
+		if route.Exit {
+			t.Fatalf("host exit route installed before profile preference applied: %+v", route)
+		}
 	}
 }
 

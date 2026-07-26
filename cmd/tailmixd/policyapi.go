@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"net/netip"
+	"sort"
 	"strings"
 
 	"github.com/maisem/tailmix/controlapi"
+	tailmixprofile "github.com/maisem/tailmix/profile"
 	"github.com/maisem/tailmix/routingpolicy"
 	"github.com/maisem/tailmix/state"
 	"tailscale.com/util/dnsname"
@@ -161,6 +163,204 @@ func ipBindingIndex(bindings []state.IPRouteBinding, prefix netip.Prefix) int {
 		}
 	}
 	return -1
+}
+
+func (s *supervisor) ExitNodes(_ context.Context) (controlapi.ExitNodes, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.exitNodesLocked(s.statusesLocked()), nil
+}
+
+func (s *supervisor) SetExitNode(_ context.Context, request controlapi.SetExitNodeRequest) (controlapi.ExitNodes, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := cloneState(s.st)
+	configured, err := profileByName(&next, request.ProfileName)
+	if err != nil {
+		return controlapi.ExitNodes{}, err
+	}
+	if configured.Removed {
+		return controlapi.ExitNodes{}, controlapi.NewError("profile_not_found", "profile %q is removed", request.ProfileName)
+	}
+	if configured.Disabled {
+		return controlapi.ExitNodes{}, controlapi.NewError("profile_disabled", "profile %q is disabled", request.ProfileName)
+	}
+	statuses := s.statusesLocked()
+	var selectedStatus *tailmixprofile.Status
+	for i := range statuses {
+		if statuses[i].ProfileID == configured.ID {
+			selectedStatus = &statuses[i]
+			break
+		}
+	}
+	if selectedStatus == nil || selectedStatus.BackendState != "Running" {
+		return controlapi.ExitNodes{}, controlapi.NewError("profile_unavailable", "profile %q is not running", request.ProfileName)
+	}
+	peer, err := selectExitNodePeer(*selectedStatus, request.Peer)
+	if err != nil {
+		return controlapi.ExitNodes{}, err
+	}
+	peerIP := preferredPeerIP(peer.TailscaleIPs)
+	if !peerIP.IsValid() {
+		return controlapi.ExitNodes{}, controlapi.NewError("exit_node_unavailable", "exit node %q has no Tailscale IP", request.Peer)
+	}
+	next.ExitNode = &state.ExitNode{
+		ProfileID: configured.ID,
+		NodeID:    peer.NodeID,
+		PeerIP:    peerIP,
+	}
+	if err := s.commitPolicyLocked(next); err != nil {
+		return controlapi.ExitNodes{}, err
+	}
+	return s.exitNodesLocked(s.statusesLocked()), nil
+}
+
+func (s *supervisor) ClearExitNode(_ context.Context) (controlapi.ExitNodes, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.st.ExitNode == nil {
+		return s.exitNodesLocked(s.statusesLocked()), nil
+	}
+	next := cloneState(s.st)
+	next.ExitNode = nil
+	if err := s.commitPolicyLocked(next); err != nil {
+		return controlapi.ExitNodes{}, err
+	}
+	return s.exitNodesLocked(s.statusesLocked()), nil
+}
+
+func (s *supervisor) exitNodesLocked(statuses []tailmixprofile.Status) controlapi.ExitNodes {
+	result := controlapi.ExitNodes{ReconcileError: s.reconcileErr}
+	for _, status := range statuses {
+		profileName := profileNameByID(s.st, status.ProfileID)
+		for _, peer := range status.Peers {
+			if !peer.ExitNodeOption {
+				continue
+			}
+			result.Available = append(result.Available, controlapi.AvailableExitNode{
+				ProfileID:   status.ProfileID,
+				ProfileName: profileName,
+				NodeID:      peer.NodeID,
+				DNSName:     peer.DNSName,
+				IPs:         append([]netip.Addr(nil), peer.TailscaleIPs...),
+				Online:      peer.Online,
+			})
+		}
+	}
+	sort.Slice(result.Available, func(i, j int) bool {
+		if result.Available[i].ProfileName != result.Available[j].ProfileName {
+			return result.Available[i].ProfileName < result.Available[j].ProfileName
+		}
+		if result.Available[i].DNSName != result.Available[j].DNSName {
+			return result.Available[i].DNSName < result.Available[j].DNSName
+		}
+		return result.Available[i].NodeID < result.Available[j].NodeID
+	})
+	if s.st.ExitNode == nil {
+		return result
+	}
+	selected := &controlapi.SelectedExitNode{
+		ProfileID:   s.st.ExitNode.ProfileID,
+		ProfileName: profileNameByID(s.st, s.st.ExitNode.ProfileID),
+		NodeID:      s.st.ExitNode.NodeID,
+		PeerIP:      s.st.ExitNode.PeerIP,
+		State:       "waiting",
+	}
+	result.Selected = selected
+	var configured *state.Profile
+	for i := range s.st.Profiles {
+		if s.st.Profiles[i].ID == selected.ProfileID {
+			configured = &s.st.Profiles[i]
+			break
+		}
+	}
+	if configured == nil || configured.Disabled || configured.Removed {
+		selected.Reason = "profile_unavailable"
+		return result
+	}
+	for _, status := range statuses {
+		if status.ProfileID != selected.ProfileID {
+			continue
+		}
+		if status.BackendState != "Running" {
+			selected.Reason = "profile_unavailable"
+			return result
+		}
+		for _, peer := range status.Peers {
+			if peer.NodeID != selected.NodeID {
+				continue
+			}
+			selected.DNSName = peer.DNSName
+			selected.Online = peer.Online
+			if !peer.ExitNodeOption {
+				selected.Reason = "exit_node_unavailable"
+			} else if status.ExitNodeID == selected.NodeID {
+				selected.State = "installed"
+			} else {
+				selected.Reason = "exit_node_not_applied"
+			}
+			return result
+		}
+		selected.Reason = "exit_node_unavailable"
+		return result
+	}
+	selected.Reason = "profile_unavailable"
+	return result
+}
+
+func selectExitNodePeer(status tailmixprofile.Status, selector string) (tailmixprofile.PeerStatus, error) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return tailmixprofile.PeerStatus{}, controlapi.NewError("invalid_request", "exit node peer selector is empty")
+	}
+	selectorName := strings.ToLower(strings.TrimSuffix(selector, "."))
+	selectorIP, _ := netip.ParseAddr(selector)
+	matches := map[string]tailmixprofile.PeerStatus{}
+	for _, peer := range status.Peers {
+		if !peer.ExitNodeOption {
+			continue
+		}
+		match := peer.NodeID == selector
+		if selectorIP.IsValid() {
+			for _, ip := range peer.TailscaleIPs {
+				match = match || ip == selectorIP
+			}
+		}
+		peerName := strings.ToLower(strings.TrimSuffix(peer.DNSName, "."))
+		shortName, _, _ := strings.Cut(peerName, ".")
+		match = match || peerName != "" && (selectorName == peerName || selectorName == shortName)
+		if match {
+			matches[peer.NodeID] = peer
+		}
+	}
+	if len(matches) == 0 {
+		return tailmixprofile.PeerStatus{}, controlapi.NewError(
+			"exit_node_not_found", "exit node %q is not available in profile %q", selector, status.Alias)
+	}
+	if len(matches) > 1 {
+		return tailmixprofile.PeerStatus{}, controlapi.NewError(
+			"exit_node_ambiguous", "exit node selector %q is ambiguous in profile %q", selector, status.Alias)
+	}
+	for _, peer := range matches {
+		return peer, nil
+	}
+	panic("unreachable")
+}
+
+func preferredPeerIP(ips []netip.Addr) netip.Addr {
+	var first netip.Addr
+	for _, ip := range ips {
+		if !ip.IsValid() {
+			continue
+		}
+		if !first.IsValid() {
+			first = ip
+		}
+		if ip.Is4() {
+			return ip
+		}
+	}
+	return first
 }
 
 func (s *supervisor) DNSRoutes(_ context.Context, available bool) (controlapi.DNSRoutes, error) {
