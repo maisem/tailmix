@@ -11,7 +11,9 @@ SYSTEMD_UNIT ?= tailmixd.service
 .PHONY: install install-systemd licenses licenses-check
 
 install:
-	GOBIN="$(DESTDIR)$(BINDIR)" $(GO) install ./cmd/tailmix ./cmd/tailmixd
+	@set -e; \
+	version_ldflags="$$($(GO) run ./cmd/mkversion)"; \
+	GOBIN="$(DESTDIR)$(BINDIR)" $(GO) install -ldflags "$$version_ldflags" ./cmd/tailmix ./cmd/tailmixd
 
 install-systemd: install
 	$(INSTALL) -d -m 0755 "$(DESTDIR)$(SYSTEMD_UNIT_DIR)"

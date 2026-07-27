@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/netip"
 	"slices"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/maisem/tailmix/controlapi"
 	"github.com/maisem/tailmix/profilesocket"
+	tailmixversion "github.com/maisem/tailmix/version"
 )
 
 type fakeManagementClient struct {
@@ -24,8 +26,13 @@ type fakeManagementClient struct {
 	dnsPatch       controlapi.PatchDNSRoutesRequest
 	searchReplace  []string
 	statusProfiles []controlapi.Profile
+	serverVersion  tailmixversion.Meta
+	versionErr     error
 }
 
+func (f *fakeManagementClient) Version(context.Context) (tailmixversion.Meta, error) {
+	return f.serverVersion, f.versionErr
+}
 func (f *fakeManagementClient) Profiles(context.Context, bool) (controlapi.Profiles, error) {
 	if f.statusProfiles != nil {
 		return controlapi.Profiles{Profiles: f.statusProfiles}, nil
@@ -96,6 +103,7 @@ func testDependencies(client managementClient, stdout, stderr io.Writer, runner 
 		newClient: func(string) managementClient {
 			return client
 		},
+		version: "tailmix test-version",
 	}
 }
 
@@ -193,10 +201,44 @@ func TestRootHelpShowsFullSubcommandSpace(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	for _, command := range []string{"status", "profiles", "routes", "exit-node", "dns routes", "dns search", "tailscale", "ts"} {
+	for _, command := range []string{"status", "profiles", "routes", "exit-node", "dns routes", "dns search", "tailscale", "ts", "version"} {
 		if !strings.Contains(stdout.String(), command) {
 			t.Errorf("help does not contain %q:\n%s", command, stdout.String())
 		}
+	}
+}
+
+func TestVersion(t *testing.T) {
+	client := &fakeManagementClient{serverVersion: tailmixversion.Meta{
+		Short:            "daemon-version",
+		Long:             "daemon-long-version",
+		TailscaleVersion: "tailscale-version",
+	}}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"version"},
+		testDependencies(client, &stdout, &stderr, nil))
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	want := "tailmix test-version\n\n" +
+		"tailmixd daemon-version\n" +
+		"  long version: daemon-long-version\n" +
+		"  tailscale: tailscale-version\n"
+	if got := stdout.String(); got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
+	}
+}
+
+func TestVersionReportsUnavailableDaemon(t *testing.T) {
+	client := &fakeManagementClient{versionErr: errors.New("unavailable")}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"version"},
+		testDependencies(client, &stdout, &stderr, nil))
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "tailmix test-version\n\ntailmixd unavailable\n"; got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
 	}
 }
 

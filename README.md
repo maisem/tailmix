@@ -50,11 +50,14 @@ Open the login link printed by the second command.
 ### 3. Check it
 
 ```sh
+sudo tailmix version
+tailmixd --version
 sudo tailmix status
 sudo tailmix ts --profile work status
 ```
 
-If `work` is listed and the second command shows the tailnet, you are done.
+If the version prints, `work` is listed, and the third command shows the
+tailnet, you are done.
 
 To connect another tailnet, repeat step 2 with a different profile name.
 

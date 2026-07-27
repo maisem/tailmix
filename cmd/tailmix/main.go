@@ -17,6 +17,7 @@ import (
 
 	"github.com/maisem/tailmix/controlapi"
 	"github.com/maisem/tailmix/profilesocket"
+	tailmixversion "github.com/maisem/tailmix/version"
 	"tailscale.com/cmd/tailscale/cli"
 	"tailscale.com/util/dnsname"
 )
@@ -24,6 +25,7 @@ import (
 type cliRunner func(context.Context, []string) error
 
 type managementClient interface {
+	Version(context.Context) (tailmixversion.Meta, error)
 	Profiles(context.Context, bool) (controlapi.Profiles, error)
 	Profile(context.Context, string) (controlapi.Profile, error)
 	AddProfile(context.Context, controlapi.AddProfileRequest) (controlapi.Profile, error)
@@ -55,6 +57,7 @@ type dependencies struct {
 	stderr    io.Writer
 	runCLI    cliRunner
 	newClient func(string) managementClient
+	version   string
 }
 
 func main() {
@@ -72,6 +75,7 @@ func runWithIO(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		newClient: func(socketDir string) managementClient {
 			return controlapi.NewClient(socketDir)
 		},
+		version: tailmixversion.String(),
 	})
 }
 
@@ -105,6 +109,8 @@ func runWithDependencies(ctx context.Context, args []string, deps dependencies) 
 		err = runDNS(ctx, client, args[1:], deps)
 	case "tailscale", "ts":
 		err = runTailscale(ctx, client, socketDir, args[1:], deps)
+	case "version":
+		err = runVersion(ctx, client, args[1:], deps)
 	default:
 		if len(args) > 1 {
 			err = usageError{fmt.Sprintf("ambiguous legacy syntax; use %q", "tailmix ts --profile "+args[0]+" "+strings.Join(args[1:], " "))}
@@ -123,6 +129,25 @@ func runWithDependencies(ctx context.Context, args []string, deps dependencies) 
 	}
 	fmt.Fprintln(deps.stderr, err)
 	return 1
+}
+
+func runVersion(ctx context.Context, client managementClient, args []string, deps dependencies) error {
+	if len(args) > 0 && isHelp(args[0]) {
+		fmt.Fprint(deps.stdout, versionHelp)
+		return nil
+	}
+	if err := noOperands(args); err != nil {
+		return err
+	}
+	fmt.Fprintln(deps.stdout, deps.version)
+	fmt.Fprintln(deps.stdout)
+	serverVersion, err := client.Version(ctx)
+	if err != nil {
+		fmt.Fprintln(deps.stdout, "tailmixd unavailable")
+		return nil
+	}
+	fmt.Fprintln(deps.stdout, serverVersion.Format("tailmixd"))
+	return nil
 }
 
 func runStatus(ctx context.Context, client managementClient, args []string, deps dependencies) error {
@@ -1213,12 +1238,21 @@ Commands:
   dns search   Manage the ordered OS search-domain list
   tailscale    Run an upstream Tailscale command for one profile
   ts           Shortcut for tailscale
+  version      Show the tailmix build version
   help         Show this help
 
 Use "tailmix <command> help" for command-specific help.
 
 Environment:
   TAILMIX_SOCKET_DIR   Default directory for daemon and profile sockets
+`
+
+const versionHelp = `Usage:
+  tailmix version
+
+Shows client and server versions, source revisions, and full embedded Tailscale
+module versions. The server is shown as unavailable when tailmixd cannot be
+reached.
 `
 
 const statusHelp = `Usage:

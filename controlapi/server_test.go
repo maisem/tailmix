@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+
+	tailmixversion "github.com/maisem/tailmix/version"
 )
 
 type recordingBackend struct {
@@ -37,6 +39,22 @@ func (b *recordingBackend) SetExitNode(_ context.Context, request SetExitNodeReq
 		DNSName:     request.Peer,
 		State:       "installed",
 	}}, nil
+}
+
+func TestHandlerReturnsServerVersion(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/v1/version", nil)
+	response := httptest.NewRecorder()
+	Handler(&recordingBackend{}).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var got tailmixversion.Meta
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Short == "" || got.Long == "" || got.TailscaleVersion == "" {
+		t.Fatalf("version = %+v", got)
+	}
 }
 
 func TestHandlerDecodesAtomicRoutePatch(t *testing.T) {

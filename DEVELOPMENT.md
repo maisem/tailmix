@@ -16,7 +16,7 @@ go build ./...
 Install development binaries into the Go binary directory on your `PATH`:
 
 ```sh
-go install ./cmd/tailmix ./cmd/tailmixd
+make install BINDIR="$(go env GOPATH)/bin"
 ```
 
 The Make target installs both binaries under `/usr/local/bin` by default:
@@ -45,6 +45,29 @@ A staged systemd installation does not contact `systemctl`. Set
 `SYSTEMD_UNIT_DIR` to override the unit destination or `SYSTEMCTL` to use a
 different systemctl command. See
 [docs/linux-install.md](docs/linux-install.md) for the runtime workflow.
+
+## Versioning
+
+The target version lives in `version/VERSION.txt` as a semantic version without
+a leading `v` and with an explicit prerelease channel. Main development uses a
+`-dev` target such as `0.2.0-dev`; release branches use the next patch target
+with `-rc`, such as `0.1.1-rc`.
+
+Packaged builds append the number of commits since `VERSION.txt` last changed.
+The target commit reports `v0.1.0-dev`, seven later commits report
+`v0.1.0-dev.7`, and the long form also includes the source revision, such as
+`v0.1.0-dev.7-t012345678`.
+
+An exact clean Git tag matching the target's release version is authoritative:
+a commit containing `0.1.0-dev` or `0.1.0-rc` and tagged `v0.1.0` reports
+`v0.1.0`. After a release, update main to the next `-dev` target and the release
+branch to the next patch's `-rc` target so subsequent builds remain ordered
+after the release.
+
+The Make and Homebrew builds inject the derived short version, long version,
+and Git commit. A plain `go build` cannot calculate the commit count inside the
+resulting binary, so it appends the commit date to the explicit channel, such
+as `v0.1.0-dev.20260727`, instead.
 
 ## Validate
 

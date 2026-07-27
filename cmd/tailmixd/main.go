@@ -26,6 +26,7 @@ import (
 	"github.com/maisem/tailmix/routingpolicy"
 	"github.com/maisem/tailmix/state"
 	"github.com/maisem/tailmix/tunmux"
+	tailmixversion "github.com/maisem/tailmix/version"
 	"tailscale.com/net/tsaddr"
 )
 
@@ -91,9 +92,14 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	verbose := fs.Bool("verbose", false, "enable verbose per-profile tsnet logs")
 	logUpload := fs.Bool("log-upload", false, "opt in to remote per-profile logtail uploads")
 	logUploadURL := fs.String("log-upload-url", "", "replace the remote logtail upload base URL (requires -log-upload)")
+	showVersion := fs.Bool("version", false, "print version and exit")
 	fs.Var(&profiles, "profile", "profile config: id=work,dir=/path,hostname=tailmix-work[,suffix=tailnet.ts.net][,auth-key-env=ENV]")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *showVersion {
+		fmt.Fprintln(stdout, tailmixversion.GetMeta().Format("tailmixd"))
+		return nil
 	}
 	if *statePath == "" {
 		return fmt.Errorf("state path is required")

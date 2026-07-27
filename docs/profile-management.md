@@ -96,6 +96,7 @@ or removing a profile must not restart the daemon or disrupt other profiles.
 The first positional token always names a command namespace, never a profile:
 
 ```text
+tailmix version
 tailmix status [--json]
 tailmix profiles <lifecycle-command> [arguments]
 tailmix routes <policy-command> [arguments]
@@ -104,7 +105,10 @@ tailmix dns search <policy-command> [arguments]
 tailmix {tailscale|ts} --profile <name> <tailscale-subcommand> [arguments]
 ```
 
-`status` is the concise active-profile overview, equivalent to `profiles list`.
+`version` prints the client and running daemon semantic versions, source
+revisions, and full embedded Tailscale module versions. It still prints the
+client version when the daemon is unavailable. `status` is the concise
+active-profile overview, equivalent to `profiles list`.
 `profiles` owns tailmix lifecycle operations. `tailscale` delegates to the
 selected profile's upstream Tailscale CLI, and `ts` is its exact alias. A
 profile name appears only as an operand or the value of `--profile`. `routes`
@@ -609,6 +613,8 @@ access without changing the API.
 ### Endpoints
 
 ```text
+GET    /v1/version
+
 GET    /v1/profiles
 POST   /v1/profiles
 GET    /v1/profiles/by-name/{escaped-profile-name}

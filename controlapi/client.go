@@ -12,6 +12,7 @@ import (
 	"strconv"
 
 	"github.com/maisem/tailmix/profilesocket"
+	tailmixversion "github.com/maisem/tailmix/version"
 )
 
 type Client struct {
@@ -26,6 +27,12 @@ func NewClient(socketDir string) *Client {
 		},
 	}
 	return &Client{http: &http.Client{Transport: transport}}
+}
+
+func (c *Client) Version(ctx context.Context) (tailmixversion.Meta, error) {
+	var out tailmixversion.Meta
+	err := c.do(ctx, http.MethodGet, "/v1/version", nil, &out)
+	return out, err
 }
 
 func (c *Client) Profiles(ctx context.Context, all bool) (Profiles, error) {

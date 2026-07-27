@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"net/netip"
 	"path/filepath"
 	"testing"
@@ -9,7 +11,22 @@ import (
 	"github.com/maisem/tailmix/effectiveip"
 	tailmixprofile "github.com/maisem/tailmix/profile"
 	"github.com/maisem/tailmix/state"
+	tailmixversion "github.com/maisem/tailmix/version"
 )
+
+func TestVersion(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := run(context.Background(), []string{"--version"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	want := tailmixversion.GetMeta().Format("tailmixd") + "\n"
+	if got := stdout.String(); got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("version stderr = %q, want empty", got)
+	}
+}
 
 func TestParseProfileSpecUsesMagicDNSSuffixAndAuthKeyEnv(t *testing.T) {
 	got, err := parseProfileSpec("id=work,dir=/tmp/work,hostname=tailmix-work,suffix=example.ts.net,auth-key-env=WORK_AUTHKEY")

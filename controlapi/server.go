@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+
+	tailmixversion "github.com/maisem/tailmix/version"
 )
 
 type Backend interface {
@@ -41,6 +43,9 @@ type Backend interface {
 
 func Handler(backend Backend) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, _ *http.Request) {
+		writeResult(w, tailmixversion.GetMeta(), nil)
+	})
 	mux.HandleFunc("GET /v1/profiles", func(w http.ResponseWriter, r *http.Request) {
 		all, _ := strconv.ParseBool(r.URL.Query().Get("all"))
 		result, err := backend.ListProfiles(r.Context(), all)
