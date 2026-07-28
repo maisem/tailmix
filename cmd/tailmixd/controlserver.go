@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -11,8 +12,11 @@ import (
 
 	"github.com/maisem/tailmix/controlapi"
 	"github.com/maisem/tailmix/profilesocket"
+	"github.com/tailscale/peercred"
 	"tailscale.com/safesocket"
 )
+
+type peerUIDContextKey struct{}
 
 type controlServer struct {
 	path      string
@@ -29,14 +33,24 @@ func startControlServer(ctx context.Context, socketDir string, backend controlap
 	if err != nil {
 		return nil, fmt.Errorf("listen on daemon control socket %s: %w", path, err)
 	}
-	if err := os.Chmod(path, 0600); err != nil {
+	mode := os.FileMode(0600)
+	if safesocket.PlatformUsesPeerCreds() {
+		mode = 0666
+	}
+	if err := os.Chmod(path, mode); err != nil {
 		_ = listener.Close()
 		return nil, fmt.Errorf("secure daemon control socket %s: %w", path, err)
+	}
+	handler := controlapi.Handler(backend)
+	httpServer := &http.Server{Handler: handler}
+	if safesocket.PlatformUsesPeerCreds() {
+		httpServer.Handler = requireRootForMutations(handler)
+		httpServer.ConnContext = controlConnContext
 	}
 	server := &controlServer{
 		path:     path,
 		listener: listener,
-		http:     &http.Server{Handler: controlapi.Handler(backend)},
+		http:     httpServer,
 		done:     make(chan error, 1),
 	}
 	go func() {
@@ -51,6 +65,36 @@ func startControlServer(ctx context.Context, socketDir string, backend controlap
 		_ = server.Close()
 	}()
 	return server, nil
+}
+
+func controlConnContext(ctx context.Context, conn net.Conn) context.Context {
+	creds, err := peercred.Get(conn)
+	if err != nil {
+		return ctx
+	}
+	uid, ok := creds.UserID()
+	if !ok {
+		return ctx
+	}
+	return context.WithValue(ctx, peerUIDContextKey{}, uid)
+}
+
+func requireRootForMutations(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			next.ServeHTTP(w, r)
+			return
+		}
+		uid, _ := r.Context().Value(peerUIDContextKey{}).(string)
+		if uid != "0" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(controlapi.NewError(
+				"permission_denied", "tailmix management commands require root"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *controlServer) Errors() <-chan error { return s.done }

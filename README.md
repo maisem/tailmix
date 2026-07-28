@@ -50,13 +50,13 @@ Open the login link printed by the second command.
 ### 3. Check it
 
 ```sh
-sudo tailmix version
+tailmix version
 tailmixd --version
-sudo tailmix status
-sudo tailmix ts --profile work status
+tailmix status
+tailmix ts --profile work status
 ```
 
-If the version prints, `work` is listed, and the third command shows the
+If the version prints, `work` is listed, and the final command shows the
 tailnet, you are done.
 
 To connect another tailnet, repeat step 2 with a different profile name.
@@ -66,10 +66,10 @@ To connect another tailnet, repeat step 2 with a different profile name.
 List everything before changing policy:
 
 ```sh
-sudo tailmix routes list
-sudo tailmix exit-node list
-sudo tailmix dns routes list
-sudo tailmix dns search list
+tailmix routes list
+tailmix exit-node list
+tailmix dns routes list
+tailmix dns search list
 ```
 
 Accept every advertised subnet route and DNS route from one profile:
@@ -106,7 +106,9 @@ sudo tailmix dns search add corp.example.com
 Explicit bindings override profile-wide accept-all settings. Changes apply
 without restarting `tailmixd`.
 
-Run `tailmix help` for every command.
+Run `tailmix help` for every command. Status and other read-only commands work
+as a regular local user; commands that change daemon-managed state require
+root.
 
 ## How it works
 

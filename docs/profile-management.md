@@ -604,11 +604,12 @@ The daemon serves HTTP/JSON over a dedicated Unix socket:
 This socket is separate from each profile's hashed LocalAPI socket. The CLI
 must never edit the state JSON directly.
 
-For the first version, local read requests may use the normal local socket
-access policy, while mutations require the connecting UID to be root. Peer
-credentials must be checked by the server; filesystem mode alone is not an
-authorization check. A future daemon-wide operator setting can widen mutation
-access without changing the API.
+Local read requests use the normal local socket access policy, so commands such
+as `tailmix status` and the various `list` commands do not require root.
+Mutations require the connecting UID to be root. The server checks peer
+credentials rather than relying on filesystem mode alone. On platforms without
+Unix peer credentials, the socket remains owner-only. A future daemon-wide
+operator setting can widen mutation access without changing the API.
 
 ### Endpoints
 

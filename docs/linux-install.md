@@ -29,8 +29,8 @@ You need systemd, Go 1.26.4 or newer, and root access.
 4. Check it:
 
    ```sh
-   sudo tailmix status
-   sudo tailmix ts --profile work status
+   tailmix status
+   tailmix ts --profile work status
    ```
 
 If `work` is listed and the second command shows the tailnet, you are done.
