@@ -117,6 +117,9 @@ owns daemon-wide IP route policy. `dns routes` owns DNS query routing, while
 occupy only resource positions and cannot collide with profile or command
 names.
 
+Every tailmix `--profile` option also accepts the short form `-p`. The
+`tailmixd` startup profile flag accepts the same alias.
+
 The current `tailmix work status` form is intentionally not part of the target
 grammar. A release may recognize it solely to print a deprecation error with
 the exact replacement, but new functionality must not extend that ambiguous

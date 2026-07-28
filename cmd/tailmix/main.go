@@ -435,7 +435,7 @@ func runRoutes(ctx context.Context, client managementClient, args []string, deps
 		return nil
 	case "bind":
 		rest := args[1:]
-		profileName, set, err := takeString(&rest, "--profile")
+		profileName, set, err := takeProfile(&rest)
 		if err != nil {
 			return err
 		}
@@ -465,7 +465,7 @@ func runRoutes(ctx context.Context, client managementClient, args []string, deps
 		return writeIPMutationResult(deps.stdout, result, jsonOutput)
 	case "unbind":
 		rest := args[1:]
-		profileName, _, err := takeString(&rest, "--profile")
+		profileName, _, err := takeProfile(&rest)
 		if err != nil {
 			return err
 		}
@@ -488,7 +488,7 @@ func runRoutes(ctx context.Context, client managementClient, args []string, deps
 		return writeIPMutationResult(deps.stdout, result, jsonOutput)
 	case "set":
 		rest := args[1:]
-		profileName, set, err := takeString(&rest, "--profile")
+		profileName, set, err := takeProfile(&rest)
 		if err != nil {
 			return err
 		}
@@ -531,7 +531,7 @@ func runExitNode(ctx context.Context, client managementClient, args []string, de
 		}
 		result, err = client.ExitNodes(ctx)
 	case "set":
-		profileName, set, parseErr := takeString(&rest, "--profile")
+		profileName, set, parseErr := takeProfile(&rest)
 		if parseErr != nil {
 			return parseErr
 		}
@@ -609,7 +609,7 @@ func runDNSRoutes(ctx context.Context, client managementClient, args []string, d
 		return nil
 	case "bind":
 		rest := args[1:]
-		profileName, set, err := takeString(&rest, "--profile")
+		profileName, set, err := takeProfile(&rest)
 		if err != nil {
 			return err
 		}
@@ -639,7 +639,7 @@ func runDNSRoutes(ctx context.Context, client managementClient, args []string, d
 		return writeDNSMutationResult(deps.stdout, result, jsonOutput)
 	case "unbind":
 		rest := args[1:]
-		profileName, _, err := takeString(&rest, "--profile")
+		profileName, _, err := takeProfile(&rest)
 		if err != nil {
 			return err
 		}
@@ -662,7 +662,7 @@ func runDNSRoutes(ctx context.Context, client managementClient, args []string, d
 		return writeDNSMutationResult(deps.stdout, result, jsonOutput)
 	case "set":
 		rest := args[1:]
-		profileName, set, err := takeString(&rest, "--profile")
+		profileName, set, err := takeProfile(&rest)
 		if err != nil {
 			return err
 		}
@@ -744,7 +744,7 @@ func runTailscale(ctx context.Context, client managementClient, socketDir string
 		fmt.Fprint(deps.stdout, tailscaleHelp)
 		return nil
 	}
-	profileName, rest, set, err := takeLeadingString(args, "--profile")
+	profileName, rest, set, err := takeLeadingProfile(args)
 	if err != nil {
 		return err
 	}
@@ -803,49 +803,76 @@ func globalOptions(args []string) (string, []string, error) {
 }
 
 func takeLeadingString(args []string, name string) (value string, rest []string, found bool, err error) {
+	return takeLeadingStringAliases(args, name)
+}
+
+func takeLeadingProfile(args []string) (value string, rest []string, found bool, err error) {
+	return takeLeadingStringAliases(args, "--profile", "-p")
+}
+
+func takeLeadingStringAliases(args []string, names ...string) (value string, rest []string, found bool, err error) {
 	rest = append([]string(nil), args...)
 	if len(rest) == 0 {
 		return "", rest, false, nil
 	}
-	if rest[0] == name {
-		if len(rest) < 2 {
-			return "", nil, false, usageError{name + " requires a value"}
+	for _, name := range names {
+		if rest[0] == name {
+			if len(rest) < 2 {
+				return "", nil, false, usageError{name + " requires a value"}
+			}
+			return rest[1], rest[2:], true, nil
 		}
-		return rest[1], rest[2:], true, nil
-	}
-	if strings.HasPrefix(rest[0], name+"=") {
-		return strings.TrimPrefix(rest[0], name+"="), rest[1:], true, nil
+		if strings.HasPrefix(rest[0], name+"=") {
+			return strings.TrimPrefix(rest[0], name+"="), rest[1:], true, nil
+		}
 	}
 	return "", rest, false, nil
 }
 
 func takeString(args *[]string, name string) (string, bool, error) {
+	return takeStringAliases(args, name)
+}
+
+func takeProfile(args *[]string) (string, bool, error) {
+	return takeStringAliases(args, "--profile", "-p")
+}
+
+func takeStringAliases(args *[]string, names ...string) (string, bool, error) {
 	var value string
 	found := false
 	out := (*args)[:0]
 	for i := 0; i < len(*args); i++ {
 		arg := (*args)[i]
-		if arg == name {
-			if found {
-				return "", false, usageError{name + " may be specified only once"}
+		matchedName := ""
+		hasInlineValue := false
+		for _, name := range names {
+			if arg == name {
+				matchedName = name
+				break
 			}
+			if strings.HasPrefix(arg, name+"=") {
+				matchedName = name
+				hasInlineValue = true
+				break
+			}
+		}
+		if matchedName == "" {
+			out = append(out, arg)
+			continue
+		}
+		if found {
+			return "", false, usageError{names[0] + " may be specified only once"}
+		}
+		if hasInlineValue {
+			value = strings.TrimPrefix(arg, matchedName+"=")
+		} else {
 			if i+1 >= len(*args) {
-				return "", false, usageError{name + " requires a value"}
+				return "", false, usageError{matchedName + " requires a value"}
 			}
 			value = (*args)[i+1]
-			found = true
 			i++
-			continue
 		}
-		if strings.HasPrefix(arg, name+"=") {
-			if found {
-				return "", false, usageError{name + " may be specified only once"}
-			}
-			value = strings.TrimPrefix(arg, name+"=")
-			found = true
-			continue
-		}
-		out = append(out, arg)
+		found = true
 	}
 	*args = out
 	return value, found, nil
@@ -1288,6 +1315,8 @@ const routesHelp = `Usage:
   tailmix routes unbind <prefix>... [--profile <expected-profile>] [--json]
   tailmix routes set --profile <profile> --accept-all=<true|false> [--json]
 
+Profile option: -p, --profile <profile>
+
 Bindings are explicit overrides: the longest matching binding wins before any
 accept-all import. Overridden and conflicting imports are shown by "routes list".
 The default list also includes every detected route; --available shows only
@@ -1299,6 +1328,8 @@ const exitNodeHelp = `Usage:
   tailmix exit-node list [--json]
   tailmix exit-node set --profile <profile> <peer> [--json]
   tailmix exit-node clear [--json]
+
+Profile option: -p, --profile <profile>
 
 The peer may be an exit node's DNS name, short hostname, stable node ID, or
 Tailscale IP. Only one exit node can be selected across all profiles. Explicit
@@ -1315,6 +1346,8 @@ const dnsRoutesHelp = `Usage:
   tailmix dns routes bind --profile <profile> <domain>... [--replace] [--json]
   tailmix dns routes unbind <domain>... [--profile <expected-profile>] [--json]
   tailmix dns routes set --profile <profile> --accept-all=<true|false> [--json]
+
+Profile option: -p, --profile <profile>
 
 Bindings are explicit overrides: the longest matching binding wins before any
 accept-all import or automatic MagicDNS route. Overridden and conflicting
@@ -1338,6 +1371,8 @@ from each tailnet.
 const tailscaleHelp = `Usage:
   tailmix tailscale --profile <profile> <tailscale-subcommand> [arguments]
   tailmix ts --profile <profile> <tailscale-subcommand> [arguments]
+
+Profile option: -p, --profile <profile>
 
 All remaining arguments are passed unchanged to Tailscale's upstream CLI.
 The --socket option is owned by tailmix and cannot be overridden.

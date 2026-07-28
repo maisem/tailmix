@@ -106,9 +106,9 @@ sudo tailmix dns search add corp.example.com
 Explicit bindings override profile-wide accept-all settings. Changes apply
 without restarting `tailmixd`.
 
-Run `tailmix help` for every command. Status and other read-only commands work
-as a regular local user; commands that change daemon-managed state require
-root.
+Run `tailmix help` for every command. `-p` is shorthand for `--profile`
+everywhere. Status and other read-only commands work as a regular local user;
+commands that change daemon-managed state require root.
 
 ## How it works
 

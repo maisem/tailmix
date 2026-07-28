@@ -293,6 +293,8 @@ tailmix tailscale --profile <name> <tailscale-subcommand> [arguments]
 tailmix ts --profile <name> <tailscale-subcommand> [arguments]
 ```
 
+Every `--profile` option also accepts `-p`.
+
 `tailmix` selects that profile's LocalAPI socket and delegates the remaining
 arguments to `tailscale.com/cmd/tailscale/cli`. Command behavior and output are
 therefore upstream Tailscale behavior. `ts` is an exact shortcut for the

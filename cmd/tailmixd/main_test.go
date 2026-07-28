@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"flag"
 	"net/netip"
 	"path/filepath"
 	"testing"
@@ -47,6 +48,18 @@ func TestParseProfileSpecUsesMagicDNSSuffixAndAuthKeyEnv(t *testing.T) {
 func TestParseProfileSpecRejectsLegacyControlURL(t *testing.T) {
 	if _, err := parseProfileSpec("id=work,control-url=https://headscale.example.com"); err == nil {
 		t.Fatal("legacy control-url field unexpectedly accepted")
+	}
+}
+
+func TestRegisterProfileFlagsAcceptsLongAndShortOptions(t *testing.T) {
+	var profiles profileFlag
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	registerProfileFlags(fs, &profiles)
+	if err := fs.Parse([]string{"--profile", "id=work", "-p", "id=home"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 2 || profiles[0].ID != "work" || profiles[1].ID != "home" {
+		t.Fatalf("profiles = %+v", profiles)
 	}
 }
 

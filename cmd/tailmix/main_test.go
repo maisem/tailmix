@@ -174,7 +174,7 @@ func TestTSLeavesUpstreamProfileArgumentsUntouched(t *testing.T) {
 	client := &fakeManagementClient{profile: controlapi.Profile{ID: "p_work", Name: "work", LocalAPISocket: "/tmp/work.sock"}}
 	var gotArgs []string
 	code := runWithDependencies(context.Background(),
-		[]string{"ts", "--profile", "work", "switch", "--profile", "upstream-profile"},
+		[]string{"ts", "-p", "work", "switch", "--profile", "upstream-profile"},
 		testDependencies(client, io.Discard, io.Discard, func(_ context.Context, args []string) error {
 			gotArgs = slices.Clone(args)
 			return nil
@@ -182,6 +182,117 @@ func TestTSLeavesUpstreamProfileArgumentsUntouched(t *testing.T) {
 	want := []string{"--socket=/tmp/work.sock", "switch", "--profile", "upstream-profile"}
 	if code != 0 || !slices.Equal(gotArgs, want) {
 		t.Fatalf("exit = %d, upstream args = %q, want %q", code, gotArgs, want)
+	}
+}
+
+func TestShortProfileOption(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		gotProfile func(*fakeManagementClient) string
+	}{
+		{
+			name: "tailscale delegation",
+			args: []string{"ts", "-p", "work", "status"},
+			gotProfile: func(client *fakeManagementClient) string {
+				return client.profileName
+			},
+		},
+		{
+			name: "IP route bind",
+			args: []string{"routes", "bind", "-p", "work", "10.20.0.0/16"},
+			gotProfile: func(client *fakeManagementClient) string {
+				if len(client.ipPatch.Bind) == 0 {
+					return ""
+				}
+				return client.ipPatch.Bind[0].ProfileName
+			},
+		},
+		{
+			name: "IP route unbind",
+			args: []string{"routes", "unbind", "10.20.0.0/16", "-p=work"},
+			gotProfile: func(client *fakeManagementClient) string {
+				if len(client.ipPatch.Unbind) == 0 {
+					return ""
+				}
+				return client.ipPatch.Unbind[0].ProfileName
+			},
+		},
+		{
+			name: "IP route accept all",
+			args: []string{"routes", "set", "-p", "work", "--accept-all=true"},
+			gotProfile: func(client *fakeManagementClient) string {
+				if _, ok := client.ipPatch.AcceptAll["work"]; ok {
+					return "work"
+				}
+				return ""
+			},
+		},
+		{
+			name: "exit node",
+			args: []string{"exit-node", "set", "-p", "work", "gateway"},
+			gotProfile: func(client *fakeManagementClient) string {
+				return client.exitSet.ProfileName
+			},
+		},
+		{
+			name: "DNS route bind",
+			args: []string{"dns", "routes", "bind", "-p", "work", "corp.example"},
+			gotProfile: func(client *fakeManagementClient) string {
+				if len(client.dnsPatch.Bind) == 0 {
+					return ""
+				}
+				return client.dnsPatch.Bind[0].ProfileName
+			},
+		},
+		{
+			name: "DNS route unbind",
+			args: []string{"dns", "routes", "unbind", "corp.example", "-p=work"},
+			gotProfile: func(client *fakeManagementClient) string {
+				if len(client.dnsPatch.Unbind) == 0 {
+					return ""
+				}
+				return client.dnsPatch.Unbind[0].ProfileName
+			},
+		},
+		{
+			name: "DNS route accept all",
+			args: []string{"dns", "routes", "set", "-p", "work", "--accept-all=true"},
+			gotProfile: func(client *fakeManagementClient) string {
+				if _, ok := client.dnsPatch.AcceptAll["work"]; ok {
+					return "work"
+				}
+				return ""
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &fakeManagementClient{profile: controlapi.Profile{
+				ID: "p_work", Name: "work", LocalAPISocket: "/tmp/work.sock",
+			}}
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), test.args,
+				testDependencies(client, io.Discard, &stderr, func(context.Context, []string) error {
+					return nil
+				}))
+			if code != 0 {
+				t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+			}
+			if got := test.gotProfile(client); got != "work" {
+				t.Fatalf("profile = %q, want work", got)
+			}
+		})
+	}
+}
+
+func TestProfileOptionRejectsMixedAliases(t *testing.T) {
+	var stderr bytes.Buffer
+	code := runWithDependencies(context.Background(),
+		[]string{"routes", "bind", "-p", "work", "--profile", "home", "10.20.0.0/16"},
+		testDependencies(&fakeManagementClient{}, io.Discard, &stderr, nil))
+	if code != 2 || !strings.Contains(stderr.String(), "--profile may be specified only once") {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
 	}
 }
 

@@ -93,7 +93,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	logUpload := fs.Bool("log-upload", false, "opt in to remote per-profile logtail uploads")
 	logUploadURL := fs.String("log-upload-url", "", "replace the remote logtail upload base URL (requires -log-upload)")
 	showVersion := fs.Bool("version", false, "print version and exit")
-	fs.Var(&profiles, "profile", "profile config: id=work,dir=/path,hostname=tailmix-work[,suffix=tailnet.ts.net][,auth-key-env=ENV]")
+	registerProfileFlags(fs, &profiles)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -152,6 +152,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		Stderr:       stderr,
 	})
 	return supervisor.Run(ctx)
+}
+
+func registerProfileFlags(fs *flag.FlagSet, profiles *profileFlag) {
+	const usage = "profile config: id=work,dir=/path,hostname=tailmix-work[,suffix=tailnet.ts.net][,auth-key-env=ENV]"
+	fs.Var(profiles, "profile", usage)
+	fs.Var(profiles, "p", usage+" (shorthand)")
 }
 
 func defaultStatePath() string {
