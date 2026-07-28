@@ -4,7 +4,11 @@ package dns
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -58,7 +62,11 @@ func TestManagerUsesNativeSplitDNSAndAnswersEffectiveIP(t *testing.T) {
 	knobs := new(controlknobs.Knobs)
 	knobs.ForceRegisterMagicDNSIPv4Only.Store(true)
 	capture := new(captureOSConfigurator)
-	manager := tailscaledns.NewManager(logger.Discard, &splitDNSConfigurator{OSConfigurator: capture}, health.NewTracker(bus), dialer, nil, knobs, "darwin", bus)
+	configurator := &splitDNSConfigurator{
+		OSConfigurator: capture,
+		resolverDir:    t.TempDir(),
+	}
+	manager := tailscaledns.NewManager(logger.Discard, configurator, health.NewTracker(bus), dialer, nil, knobs, "darwin", bus)
 	defer manager.Down()
 	if err := manager.Set(dnsCfg); err != nil {
 		t.Fatal(err)
@@ -191,6 +199,7 @@ func TestManagerCompilesGlobalResolverWithoutDroppingMagicDNS(t *testing.T) {
 			{Suffix: ".", ProfileID: "work", Resolvers: []*dnstype.Resolver{{Addr: "127.0.0.1:5353"}}},
 			{Suffix: "home.example", ProfileID: "home"},
 		},
+		SearchDomains: []string{"home.example"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +216,10 @@ func TestManagerCompilesGlobalResolverWithoutDroppingMagicDNS(t *testing.T) {
 	knobs := new(controlknobs.Knobs)
 	knobs.ForceRegisterMagicDNSIPv4Only.Store(true)
 	capture := new(captureOSConfigurator)
-	configurator := &splitDNSConfigurator{OSConfigurator: capture}
+	configurator := &splitDNSConfigurator{
+		OSConfigurator: capture,
+		resolverDir:    t.TempDir(),
+	}
 	manager := tailscaledns.NewManager(logger.Discard, configurator, health.NewTracker(bus), dialer, nil, knobs, "darwin", bus)
 	defer manager.Down()
 	if err := manager.Set(dnsCfg); err != nil {
@@ -219,6 +231,17 @@ func TestManagerCompilesGlobalResolverWithoutDroppingMagicDNS(t *testing.T) {
 	}
 	if len(capture.config.MatchDomains) != 0 {
 		t.Fatalf("root resolver unexpectedly compiled as split DNS: %v", capture.config.MatchDomains)
+	}
+	if len(capture.config.SearchDomains) != 0 {
+		t.Fatalf("global OS config unexpectedly contains search domains: %v", capture.config.SearchDomains)
+	}
+	searchConfig, err := os.ReadFile(filepath.Join(configurator.resolverDir, tailmixSearchResolverFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSearchConfig := tailmixResolverFileHeader + "search home.example\n"
+	if string(searchConfig) != wantSearchConfig {
+		t.Fatalf("search resolver config = %q, want %q", searchConfig, wantSearchConfig)
 	}
 
 	builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: 3, RecursionDesired: true})
@@ -256,5 +279,23 @@ func TestManagerCompilesGlobalResolverWithoutDroppingMagicDNS(t *testing.T) {
 	}
 	if got := netip.AddrFrom4(answer.A); got != netip.MustParseAddr("100.127.0.7") {
 		t.Fatalf("MagicDNS answer = %v, want 100.127.0.7", got)
+	}
+
+	dnsCfg.DefaultResolvers = nil
+	if err := manager.Set(dnsCfg); err != nil {
+		t.Fatal(err)
+	}
+	wantSearchDomain, err := dnsname.ToFQDN("home.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.config.MatchDomains) != 1 || capture.config.MatchDomains[0] != wantSearchDomain {
+		t.Fatalf("split DNS match domains = %v, want [%v]", capture.config.MatchDomains, wantSearchDomain)
+	}
+	if len(capture.config.SearchDomains) != 1 || capture.config.SearchDomains[0] != wantSearchDomain {
+		t.Fatalf("split DNS search domains = %v, want [%v]", capture.config.SearchDomains, wantSearchDomain)
+	}
+	if _, err := os.Stat(filepath.Join(configurator.resolverDir, tailmixSearchResolverFile)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("tailmix global search resolver remains after returning to split DNS: %v", err)
 	}
 }

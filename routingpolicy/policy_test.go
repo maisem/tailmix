@@ -155,6 +155,7 @@ func TestExplicitDNSDefaultFallsBackToAutomaticMagicDNS(t *testing.T) {
 		DNSRouteBindings: []state.DNSRouteBinding{{
 			Domain: ".", ProfileID: "work-id",
 		}},
+		SearchDomains: []string{"home.example"},
 	}
 	statuses := []profile.Status{
 		{
@@ -177,6 +178,9 @@ func TestExplicitDNSDefaultFallsBackToAutomaticMagicDNS(t *testing.T) {
 	}
 	if len(plan.Automatic) != 1 || !plan.Automatic[0].Active || plan.Automatic[0].Reason != "" {
 		t.Fatalf("automatic MagicDNS routes = %+v", plan.Automatic)
+	}
+	if len(plan.Search.Installed) != 1 || plan.Search.Installed[0].Domain != "home.example" {
+		t.Fatalf("installed search domains = %+v", plan.Search.Installed)
 	}
 }
 
