@@ -13,6 +13,7 @@ import (
 	tailmixprofile "github.com/maisem/tailmix/profile"
 	"github.com/maisem/tailmix/state"
 	tailmixversion "github.com/maisem/tailmix/version"
+	"tailscale.com/types/dnstype"
 )
 
 func TestVersion(t *testing.T) {
@@ -454,6 +455,50 @@ func TestTunDNSConfigUsesEffectiveAddresses(t *testing.T) {
 	}
 }
 
+func TestTUNPlanKeepsMagicDNSMoreSpecificThanExplicitDefault(t *testing.T) {
+	st := state.State{
+		SyntheticPool:   "10.250.0.0/16",
+		SyntheticPoolV6: "fd6d:6e65:7400::/120",
+		Profiles: []state.Profile{
+			{ID: "home", Name: "home"},
+			{ID: "work", Name: "work"},
+		},
+		DNSRouteBindings: []state.DNSRouteBinding{{
+			Domain: ".", ProfileID: "work",
+		}},
+	}
+	statuses := []tailmixprofile.Status{
+		{
+			ProfileID:      "home",
+			BackendState:   "Running",
+			MagicDNSSuffix: "home.example",
+			SelfNodeID:     "home-self",
+			SelfDNSName:    "tailmix-home.home.example",
+			SelfIPs:        []netip.Addr{netip.MustParseAddr("100.64.0.1")},
+		},
+		{
+			ProfileID:    "work",
+			BackendState: "Running",
+			DNSRoutes: []tailmixprofile.DNSRouteStatus{{
+				Domain: ".", Source: "default", Resolvers: []*dnstype.Resolver{{Addr: "9.9.9.9"}},
+			}},
+		},
+	}
+
+	plan, err := buildTUNPlan(st, statuses)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasDNSRecord(plan.Records, "tailmix-home.home.example", plan.State.NATIP) {
+		t.Fatalf("MagicDNS record was dropped by the default route: %v", plan.Records)
+	}
+	if len(plan.DNSConfig.Routes) != 2 ||
+		plan.DNSConfig.Routes[0].Suffix != "." ||
+		plan.DNSConfig.Routes[1].Suffix != "home.example" {
+		t.Fatalf("DNS routes = %+v, want default plus MagicDNS", plan.DNSConfig.Routes)
+	}
+}
+
 func TestTUNPlanTracksPeerAddAndRemoveAcrossNetmapUpdates(t *testing.T) {
 	baseState := state.State{
 		SyntheticPool:   "10.250.0.0/16",
@@ -598,6 +643,12 @@ func TestTUNPlanInstallsSelectedExitNodeDefaults(t *testing.T) {
 			t.Fatalf("exit route for %v = %+v, %v", ip, route, ok)
 		}
 	}
+	if len(plan.DNSConfig.Routes) != 1 ||
+		plan.DNSConfig.Routes[0].Suffix != "." ||
+		plan.DNSConfig.Routes[0].ProfileID != "work" ||
+		!plan.DNSConfig.Routes[0].ProfileDNS {
+		t.Fatalf("exit-node DNS routes = %+v", plan.DNSConfig.Routes)
+	}
 
 	pending := status
 	pending.ExitNodeID = ""
@@ -612,6 +663,9 @@ func TestTUNPlanInstallsSelectedExitNodeDefaults(t *testing.T) {
 		if route.Exit {
 			t.Fatalf("host exit route installed before profile preference applied: %+v", route)
 		}
+	}
+	if len(plan.DNSConfig.Routes) != 0 {
+		t.Fatalf("exit-node DNS route installed before profile preference applied: %+v", plan.DNSConfig.Routes)
 	}
 }
 

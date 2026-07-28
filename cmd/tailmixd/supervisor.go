@@ -512,6 +512,26 @@ func (s *supervisor) setExitNodePreferencesLocked(statuses []tailmixprofile.Stat
 func (s *supervisor) configureDNSLocked(cfg tailmixdns.LiveConfig) error {
 	nextForwarders := make([]*tailmixdns.Forwarder, 0, len(cfg.Routes))
 	for i := range cfg.Routes {
+		if cfg.Routes[i].ProfileDNS {
+			managed := s.runtimes[cfg.Routes[i].ProfileID]
+			if managed == nil {
+				closeForwarders(nextForwarders)
+				return fmt.Errorf("DNS route %q selected unavailable profile %q", cfg.Routes[i].Suffix, cfg.Routes[i].ProfileID)
+			}
+			queryer, ok := managed.runtime.Engine.(tailmixdns.ProfileDNSQueryer)
+			if !ok {
+				closeForwarders(nextForwarders)
+				return fmt.Errorf("profile %q does not expose its effective DNS resolver", s.nameForIDLocked(cfg.Routes[i].ProfileID))
+			}
+			forwarder, err := tailmixdns.StartProfileDNSForwarder(s.ctx, queryer)
+			if err != nil {
+				closeForwarders(nextForwarders)
+				return fmt.Errorf("start profile %q effective DNS forwarder: %w", s.nameForIDLocked(cfg.Routes[i].ProfileID), err)
+			}
+			nextForwarders = append(nextForwarders, forwarder)
+			cfg.Routes[i].Resolvers = []*dnstype.Resolver{forwarder.Resolver()}
+			continue
+		}
 		if len(cfg.Routes[i].Resolvers) == 0 {
 			continue
 		}

@@ -350,11 +350,12 @@ internal.example.com  work     split-dns  accept-all installed
 lab.example.com       lab                  bound      waiting-for-route
 ```
 
-DNS selection uses three policy tiers. It first uses longest-suffix match among
-desired exact bindings; a waiting result fails closed. Only with no matching
-exact binding does it consider routes imported from accept-all profiles, then
-automatic MagicDNS routes. Identical imported suffixes from multiple profiles
-are `ambiguous-route` and are not installed until an exact binding selects one.
+DNS selection first uses longest-suffix match across every route. For entries
+with the same suffix, desired exact bindings take precedence over routes
+imported from accept-all profiles, which take precedence over automatic
+MagicDNS and exit-node routes. A waiting exact binding fails closed at that
+suffix. Identical imported suffixes from multiple profiles are
+`ambiguous-route` and are not installed until an exact binding selects one.
 
 For compatibility, an otherwise unbound and unimported MagicDNS suffix is
 routed automatically only when exactly one active profile is authoritative for
@@ -860,9 +861,9 @@ than terminating the daemon.
 The supervisor owns exact DNS route bindings, profile-wide accept-all flags,
 and the desired search-domain list. It builds a tiered longest-suffix-match DNS
 plan from exact bindings, routes imported from accept-all profiles, and
-unambiguous automatic MagicDNS routes. The most-specific desired exact binding
-acts as either an installed route or a fail-closed waiting barrier. A lower
-tier is considered only when no exact binding matches.
+unambiguous automatic MagicDNS routes. The longest suffix wins across tiers;
+the tier breaks ties for the same suffix. A desired exact binding acts as
+either an installed route or a fail-closed waiting barrier for its suffix.
 
 MagicDNS routes terminate in tailmix's aggregate authoritative resolver.
 Split-DNS and accepted default/fallback resolution terminate in profile-scoped

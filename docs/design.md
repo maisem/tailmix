@@ -176,14 +176,20 @@ Rules:
 - A binding is installed only while the selected profile reports an equal or
   covering MagicDNS or split-DNS route. Otherwise it remains desired and no
   other profile is substituted.
-- Selection uses longest-suffix match in policy order: desired exact bindings,
-  routes imported from accept-all profiles, then automatic MagicDNS routes. A
-  waiting exact binding fails closed rather than falling through.
+- Selection uses longest-suffix match across all routes. Desired exact
+  bindings, accept-all imports, then automatic routes break ties for the same
+  suffix. A waiting exact binding fails closed for that suffix rather than
+  falling through.
 - Identical imports from several profiles fail closed until an exact binding
   selects one.
 - An otherwise unbound and unimported MagicDNS suffix is installed
   automatically only when exactly one active profile is authoritative for it.
   Split-DNS and default resolver routes are not imported automatically.
+- An active exit node contributes an automatic root route through that
+  profile's effective Tailscale DNS configuration. An explicit or imported root
+  route retains precedence at the same suffix, so an explicitly configured
+  root route is not replaced or withdrawn with the exit node. More-specific
+  routes, including MagicDNS zones, remain active.
 - Split-DNS queries use a profile-scoped forwarder. Resolver addresses cannot
   be installed through a shared dialer because private resolver IPs may overlap
   across tailnets.

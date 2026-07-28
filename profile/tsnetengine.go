@@ -12,6 +12,7 @@ import (
 	"github.com/maisem/tailmix/tsnet"
 	"github.com/tailscale/wireguard-go/tun"
 
+	"golang.org/x/net/dns/dnsmessage"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/tailcfg"
@@ -93,6 +94,18 @@ func (e *TSNetEngine) LocalBackend() (*ipnlocal.LocalBackend, error) {
 		return nil, fmt.Errorf("tsnet server is not started")
 	}
 	return e.server.LocalBackend()
+}
+
+// QueryDNS resolves a query through this profile's effective Tailscale DNS
+// configuration. In particular, LocalBackend applies Tailscale's exit-node
+// DNS proxy and UseWithExitNode rules before selecting an upstream resolver.
+func (e *TSNetEngine) QueryDNS(name string, queryType dnsmessage.Type) ([]byte, error) {
+	backend, err := e.LocalBackend()
+	if err != nil {
+		return nil, err
+	}
+	response, _, err := backend.QueryDNS(name, queryType)
+	return response, err
 }
 
 func (e *TSNetEngine) WatchUpdates(ctx context.Context, notify func()) error {

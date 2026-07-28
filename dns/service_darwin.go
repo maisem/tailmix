@@ -16,10 +16,10 @@ type splitDNSConfigurator struct {
 	tailscaledns.OSConfigurator
 }
 
-func (splitDNSConfigurator) GetBaseConfig() (tailscaledns.OSConfig, error) {
+func (*splitDNSConfigurator) GetBaseConfig() (tailscaledns.OSConfig, error) {
 	return tailscaledns.OSConfig{}, tailscaledns.ErrGetBaseConfigNotSupported
 }
 
 func platformOSConfigurator(configurator tailscaledns.OSConfigurator) tailscaledns.OSConfigurator {
-	return splitDNSConfigurator{configurator}
+	return &splitDNSConfigurator{OSConfigurator: configurator}
 }

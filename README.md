@@ -125,6 +125,10 @@ does not restart unrelated profiles.
 
 One exit node can be selected across all profiles. Direct peer and accepted
 subnet routes remain profile-specific and take precedence over that default.
+The selected exit-node profile also supplies DNS for otherwise-unmatched names.
+More-specific DNS routes, including automatic MagicDNS zones, keep precedence.
+An explicitly bound root (`.`) replaces the exit-node DNS default and remains
+configured when the exit node is changed or cleared.
 
 ## More information
 

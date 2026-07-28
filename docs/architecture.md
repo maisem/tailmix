@@ -180,15 +180,19 @@ flowchart TD
 
 ### DNS routes
 
-DNS policy uses the same override model with longest-suffix matching:
+DNS policy first selects the longest matching suffix. These tiers break ties
+between entries for the same suffix:
 
 1. explicit `dns routes bind` entries;
 2. profile-wide `dns routes set --accept-all=true` imports;
-3. automatic per-profile MagicDNS suffixes.
+3. automatic per-profile MagicDNS suffixes and the selected exit profile's
+   effective default DNS route.
 
 An explicit suffix binding must be covered by a route advertised by the
 selected profile. Ambiguous accept-all or MagicDNS suffixes remain disabled.
 The root suffix `.` represents a profile's default resolver route.
+The exit-node default is derived rather than persisted, so an explicit root
+binding overrides it and remains installed after the exit node is cleared.
 
 Search domains are a separate ordered list. A configured search domain is
 installed in the OS only when an active DNS route covers it. This keeps
@@ -270,6 +274,9 @@ forwarder tied to the chosen profile. Classic DNS and DNS-over-HTTPS connections
 therefore travel through that profile rather than the host's default network.
 
 On macOS, the Tailscale DNS manager installs native split-DNS resolver entries.
+When a root DNS route is active, it installs a synthetic System Configuration
+DNS service with an empty supplemental match domain so macOS sends
+otherwise-unmatched queries to the aggregate service.
 On Linux, it selects the available systemd-resolved, NetworkManager, resolvconf,
 or direct `resolv.conf` integration. DNS is registered at the IPv4 service
 address, but answers may contain effective IPv4 or IPv6 addresses.

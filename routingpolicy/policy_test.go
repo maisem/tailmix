@@ -6,6 +6,7 @@ import (
 
 	"github.com/maisem/tailmix/profile"
 	"github.com/maisem/tailmix/state"
+	"tailscale.com/types/dnstype"
 )
 
 func TestExplicitIPBindingOverridesAcceptAllAtRuntime(t *testing.T) {
@@ -97,6 +98,114 @@ func TestExplicitDNSBindingOverridesAcceptAllAndAutomatic(t *testing.T) {
 	if len(plan.Automatic) != 1 || plan.Automatic[0].Active ||
 		plan.Automatic[0].Reason != "policy_override" {
 		t.Fatalf("automatic route = %+v", plan.Automatic)
+	}
+}
+
+func TestExplicitDNSDefaultOverridesAndSurvivesExitNodeDefault(t *testing.T) {
+	st := state.State{
+		Profiles: []state.Profile{
+			{ID: "work-id", Name: "work"},
+			{ID: "dns-id", Name: "dns"},
+		},
+		DNSRouteBindings: []state.DNSRouteBinding{{
+			Domain: ".", ProfileID: "dns-id",
+		}},
+		ExitNode: &state.ExitNode{
+			ProfileID: "work-id",
+			NodeID:    "exit-node",
+			PeerIP:    netip.MustParseAddr("100.64.0.20"),
+		},
+	}
+	statuses := []profile.Status{
+		{ProfileID: "work-id", BackendState: "Running", ExitNodeID: "exit-node"},
+		{ProfileID: "dns-id", BackendState: "Running", DNSRoutes: []profile.DNSRouteStatus{{
+			Domain: ".", Source: "default", Resolvers: []*dnstype.Resolver{{Addr: "9.9.9.9"}},
+		}}},
+	}
+
+	plan := BuildDNS(st, statuses)
+	resolved, ok := plan.Resolve("example.com")
+	if !ok || !resolved.Active || resolved.ProfileID != "dns-id" || resolved.Policy != "bound" {
+		t.Fatalf("resolved route with exit node = %+v, %v", resolved, ok)
+	}
+	if len(plan.Automatic) != 1 ||
+		plan.Automatic[0].Source != "exit-node" ||
+		plan.Automatic[0].Active ||
+		plan.Automatic[0].Reason != "policy_override" {
+		t.Fatalf("automatic exit-node route = %+v", plan.Automatic)
+	}
+
+	st.ExitNode = nil
+	plan = BuildDNS(st, statuses)
+	resolved, ok = plan.Resolve("example.com")
+	if !ok || !resolved.Active || resolved.ProfileID != "dns-id" || resolved.Policy != "bound" {
+		t.Fatalf("resolved route after clearing exit node = %+v, %v", resolved, ok)
+	}
+	if len(plan.Automatic) != 0 {
+		t.Fatalf("automatic routes after clearing exit node = %+v", plan.Automatic)
+	}
+}
+
+func TestExplicitDNSDefaultFallsBackToAutomaticMagicDNS(t *testing.T) {
+	st := state.State{
+		Profiles: []state.Profile{
+			{ID: "work-id", Name: "work"},
+			{ID: "home-id", Name: "home"},
+		},
+		DNSRouteBindings: []state.DNSRouteBinding{{
+			Domain: ".", ProfileID: "work-id",
+		}},
+	}
+	statuses := []profile.Status{
+		{
+			ProfileID: "work-id",
+			DNSRoutes: []profile.DNSRouteStatus{{
+				Domain: ".", Source: "default", Resolvers: []*dnstype.Resolver{{Addr: "9.9.9.9"}},
+			}},
+		},
+		{ProfileID: "home-id", MagicDNSSuffix: "home.example"},
+	}
+
+	plan := BuildDNS(st, statuses)
+	root, ok := plan.Resolve("example.com")
+	if !ok || !root.Active || root.ProfileID != "work-id" || root.Domain != "." {
+		t.Fatalf("default DNS route = %+v, %v", root, ok)
+	}
+	magic, ok := plan.Resolve("peer.home.example")
+	if !ok || !magic.Active || magic.ProfileID != "home-id" || magic.Domain != "home.example" {
+		t.Fatalf("MagicDNS route = %+v, %v", magic, ok)
+	}
+	if len(plan.Automatic) != 1 || !plan.Automatic[0].Active || plan.Automatic[0].Reason != "" {
+		t.Fatalf("automatic MagicDNS routes = %+v", plan.Automatic)
+	}
+}
+
+func TestExitNodeAddsAutomaticEffectiveProfileDNSDefault(t *testing.T) {
+	st := state.State{
+		Profiles: []state.Profile{{ID: "work-id", Name: "work"}},
+		ExitNode: &state.ExitNode{
+			ProfileID: "work-id",
+			NodeID:    "exit-node",
+			PeerIP:    netip.MustParseAddr("100.64.0.20"),
+		},
+	}
+	status := profile.Status{
+		ProfileID: "work-id", BackendState: "Running", ExitNodeID: "exit-node",
+	}
+	plan := BuildDNS(st, []profile.Status{status})
+	resolved, ok := plan.Resolve("example.com")
+	if !ok || !resolved.Active ||
+		resolved.ProfileID != "work-id" ||
+		resolved.Policy != "automatic" ||
+		resolved.Source != "exit-node" ||
+		!resolved.ProfileDNS {
+		t.Fatalf("automatic exit-node DNS route = %+v, %v", resolved, ok)
+	}
+
+	status.ExitNodeID = ""
+	plan = BuildDNS(st, []profile.Status{status})
+	if _, ok := plan.Resolve("example.com"); ok {
+		t.Fatalf("exit-node DNS route installed before preference became active: %+v", plan.Automatic)
 	}
 }
 

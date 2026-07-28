@@ -20,9 +20,10 @@ type Domain struct {
 }
 
 type Route struct {
-	Suffix    string
-	ProfileID string
-	Resolvers []*dnstype.Resolver
+	Suffix     string
+	ProfileID  string
+	ProfileDNS bool
+	Resolvers  []*dnstype.Resolver
 }
 
 type LiveConfig struct {

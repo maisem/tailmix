@@ -35,6 +35,7 @@ type DNSEntry struct {
 	ProfileID     string
 	Policy        string
 	Source        string
+	ProfileDNS    bool
 	Active        bool
 	Reason        string
 	CoveringRoute string
@@ -315,6 +316,17 @@ func BuildDNS(st state.State, statuses []profile.Status) DNSPlan {
 			})
 		}
 	}
+	if exitProfileID := activeDNSExitProfile(st, statuses); exitProfileID != "" {
+		automaticCandidates["."] = []DNSEntry{{
+			Domain:        ".",
+			ProfileID:     exitProfileID,
+			Policy:        "automatic",
+			Source:        "exit-node",
+			ProfileDNS:    true,
+			Active:        true,
+			CoveringRoute: ".",
+		}}
+	}
 	for domain, candidates := range automaticCandidates {
 		if len(candidates) == 1 {
 			plan.Automatic = append(plan.Automatic, candidates[0])
@@ -381,6 +393,20 @@ func BuildDNS(st state.State, statuses []profile.Status) DNSPlan {
 	return plan
 }
 
+func activeDNSExitProfile(st state.State, statuses []profile.Status) string {
+	if st.ExitNode == nil {
+		return ""
+	}
+	for _, status := range statuses {
+		if status.ProfileID == st.ExitNode.ProfileID &&
+			profileAvailable(status) &&
+			status.ExitNodeID == st.ExitNode.NodeID {
+			return status.ProfileID
+		}
+	}
+	return ""
+}
+
 func dnsRoutesForStatus(status profile.Status) []profile.DNSRouteStatus {
 	routes := append([]profile.DNSRouteStatus(nil), status.DNSRoutes...)
 	suffix := NormalizeDomain(status.MagicDNSSuffix)
@@ -397,13 +423,17 @@ func dnsRoutesForStatus(status profile.Status) []profile.DNSRouteStatus {
 
 func (p DNSPlan) Resolve(domain string) (DNSEntry, bool) {
 	domain = NormalizeDomain(domain)
-	if entry, ok := longestDNSMatch(domain, p.Exact); ok {
-		return entry, true
+	var best DNSEntry
+	bestLength := -1
+	for _, entries := range [][]DNSEntry{p.Exact, p.Imported, p.Automatic} {
+		entry, ok := longestDNSMatch(domain, entries)
+		if !ok || len(entry.Domain) <= bestLength {
+			continue
+		}
+		best = entry
+		bestLength = len(entry.Domain)
 	}
-	if entry, ok := longestDNSMatch(domain, p.Imported); ok {
-		return entry, true
-	}
-	return longestDNSMatch(domain, p.Automatic)
+	return best, bestLength >= 0
 }
 
 func coveringIPRoute(prefix netip.Prefix, routes []profile.RouteStatus) (profile.RouteStatus, bool) {
@@ -543,10 +573,8 @@ func dnsSourcePriority(source string) int {
 func dnsOverride(imported string, overrides []DNSEntry) (full, partial string) {
 	for _, candidate := range overrides {
 		switch {
-		case DNSContains(candidate.Domain, imported):
-			if len(candidate.Domain) > len(full) {
-				full = candidate.Domain
-			}
+		case candidate.Domain == imported:
+			full = candidate.Domain
 		case DNSContains(imported, candidate.Domain):
 			if partial == "" || len(candidate.Domain) < len(partial) {
 				partial = candidate.Domain

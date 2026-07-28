@@ -719,19 +719,24 @@ func tunDNSLiveConfig(st state.State, statuses []tailmixprofile.Status, leases [
 		if !entry.Active {
 			resolvers = nil
 		}
-		routeBySuffix[entry.Domain] = tailmixdns.Route{Suffix: entry.Domain, ProfileID: entry.ProfileID, Resolvers: resolvers}
+		routeBySuffix[entry.Domain] = tailmixdns.Route{
+			Suffix:     entry.Domain,
+			ProfileID:  entry.ProfileID,
+			ProfileDNS: entry.ProfileDNS && entry.Active,
+			Resolvers:  resolvers,
+		}
 		if entry.Active && entry.Source == "magicdns" && entry.ProfileID != "" {
 			domainOwners[entry.ProfileID] = true
 		}
 	}
 	for _, entry := range policy.Automatic {
-		if coveredByDNSPolicy(entry.Domain, policy.Exact) || coveredByDNSPolicy(entry.Domain, policy.Imported) {
+		if hasDNSPolicyDomain(entry.Domain, policy.Exact) || hasDNSPolicyDomain(entry.Domain, policy.Imported) {
 			continue
 		}
 		addPolicyRoute(entry)
 	}
 	for _, entry := range policy.Imported {
-		if coveredByDNSPolicy(entry.Domain, policy.Exact) {
+		if hasDNSPolicyDomain(entry.Domain, policy.Exact) {
 			continue
 		}
 		addPolicyRoute(entry)
@@ -793,9 +798,9 @@ func tunDNSLiveConfig(st state.State, statuses []tailmixprofile.Status, leases [
 	}, nil
 }
 
-func coveredByDNSPolicy(domain string, entries []routingpolicy.DNSEntry) bool {
+func hasDNSPolicyDomain(domain string, entries []routingpolicy.DNSEntry) bool {
 	for _, entry := range entries {
-		if routingpolicy.DNSContains(entry.Domain, domain) {
+		if entry.Domain == domain {
 			return true
 		}
 	}
