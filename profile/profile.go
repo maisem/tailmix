@@ -52,6 +52,15 @@ type PeerStatus struct {
 	Online         bool
 	ExitNode       bool
 	ExitNodeOption bool
+	Location       *PeerLocation
+}
+
+type PeerLocation struct {
+	Country     string
+	CountryCode string
+	City        string
+	CityCode    string
+	Priority    int
 }
 
 type RouteStatus struct {

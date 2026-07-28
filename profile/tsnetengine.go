@@ -176,6 +176,7 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 			Online:         peer.Online,
 			ExitNode:       peer.ExitNode,
 			ExitNodeOption: peer.ExitNodeOption,
+			Location:       peerLocation(peer.Location),
 		})
 		if peer.PrimaryRoutes != nil {
 			for _, prefix := range peer.PrimaryRoutes.All() {
@@ -274,6 +275,19 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		RouteAll:        routeAll,
 		ExitNodeID:      exitNodeID,
 	}, nil
+}
+
+func peerLocation(location *tailcfg.Location) *PeerLocation {
+	if location == nil {
+		return nil
+	}
+	return &PeerLocation{
+		Country:     location.Country,
+		CountryCode: location.CountryCode,
+		City:        location.City,
+		CityCode:    location.CityCode,
+		Priority:    location.Priority,
+	}
 }
 
 func (e *TSNetEngine) SetRouteAll(ctx context.Context, enabled bool) error {

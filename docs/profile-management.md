@@ -29,6 +29,10 @@ tailmix routes bind --profile <name> <prefix>...
 tailmix routes unbind <prefix>...
 tailmix routes set --profile <name> --accept-all=<true|false>
 
+tailmix exit-node list [--filter <country>]
+tailmix exit-node set --profile <name> <peer>
+tailmix exit-node clear
+
 tailmix dns routes list [--available]
 tailmix dns routes bind --profile <name> <domain>...
 tailmix dns routes unbind <domain>...
@@ -100,6 +104,7 @@ tailmix version
 tailmix status [--json]
 tailmix profiles <lifecycle-command> [arguments]
 tailmix routes <policy-command> [arguments]
+tailmix exit-node <policy-command> [arguments]
 tailmix dns routes <policy-command> [arguments]
 tailmix dns search <policy-command> [arguments]
 tailmix {tailscale|ts} --profile <name> <tailscale-subcommand> [arguments]
@@ -112,8 +117,9 @@ active-profile overview, equivalent to `profiles list`.
 `profiles` owns tailmix lifecycle operations. `tailscale` delegates to the
 selected profile's upstream Tailscale CLI, and `ts` is its exact alias. A
 profile name appears only as an operand or the value of `--profile`. `routes`
-owns daemon-wide IP route policy. `dns routes` owns DNS query routing, while
-`dns search` owns the ordered OS search list. Prefixes and DNS domains therefore
+owns daemon-wide IP route policy, and `exit-node` owns the one daemon-wide
+default-route selection. `dns routes` owns DNS query routing, while `dns
+search` owns the ordered OS search list. Prefixes and DNS domains therefore
 occupy only resource positions and cannot collide with profile or command
 names.
 
@@ -245,16 +251,25 @@ Exit-node policy is daemon-wide because a host can have only one selected
 default path:
 
 ```text
-tailmix exit-node list [--json]
+tailmix exit-node list [--filter <country>] [--json]
 tailmix exit-node set --profile <name> <peer> [--json]
 tailmix exit-node clear [--json]
 ```
 
-`list` shows every approved exit-node peer observed in every active profile and
-marks the current selection. `set` requires both naming domains: the profile
-selects one tailnet, and the peer selector identifies one exit node inside it.
-The peer may be a full DNS name, short hostname, stable node ID, or canonical
-Tailscale IP. Ambiguous short names fail instead of selecting arbitrarily.
+The default human-readable `list` follows Tailscale's CLI display mechanics.
+For peers with location metadata, it shows the highest-priority peer per city,
+keeps the current selection visible, and adds an `Any` row containing the
+highest-priority peer when a country has multiple cities. Peers without
+location metadata are all shown. `--filter <country>` performs a
+case-insensitive country-name match and shows the complete, uncollapsed list
+for that country. JSON output preserves the exit-node resource schema; when a
+country filter is present, its `available` list and optional `selected` object
+are restricted to that country.
+
+`set` requires both naming domains: the profile selects one tailnet, and the
+peer selector identifies one exit node inside it. The peer may be a full DNS
+name, short hostname, stable node ID, or canonical Tailscale IP. Ambiguous short
+names fail instead of selecting arbitrarily.
 
 The daemon persists the profile's stable ID, the peer's stable node ID, and a
 canonical peer IP. It applies that peer IP to the selected profile engine and
@@ -743,9 +758,11 @@ entries use a profile name; the daemon resolves it under the lifecycle lock and
 persists the stable profile ID. Profile renames therefore change display only.
 
 The exit-node resource contains one optional `selected` object and an
-observational `available` list. `PUT` accepts `profileName` and `peer`, resolves
-the peer against the profile's current approved exit nodes, and atomically
-replaces the selection. `DELETE` clears it.
+observational `available` list. Available and selected peers include optional
+`location` metadata with `country`, `countryCode`, `city`, `cityCode`, and
+`priority` fields. `PUT` accepts `profileName` and `peer`, resolves the peer
+against the profile's current approved exit nodes, and atomically replaces the
+selection. `DELETE` clears it.
 
 The search-domain resource reports desired and observed state separately:
 

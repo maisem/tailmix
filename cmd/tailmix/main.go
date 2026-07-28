@@ -16,6 +16,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/maisem/tailmix/controlapi"
+	"github.com/maisem/tailmix/exitnodeview"
 	"github.com/maisem/tailmix/profilesocket"
 	tailmixversion "github.com/maisem/tailmix/version"
 	"tailscale.com/cmd/tailscale/cli"
@@ -523,6 +524,17 @@ func runExitNode(ctx context.Context, client managementClient, args []string, de
 	if err != nil {
 		return err
 	}
+	filterCountry, filterSet, err := takeString(&rest, "--filter")
+	if err != nil {
+		return err
+	}
+	filterCountry = strings.TrimSpace(filterCountry)
+	if filterSet && filterCountry == "" {
+		return usageError{"--filter cannot be empty"}
+	}
+	if filterSet && args[0] != "list" {
+		return usageError{"--filter is only supported by exit-node list"}
+	}
 	var result controlapi.ExitNodes
 	switch args[0] {
 	case "list":
@@ -557,10 +569,16 @@ func runExitNode(ctx context.Context, client managementClient, args []string, de
 	if err != nil {
 		return err
 	}
+	if filterSet {
+		result = exitnodeview.FilterCountry(result, filterCountry)
+		if len(result.Available) == 0 && result.Selected == nil {
+			return fmt.Errorf("no exit nodes found for %q", filterCountry)
+		}
+	}
 	if jsonOutput {
 		return writeJSON(deps.stdout, result)
 	}
-	writeExitNodes(deps.stdout, result)
+	writeExitNodes(deps.stdout, result, filterCountry)
 	return nil
 }
 
@@ -1082,35 +1100,35 @@ func writeIPRoutes(w io.Writer, routes controlapi.IPRoutes, available bool) {
 	_ = table.Flush()
 }
 
-func writeExitNodes(w io.Writer, nodes controlapi.ExitNodes) {
+func writeExitNodes(w io.Writer, nodes controlapi.ExitNodes, filterCountry string) {
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "PROFILE\tEXIT NODE\tIPS\tONLINE\tSTATE")
-	selectedKey := ""
-	if nodes.Selected != nil {
-		selectedKey = nodes.Selected.ProfileID + "\x00" + nodes.Selected.NodeID
-	}
-	selectedShown := false
-	for _, node := range nodes.Available {
+	fmt.Fprintln(table, "PROFILE\tEXIT NODE\tIPS\tCOUNTRY\tCITY\tONLINE\tSTATE")
+	for _, item := range exitnodeview.Items(nodes, filterCountry) {
+		node := item.Node
 		state := ""
-		if node.ProfileID+"\x00"+node.NodeID == selectedKey {
-			state = stateLabel(nodes.Selected.State, nodes.Selected.Reason)
-			selectedShown = true
+		if node.Selected {
+			state = stateLabel(node.State, node.Reason)
 		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n",
+		ips := addressList(node.IPs)
+		if ips == "" && node.PeerIP.IsValid() {
+			ips = node.PeerIP.String()
+		}
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			node.ProfileName, exitNodeName(node.DNSName, node.NodeID),
-			addressList(node.IPs), yesNo(node.Online), state)
-	}
-	if nodes.Selected != nil && !selectedShown {
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n",
-			nodes.Selected.ProfileName,
-			exitNodeName(nodes.Selected.DNSName, nodes.Selected.NodeID),
-			nodes.Selected.PeerIP, yesNo(nodes.Selected.Online),
-			stateLabel(nodes.Selected.State, nodes.Selected.Reason))
+			ips, locationLabel(item.Country), locationLabel(item.City),
+			yesNo(node.Online), state)
 	}
 	if nodes.ReconcileError != "" {
-		fmt.Fprintf(table, "!\t\t\t\tfailed:%s\n", nodes.ReconcileError)
+		fmt.Fprintf(table, "!\t\t\t\t\t\tfailed:%s\n", nodes.ReconcileError)
 	}
 	_ = table.Flush()
+}
+
+func locationLabel(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func exitNodeName(dnsName, nodeID string) string {
@@ -1325,7 +1343,7 @@ Default routes use exit-node policy.
 `
 
 const exitNodeHelp = `Usage:
-  tailmix exit-node list [--json]
+  tailmix exit-node list [--filter <country>] [--json]
   tailmix exit-node set --profile <profile> <peer> [--json]
   tailmix exit-node clear [--json]
 
@@ -1334,6 +1352,11 @@ Profile option: -p, --profile <profile>
 The peer may be an exit node's DNS name, short hostname, stable node ID, or
 Tailscale IP. Only one exit node can be selected across all profiles. Explicit
 peer and subnet routes keep precedence over the selected default route.
+
+The default list shows the highest-priority node per city, an "Any" choice for
+countries with multiple cities, every node without location metadata, and any
+selected node hidden by those rules. Use --filter with a country name to show
+every exit node in that country.
 `
 
 const dnsHelp = `Usage:

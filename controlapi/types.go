@@ -119,23 +119,33 @@ type ReplaceIPRoutesRequest struct {
 }
 
 type AvailableExitNode struct {
-	ProfileID   string       `json:"profileId"`
-	ProfileName string       `json:"profileName"`
-	NodeID      string       `json:"nodeId"`
-	DNSName     string       `json:"dnsName,omitempty"`
-	IPs         []netip.Addr `json:"ips,omitempty"`
-	Online      bool         `json:"online"`
+	ProfileID   string            `json:"profileId"`
+	ProfileName string            `json:"profileName"`
+	NodeID      string            `json:"nodeId"`
+	DNSName     string            `json:"dnsName,omitempty"`
+	IPs         []netip.Addr      `json:"ips,omitempty"`
+	Online      bool              `json:"online"`
+	Location    *ExitNodeLocation `json:"location,omitempty"`
+}
+
+type ExitNodeLocation struct {
+	Country     string `json:"country,omitempty"`
+	CountryCode string `json:"countryCode,omitempty"`
+	City        string `json:"city,omitempty"`
+	CityCode    string `json:"cityCode,omitempty"`
+	Priority    int    `json:"priority,omitempty"`
 }
 
 type SelectedExitNode struct {
-	ProfileID   string     `json:"profileId"`
-	ProfileName string     `json:"profileName"`
-	NodeID      string     `json:"nodeId"`
-	DNSName     string     `json:"dnsName,omitempty"`
-	PeerIP      netip.Addr `json:"peerIp"`
-	Online      bool       `json:"online"`
-	State       string     `json:"state"`
-	Reason      string     `json:"reason,omitempty"`
+	ProfileID   string            `json:"profileId"`
+	ProfileName string            `json:"profileName"`
+	NodeID      string            `json:"nodeId"`
+	DNSName     string            `json:"dnsName,omitempty"`
+	PeerIP      netip.Addr        `json:"peerIp"`
+	Online      bool              `json:"online"`
+	Location    *ExitNodeLocation `json:"location,omitempty"`
+	State       string            `json:"state"`
+	Reason      string            `json:"reason,omitempty"`
 }
 
 type ExitNodes struct {

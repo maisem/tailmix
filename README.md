@@ -72,6 +72,11 @@ tailmix dns routes list
 tailmix dns search list
 ```
 
+Like Tailscale's CLI, `tailmix exit-node list` collapses located nodes to the
+highest-priority node per city and adds an **Any** row for countries with
+multiple cities. Use `tailmix exit-node list --filter Canada` to show every
+node in one country.
+
 Accept every advertised subnet route and DNS route from one profile:
 
 ```sh

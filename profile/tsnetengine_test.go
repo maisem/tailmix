@@ -6,6 +6,7 @@ import (
 
 	"github.com/maisem/tailmix/tunmux"
 	"tailscale.com/ipn"
+	"tailscale.com/tailcfg"
 )
 
 func TestTSNetEngineAcceptsProvidedTunBeforeStart(t *testing.T) {
@@ -93,5 +94,23 @@ func TestRouteAdvertiserNamePrefersReadableNodeIdentity(t *testing.T) {
 				t.Fatalf("advertiser = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestPeerLocationCopiesExitNodeDisplayMetadata(t *testing.T) {
+	upstream := &tailcfg.Location{
+		Country: "Canada", CountryCode: "CA", City: "Squamish", CityCode: "YSE", Priority: 10,
+	}
+	got := peerLocation(upstream)
+	if got == nil ||
+		got.Country != "Canada" ||
+		got.CountryCode != "CA" ||
+		got.City != "Squamish" ||
+		got.CityCode != "YSE" ||
+		got.Priority != 10 {
+		t.Fatalf("location = %+v", got)
+	}
+	if peerLocation(nil) != nil {
+		t.Fatal("nil upstream location did not remain nil")
 	}
 }

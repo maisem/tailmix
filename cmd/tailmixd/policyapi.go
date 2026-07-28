@@ -244,6 +244,7 @@ func (s *supervisor) exitNodesLocked(statuses []tailmixprofile.Status) controlap
 				DNSName:     peer.DNSName,
 				IPs:         append([]netip.Addr(nil), peer.TailscaleIPs...),
 				Online:      peer.Online,
+				Location:    exitNodeLocation(peer.Location),
 			})
 		}
 	}
@@ -292,6 +293,7 @@ func (s *supervisor) exitNodesLocked(statuses []tailmixprofile.Status) controlap
 			}
 			selected.DNSName = peer.DNSName
 			selected.Online = peer.Online
+			selected.Location = exitNodeLocation(peer.Location)
 			if !peer.ExitNodeOption {
 				selected.Reason = "exit_node_unavailable"
 			} else if status.ExitNodeID == selected.NodeID {
@@ -306,6 +308,19 @@ func (s *supervisor) exitNodesLocked(statuses []tailmixprofile.Status) controlap
 	}
 	selected.Reason = "profile_unavailable"
 	return result
+}
+
+func exitNodeLocation(location *tailmixprofile.PeerLocation) *controlapi.ExitNodeLocation {
+	if location == nil {
+		return nil
+	}
+	return &controlapi.ExitNodeLocation{
+		Country:     location.Country,
+		CountryCode: location.CountryCode,
+		City:        location.City,
+		CityCode:    location.CityCode,
+		Priority:    location.Priority,
+	}
 }
 
 func selectExitNodePeer(status tailmixprofile.Status, selector string) (tailmixprofile.PeerStatus, error) {

@@ -145,6 +145,9 @@ func TestExitNodeResourceReportsSelectedState(t *testing.T) {
 		Peers: []tailmixprofile.PeerStatus{{
 			NodeID: "node-id", DNSName: "gateway.work.ts.net",
 			TailscaleIPs: []netip.Addr{exitIP}, Online: true, ExitNodeOption: true,
+			Location: &tailmixprofile.PeerLocation{
+				Country: "Canada", CountryCode: "CA", City: "Squamish", CityCode: "YSE", Priority: 10,
+			},
 		}},
 	}
 	result := s.exitNodesLocked([]tailmixprofile.Status{status})
@@ -154,6 +157,13 @@ func TestExitNodeResourceReportsSelectedState(t *testing.T) {
 	}
 	if len(result.Available) != 1 || result.Available[0].NodeID != "node-id" {
 		t.Fatalf("available exit nodes = %+v", result.Available)
+	}
+	if result.Available[0].Location == nil ||
+		result.Available[0].Location.City != "Squamish" ||
+		result.Available[0].Location.Priority != 10 ||
+		result.Selected.Location == nil ||
+		result.Selected.Location.CityCode != "YSE" {
+		t.Fatalf("exit-node locations = available %+v, selected %+v", result.Available[0], result.Selected)
 	}
 
 	status.ExitNodeID = ""

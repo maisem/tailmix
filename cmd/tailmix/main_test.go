@@ -478,6 +478,108 @@ func TestExitNodeListShowsSelectedAndAvailableNodes(t *testing.T) {
 	}
 }
 
+func TestExitNodeListUsesTailscaleLocationFiltering(t *testing.T) {
+	client := &fakeManagementClient{exitNodes: cliLocationExitNodes()}
+	var stdout bytes.Buffer
+	code := runWithDependencies(context.Background(),
+		[]string{"exit-node", "list"},
+		testDependencies(client, &stdout, io.Discard, nil))
+	if code != 0 {
+		t.Fatalf("list exit code = %d", code)
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"COUNTRY", "CITY", "Canada", "Any", "squamish-high", "squamish-selected",
+		"vancouver-high", "Germany", "legacy",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("exit-node list does not contain %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "vancouver-hidden") {
+		t.Fatalf("lower-priority city peer was not hidden:\n%s", output)
+	}
+}
+
+func TestExitNodeListCountryFilterShowsCompleteCountry(t *testing.T) {
+	client := &fakeManagementClient{exitNodes: cliLocationExitNodes()}
+	var stdout bytes.Buffer
+	code := runWithDependencies(context.Background(),
+		[]string{"exit-node", "list", "--filter", "cAnAdA"},
+		testDependencies(client, &stdout, io.Discard, nil))
+	if code != 0 {
+		t.Fatalf("filtered list exit code = %d", code)
+	}
+	output := stdout.String()
+	for _, want := range []string{"squamish-high", "squamish-selected", "vancouver-high", "vancouver-hidden"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("filtered list does not contain %q:\n%s", want, output)
+		}
+	}
+	for _, hidden := range []string{"Any", "berlin", "legacy"} {
+		if strings.Contains(output, hidden) {
+			t.Fatalf("filtered list unexpectedly contains %q:\n%s", hidden, output)
+		}
+	}
+}
+
+func TestExitNodeListCountryFilterPreservesJSONSchema(t *testing.T) {
+	client := &fakeManagementClient{exitNodes: cliLocationExitNodes()}
+	var stdout bytes.Buffer
+	code := runWithDependencies(context.Background(),
+		[]string{"exit-node", "list", "--filter=Canada", "--json"},
+		testDependencies(client, &stdout, io.Discard, nil))
+	if code != 0 {
+		t.Fatalf("filtered JSON exit code = %d", code)
+	}
+	var got controlapi.ExitNodes
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Available) != 4 || got.Selected == nil || got.Selected.NodeID != "squamish-selected" {
+		t.Fatalf("filtered JSON = %+v", got)
+	}
+}
+
+func TestExitNodeListRejectsUnknownCountryFilter(t *testing.T) {
+	client := &fakeManagementClient{exitNodes: cliLocationExitNodes()}
+	var stderr bytes.Buffer
+	code := runWithDependencies(context.Background(),
+		[]string{"exit-node", "list", "--filter", "France"},
+		testDependencies(client, io.Discard, &stderr, nil))
+	if code != 1 || !strings.Contains(stderr.String(), `no exit nodes found for "France"`) {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+}
+
+func cliLocationExitNodes() controlapi.ExitNodes {
+	location := func(country, countryCode, city, cityCode string, priority int) *controlapi.ExitNodeLocation {
+		return &controlapi.ExitNodeLocation{
+			Country: country, CountryCode: countryCode, City: city, CityCode: cityCode, Priority: priority,
+		}
+	}
+	node := func(id string, loc *controlapi.ExitNodeLocation) controlapi.AvailableExitNode {
+		return controlapi.AvailableExitNode{
+			ProfileID: "p1", ProfileName: "work", NodeID: id,
+			DNSName: id + ".example.ts.net", Online: true, Location: loc,
+		}
+	}
+	return controlapi.ExitNodes{
+		Available: []controlapi.AvailableExitNode{
+			node("legacy", nil),
+			node("squamish-high", location("Canada", "CA", "Squamish", "YSE", 100)),
+			node("squamish-selected", location("Canada", "CA", "Squamish", "YSE", 10)),
+			node("vancouver-high", location("Canada", "CA", "Vancouver", "YVR", 50)),
+			node("vancouver-hidden", location("Canada", "CA", "Vancouver", "YVR", 1)),
+			node("berlin", location("Germany", "DE", "Berlin", "BER", 5)),
+		},
+		Selected: &controlapi.SelectedExitNode{
+			ProfileID: "p1", ProfileName: "work", NodeID: "squamish-selected",
+			DNSName: "squamish-selected.example.ts.net", Online: true, State: "installed",
+		},
+	}
+}
+
 func TestDNSUsesTailscaleDNSNameCanonicalization(t *testing.T) {
 	client := &fakeManagementClient{}
 	code := runWithDependencies(context.Background(),
