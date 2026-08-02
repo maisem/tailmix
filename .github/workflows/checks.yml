@@ -1,0 +1,38 @@
+name: checks
+
+on:
+  pull_request:
+    paths:
+      - "**/*.go"
+      - go.mod
+      - go.sum
+      - .github/workflows/checks.yml
+  push:
+    branches: [main]
+    paths:
+      - "**/*.go"
+      - go.mod
+      - go.sum
+      - .github/workflows/checks.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  staticcheck:
+    runs-on: [self-hosted, tailmix-vm]
+    container:
+      image: golang:1.26
+    steps:
+      - uses: actions/checkout@v6
+      - run: go tool staticcheck ./...
+
+  tidy:
+    runs-on: [self-hosted, tailmix-vm]
+    container:
+      image: golang:1.26
+    steps:
+      - uses: actions/checkout@v6
+      - run: go mod tidy
+      - run: git diff --exit-code -- go.mod go.sum
