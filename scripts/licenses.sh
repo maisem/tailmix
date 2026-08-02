@@ -33,10 +33,15 @@ check_target() {
 	goos=$1
 	goarch=$2
 	cgo_enabled=$3
-	env GOOS="$goos" GOARCH="$goarch" CGO_ENABLED="$cgo_enabled" "$go_licenses" check \
+	log="$tmp/check-$goos-$goarch.log"
+	if env GOOS="$goos" GOARCH="$goarch" CGO_ENABLED="$cgo_enabled" "$go_licenses" check \
 		./cmd/tailmix ./cmd/tailmixd \
 		--ignore github.com/maisem/tailmix \
-		--ignore github.com/golang/freetype
+		--ignore github.com/golang/freetype 2>"$log"; then
+		return
+	fi
+	cat "$log" >&2
+	return 1
 }
 
 report_target() {
@@ -44,10 +49,15 @@ report_target() {
 	goarch=$2
 	cgo_enabled=$3
 	destination=$4
-	env GOOS="$goos" GOARCH="$goarch" CGO_ENABLED="$cgo_enabled" "$go_licenses" report \
+	log="$tmp/report-$goos-$goarch.log"
+	if env GOOS="$goos" GOARCH="$goarch" CGO_ENABLED="$cgo_enabled" "$go_licenses" report \
 		./cmd/tailmix ./cmd/tailmixd \
 		--ignore github.com/maisem/tailmix \
-		--template "$root/licenses/report.tmpl" >"$destination"
+		--template "$root/licenses/report.tmpl" >"$destination" 2>"$log"; then
+		return
+	fi
+	cat "$log" >&2
+	return 1
 }
 
 cd "$root"
