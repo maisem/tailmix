@@ -125,6 +125,11 @@ search` owns the ordered OS search list. Prefixes and DNS domains therefore
 occupy only resource positions and cannot collide with profile or command
 names.
 
+`tailmixd` links Tailscale's SSH server feature on supported Unix platforms.
+Users enable it independently for each embedded node through the delegated
+CLI, for example `tailmix ts --profile work set --ssh`; the tailnet's SSH access
+policy remains authoritative.
+
 Every tailmix `--profile` option also accepts the short form `-p`. The
 `tailmixd` startup profile flag accepts the same alias.
 

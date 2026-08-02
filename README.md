@@ -105,6 +105,15 @@ sudo tailmix exit-node set --profile work gateway
 Tailscale IP. Run `sudo tailmix exit-node clear` to return to the host's normal
 default route.
 
+Enable Tailscale SSH on one profile:
+
+```sh
+sudo tailmix ts --profile work set --ssh
+```
+
+The tailnet must also have Tailscale SSH enabled and grant access to the node in
+its access-control policy.
+
 Route a DNS suffix through a profile, then make it a search domain so short
 names such as `printer` can expand to `printer.corp.example.com`:
 
