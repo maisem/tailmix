@@ -35,6 +35,12 @@ func (c *Client) Version(ctx context.Context) (tailmixversion.Meta, error) {
 	return out, err
 }
 
+func (c *Client) Status(ctx context.Context) (Status, error) {
+	var out Status
+	err := c.do(ctx, http.MethodGet, "/v1/status", nil, &out)
+	return out, err
+}
+
 func (c *Client) Profiles(ctx context.Context, all bool) (Profiles, error) {
 	var out Profiles
 	err := c.do(ctx, http.MethodGet, "/v1/profiles?all="+strconv.FormatBool(all), nil, &out)

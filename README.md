@@ -72,6 +72,11 @@ tailmix dns routes list
 tailmix dns search list
 ```
 
+`tailmix status` summarizes the policy currently selected from every active
+profile. It includes accepted IP routes, the selected exit node, effective DNS
+routes, and configured DNS search domains without listing every available
+choice.
+
 Like Tailscale's CLI, `tailmix exit-node list` collapses located nodes to the
 highest-priority node per city and adds an **Any** row for countries with
 multiple cities. Use `tailmix exit-node list --filter Canada` to show every

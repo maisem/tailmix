@@ -27,6 +27,7 @@ type cliRunner func(context.Context, []string) error
 
 type managementClient interface {
 	Version(context.Context) (tailmixversion.Meta, error)
+	Status(context.Context) (controlapi.Status, error)
 	Profiles(context.Context, bool) (controlapi.Profiles, error)
 	Profile(context.Context, string) (controlapi.Profile, error)
 	AddProfile(context.Context, controlapi.AddProfileRequest) (controlapi.Profile, error)
@@ -163,14 +164,14 @@ func runStatus(ctx context.Context, client managementClient, args []string, deps
 	if err := noOperands(args); err != nil {
 		return err
 	}
-	profiles, err := client.Profiles(ctx, false)
+	status, err := client.Status(ctx)
 	if err != nil {
 		return err
 	}
 	if jsonOutput {
-		return writeJSON(deps.stdout, profiles)
+		return writeJSON(deps.stdout, status)
 	}
-	writeProfiles(deps.stdout, profiles.Profiles)
+	writeStatus(deps.stdout, status)
 	return nil
 }
 
@@ -1042,6 +1043,47 @@ func writeProfiles(w io.Writer, profiles []controlapi.Profile) {
 	_ = table.Flush()
 }
 
+func writeStatus(w io.Writer, status controlapi.Status) {
+	writeProfiles(w, status.Profiles)
+
+	writeStatusSection(w, "IP ROUTES", statusHasIPRoutes(status.IPRoutes), func() {
+		writeIPRoutes(w, status.IPRoutes, false)
+	})
+	writeStatusSection(w, "EXIT NODE", status.ExitNodes.Selected != nil || status.ExitNodes.ReconcileError != "", func() {
+		writeExitNodes(w, status.ExitNodes, "")
+	})
+	writeStatusSection(w, "DNS ROUTES", statusHasDNSRoutes(status.DNSRoutes), func() {
+		writeDNSRoutes(w, status.DNSRoutes, false)
+	})
+	writeStatusSection(w, "DNS SEARCH", statusHasSearchDomains(status.SearchDomains), func() {
+		writeSearchDomains(w, status.SearchDomains)
+	})
+}
+
+func writeStatusSection(w io.Writer, title string, present bool, write func()) {
+	fmt.Fprintf(w, "\n%s\n", title)
+	if !present {
+		fmt.Fprintln(w, "(none)")
+		return
+	}
+	write()
+}
+
+func statusHasIPRoutes(routes controlapi.IPRoutes) bool {
+	return len(routes.AcceptAllProfiles) > 0 || len(routes.Bindings) > 0 ||
+		len(routes.Imported) > 0 || routes.ReconcileError != ""
+}
+
+func statusHasDNSRoutes(routes controlapi.DNSRoutes) bool {
+	return len(routes.AcceptAllProfiles) > 0 || len(routes.Bindings) > 0 ||
+		len(routes.Imported) > 0 || len(routes.Automatic) > 0 || routes.ReconcileError != ""
+}
+
+func statusHasSearchDomains(domains controlapi.SearchDomains) bool {
+	return len(domains.Desired) > 0 || len(domains.Installed) > 0 ||
+		len(domains.Waiting) > 0 || domains.ReconcileError != ""
+}
+
 func writeProfile(w io.Writer, profile controlapi.Profile) {
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	rows := [][2]string{
@@ -1275,7 +1317,7 @@ Usage:
   tailmix [--socket-dir <directory>] <command> [arguments]
 
 Commands:
-  status       List active profiles and their runtime status
+  status       Show active profiles and accepted network policy
   profiles     Manage profile lifecycle and configuration
   routes       Accept IP routes and pin prefixes to profiles
   exit-node    Select one profile's exit node for default traffic
@@ -1303,8 +1345,9 @@ reached.
 const statusHelp = `Usage:
   tailmix status [--json]
 
-Lists active profiles and their runtime status. This is the concise form of
-"tailmix profiles list".
+Shows active profiles and the accepted IP routes, selected exit node, effective
+DNS routes, and configured DNS search domains. Advertised-but-unaccepted choices
+remain available through the corresponding list commands.
 `
 
 const profilesHelp = `Usage:

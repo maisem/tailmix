@@ -174,6 +174,59 @@ func TestExitNodeResourceReportsSelectedState(t *testing.T) {
 	}
 }
 
+func TestStatusReportsSelectedPolicyWithoutAvailableChoices(t *testing.T) {
+	exitIP := netip.MustParseAddr("100.64.0.20")
+	prefix := netip.MustParsePrefix("10.20.0.0/16")
+	engine := &exitPreferenceEngine{status: tailmixprofile.Status{
+		ProfileID: "p_work", Alias: "work", BackendState: "Running",
+		MagicDNSSuffix: "work.example", ExitNodeID: "exit-node",
+		AvailableRoutes: []tailmixprofile.RouteStatus{{
+			Prefix: prefix, PrimaryRouter: "subnet-router",
+		}},
+		Peers: []tailmixprofile.PeerStatus{{
+			NodeID: "exit-node", DNSName: "gateway.work.example",
+			TailscaleIPs: []netip.Addr{exitIP}, Online: true, ExitNodeOption: true,
+		}},
+	}}
+	st := testPolicyState()
+	st.Profiles = st.Profiles[:1]
+	st.Profiles[0].AcceptAllRoutes = true
+	st.SearchDomains = []string{"work.example"}
+	st.ExitNode = &state.ExitNode{ProfileID: "p_work", NodeID: "exit-node", PeerIP: exitIP}
+	s := &supervisor{
+		ctx: context.Background(), st: st,
+		runtimes: map[string]*managedProfile{
+			"p_work": {
+				runtime: runtimeProfile{State: st.Profiles[0], Engine: engine},
+				status:  engine.status,
+			},
+		},
+		lastErrors: map[string]string{},
+	}
+
+	got, err := s.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Profiles) != 1 || got.Profiles[0].Name != "work" {
+		t.Fatalf("profiles = %+v", got.Profiles)
+	}
+	if len(got.IPRoutes.Imported) != 1 || got.IPRoutes.Imported[0].Prefix != prefix ||
+		len(got.IPRoutes.Available) != 0 {
+		t.Fatalf("IP routes = %+v", got.IPRoutes)
+	}
+	if got.ExitNodes.Selected == nil || got.ExitNodes.Selected.State != "installed" ||
+		len(got.ExitNodes.Available) != 0 {
+		t.Fatalf("exit nodes = %+v", got.ExitNodes)
+	}
+	if len(got.DNSRoutes.Automatic) != 2 || len(got.DNSRoutes.Available) != 0 {
+		t.Fatalf("DNS routes = %+v", got.DNSRoutes)
+	}
+	if len(got.SearchDomains.Installed) != 1 || len(got.SearchDomains.Available) != 0 {
+		t.Fatalf("search domains = %+v", got.SearchDomains)
+	}
+}
+
 func TestExitNodePreferenceReconciliationSelectsOnlyOneProfile(t *testing.T) {
 	work := &exitPreferenceEngine{status: tailmixprofile.Status{
 		ProfileID: "p_work", BackendState: "Running",

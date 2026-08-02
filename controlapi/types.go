@@ -47,6 +47,17 @@ type Profiles struct {
 	Profiles []Profile `json:"profiles"`
 }
 
+// Status is a daemon-wide snapshot of active profiles and the policy selected
+// from them. Available-but-unselected routes and exit nodes remain available
+// through their dedicated list endpoints.
+type Status struct {
+	Profiles      []Profile     `json:"profiles"`
+	IPRoutes      IPRoutes      `json:"ipRoutes"`
+	ExitNodes     ExitNodes     `json:"exitNodes"`
+	DNSRoutes     DNSRoutes     `json:"dnsRoutes"`
+	SearchDomains SearchDomains `json:"searchDomains"`
+}
+
 type AddProfileRequest struct {
 	Name     string `json:"name"`
 	StateDir string `json:"stateDir,omitempty"`

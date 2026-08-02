@@ -112,8 +112,10 @@ tailmix {tailscale|ts} --profile <name> <tailscale-subcommand> [arguments]
 
 `version` prints the client and running daemon semantic versions, source
 revisions, and full embedded Tailscale module versions. It still prints the
-client version when the daemon is unavailable. `status` is the concise
-active-profile overview, equivalent to `profiles list`.
+client version when the daemon is unavailable. `status` is the daemon-wide
+overview: active profiles, configured or imported IP routes, the selected exit
+node, effective DNS routes, and configured DNS search domains. It omits
+advertised-but-unaccepted choices; the corresponding `list` commands show those.
 `profiles` owns tailmix lifecycle operations. `tailscale` delegates to the
 selected profile's upstream Tailscale CLI, and `ts` is its exact alias. A
 profile name appears only as an operand or the value of `--profile`. `routes`

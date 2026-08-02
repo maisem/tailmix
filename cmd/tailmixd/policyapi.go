@@ -13,6 +13,35 @@ import (
 	"tailscale.com/util/dnsname"
 )
 
+func (s *supervisor) Status(_ context.Context) (controlapi.Status, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	statuses := s.statusesLocked()
+	s.ipPolicy = routingpolicy.BuildIP(s.st, statuses)
+	s.dnsPolicy = routingpolicy.BuildDNS(s.st, statuses)
+
+	ipRoutes := s.ipPolicy.Resource
+	ipRoutes.Available = nil
+	ipRoutes.ReconcileError = s.reconcileErr
+	exitNodes := s.exitNodesLocked(statuses)
+	exitNodes.Available = nil
+	dnsRoutes := s.dnsPolicy.Resource
+	dnsRoutes.Available = nil
+	dnsRoutes.ReconcileError = s.reconcileErr
+	searchDomains := s.dnsPolicy.Search
+	searchDomains.Available = nil
+	searchDomains.ReconcileError = s.reconcileErr
+
+	return controlapi.Status{
+		Profiles:      s.listProfilesLocked(false).Profiles,
+		IPRoutes:      ipRoutes,
+		ExitNodes:     exitNodes,
+		DNSRoutes:     dnsRoutes,
+		SearchDomains: searchDomains,
+	}, nil
+}
+
 func (s *supervisor) IPRoutes(_ context.Context, available bool) (controlapi.IPRoutes, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

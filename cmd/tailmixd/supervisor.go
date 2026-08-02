@@ -759,6 +759,10 @@ func resolverResourcesForAPI(resolvers []*dnstype.Resolver) []controlapi.DNSReso
 func (s *supervisor) ListProfiles(_ context.Context, all bool) (controlapi.Profiles, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.listProfilesLocked(all), nil
+}
+
+func (s *supervisor) listProfilesLocked(all bool) controlapi.Profiles {
 	result := controlapi.Profiles{}
 	for _, configured := range s.st.Profiles {
 		if configured.Removed && !all {
@@ -767,7 +771,7 @@ func (s *supervisor) ListProfiles(_ context.Context, all bool) (controlapi.Profi
 		result.Profiles = append(result.Profiles, s.projectProfileLocked(configured))
 	}
 	sort.Slice(result.Profiles, func(i, j int) bool { return result.Profiles[i].Name < result.Profiles[j].Name })
-	return result, nil
+	return result
 }
 
 func (s *supervisor) GetProfile(_ context.Context, name string) (controlapi.Profile, error) {

@@ -13,6 +13,7 @@ import (
 )
 
 type Backend interface {
+	Status(context.Context) (Status, error)
 	ListProfiles(context.Context, bool) (Profiles, error)
 	GetProfile(context.Context, string) (Profile, error)
 	AddProfile(context.Context, AddProfileRequest) (Profile, error)
@@ -45,6 +46,10 @@ func Handler(backend Backend) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		writeResult(w, tailmixversion.GetMeta(), nil)
+	})
+	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) {
+		result, err := backend.Status(r.Context())
+		writeResult(w, result, err)
 	})
 	mux.HandleFunc("GET /v1/profiles", func(w http.ResponseWriter, r *http.Request) {
 		all, _ := strconv.ParseBool(r.URL.Query().Get("all"))

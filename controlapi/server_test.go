@@ -17,6 +17,11 @@ type recordingBackend struct {
 	ipPatch     PatchIPRoutesRequest
 	exitRequest SetExitNodeRequest
 	profiles    Profiles
+	status      Status
+}
+
+func (b *recordingBackend) Status(context.Context) (Status, error) {
+	return b.status, nil
 }
 
 func (b *recordingBackend) PatchIPRoutes(_ context.Context, request PatchIPRoutesRequest) (IPRoutes, error) {
@@ -54,6 +59,29 @@ func TestHandlerReturnsServerVersion(t *testing.T) {
 	}
 	if got.Short == "" || got.Long == "" || got.TailscaleVersion == "" {
 		t.Fatalf("version = %+v", got)
+	}
+}
+
+func TestHandlerReturnsAggregateStatus(t *testing.T) {
+	backend := &recordingBackend{status: Status{
+		Profiles: []Profile{{Name: "work"}},
+		DNSRoutes: DNSRoutes{Automatic: []DNSRouteBinding{{
+			Domain: "work.example", ProfileName: "work", State: "installed",
+		}}},
+	}}
+	request := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	response := httptest.NewRecorder()
+	Handler(backend).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var got Status
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Profiles) != 1 || got.Profiles[0].Name != "work" ||
+		len(got.DNSRoutes.Automatic) != 1 || got.DNSRoutes.Automatic[0].Domain != "work.example" {
+		t.Fatalf("aggregate status = %+v", got)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 type fakeManagementClient struct {
 	profile        controlapi.Profile
 	profileName    string
+	status         controlapi.Status
 	ipPatch        controlapi.PatchIPRoutesRequest
 	exitSet        controlapi.SetExitNodeRequest
 	exitCleared    bool
@@ -32,6 +33,9 @@ type fakeManagementClient struct {
 
 func (f *fakeManagementClient) Version(context.Context) (tailmixversion.Meta, error) {
 	return f.serverVersion, f.versionErr
+}
+func (f *fakeManagementClient) Status(context.Context) (controlapi.Status, error) {
+	return f.status, nil
 }
 func (f *fakeManagementClient) Profiles(context.Context, bool) (controlapi.Profiles, error) {
 	if f.statusProfiles != nil {
@@ -365,12 +369,33 @@ func TestProfilesHelpOmitsControlURL(t *testing.T) {
 	}
 }
 
-func TestStatusShowsActiveProfilesOnly(t *testing.T) {
+func TestStatusShowsActiveProfilesAndAcceptedPolicy(t *testing.T) {
+	prefix := netip.MustParsePrefix("10.20.0.0/16")
 	client := &fakeManagementClient{
-		statusProfiles: []controlapi.Profile{{
-			ID: "work-id", Name: "work", Enabled: true, RuntimeState: "running",
-			MagicDNSSuffix: "corp.example", PeerCount: 3,
-		}},
+		status: controlapi.Status{
+			Profiles: []controlapi.Profile{{
+				ID: "work-id", Name: "work", Enabled: true, RuntimeState: "running",
+				MagicDNSSuffix: "corp.example", PeerCount: 3,
+			}},
+			IPRoutes: controlapi.IPRoutes{Bindings: []controlapi.IPRouteBinding{{
+				Prefix: prefix, ProfileID: "work-id", ProfileName: "work",
+				State: "installed", CoveringRoute: prefix,
+			}}},
+			ExitNodes: controlapi.ExitNodes{Selected: &controlapi.SelectedExitNode{
+				ProfileID: "work-id", ProfileName: "work", NodeID: "gateway-id",
+				DNSName: "gateway.corp.example", Online: true, State: "installed",
+			}},
+			DNSRoutes: controlapi.DNSRoutes{Automatic: []controlapi.DNSRouteBinding{{
+				Domain: "corp.example", ProfileID: "work-id", ProfileName: "work",
+				Source: "magicdns", State: "installed",
+			}}},
+			SearchDomains: controlapi.SearchDomains{
+				Desired: []string{"corp.example"},
+				Installed: []controlapi.InstalledSearchDomain{{
+					Domain: "corp.example", ProfileID: "work-id", ProfileName: "work",
+				}},
+			},
+		},
 	}
 	var stdout, stderr bytes.Buffer
 	code := runWithDependencies(context.Background(), []string{"status"},
@@ -378,21 +403,28 @@ func TestStatusShowsActiveProfilesOnly(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
 	}
-	for _, want := range []string{"PROFILE", "work", "running", "corp.example"} {
+	for _, want := range []string{
+		"PROFILE", "work", "running", "corp.example",
+		"IP ROUTES", prefix.String(),
+		"EXIT NODE", "gateway.corp.example",
+		"DNS ROUTES", "magicdns",
+		"DNS SEARCH", "ORDER",
+	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("status does not contain %q:\n%s", want, stdout.String())
 		}
 	}
-	for _, unwanted := range []string{"IP ROUTES", "DNS ROUTES", "DNS SEARCH"} {
-		if strings.Contains(stdout.String(), unwanted) {
-			t.Errorf("status unexpectedly contains %q:\n%s", unwanted, stdout.String())
-		}
-	}
 }
 
-func TestStatusJSONMatchesProfilesList(t *testing.T) {
+func TestStatusJSONIncludesAcceptedPolicy(t *testing.T) {
 	client := &fakeManagementClient{
-		statusProfiles: []controlapi.Profile{{ID: "work-id", Name: "work"}},
+		status: controlapi.Status{
+			Profiles: []controlapi.Profile{{ID: "work-id", Name: "work"}},
+			DNSRoutes: controlapi.DNSRoutes{Automatic: []controlapi.DNSRouteBinding{{
+				Domain: "corp.example", ProfileID: "work-id", ProfileName: "work",
+				State: "installed",
+			}}},
+		},
 	}
 	var stdout, stderr bytes.Buffer
 	code := runWithDependencies(context.Background(), []string{"status", "--json"},
@@ -400,12 +432,15 @@ func TestStatusJSONMatchesProfilesList(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
 	}
-	var got controlapi.Profiles
+	var got controlapi.Status
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
 	if len(got.Profiles) != 1 || got.Profiles[0].Name != "work" {
 		t.Fatalf("status JSON = %+v", got)
+	}
+	if len(got.DNSRoutes.Automatic) != 1 || got.DNSRoutes.Automatic[0].Domain != "corp.example" {
+		t.Fatalf("status JSON DNS routes = %+v", got.DNSRoutes)
 	}
 }
 
