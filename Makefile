@@ -8,14 +8,19 @@ SYSTEMCTL ?= systemctl
 SYSTEMD_UNIT_DIR ?= $(PREFIX)/lib/systemd/system
 SYSTEMD_UNIT ?= tailmixd.service
 
-.PHONY: check install install-systemd licenses licenses-check
+.PHONY: check install install-systemd install-test licenses licenses-check
 
 check:
+	$(GO) test ./...
 	$(GO) vet ./...
 	$(GO) tool staticcheck ./...
 	$(GO) tool govulncheck ./...
 	$(GO) mod tidy -diff
 	$(MAKE) licenses-check
+	$(MAKE) install-test
+
+install-test:
+	./scripts/install_test.sh
 
 install:
 	@set -e; \

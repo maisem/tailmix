@@ -71,12 +71,10 @@ as `v0.1.0-dev.20260727`, instead.
 
 ## Validate
 
-Run the normal test, race, and static-analysis suites:
+Run the same consolidated validation used by CI:
 
 ```sh
-go test ./...
-go test -race ./...
-go vet ./...
+make check
 ```
 
 See [docs/darwin-testing.md](docs/darwin-testing.md) for the privileged macOS

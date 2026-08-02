@@ -1,0 +1,53 @@
+version: 2
+
+project_name: tailmix
+
+before:
+  hooks:
+    - go mod tidy -diff
+
+builds:
+  - id: tailmix
+    main: ./cmd/tailmix
+    binary: tailmix
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/maisem/tailmix/version.shortStamp={{ .Tag }}
+      - -X github.com/maisem/tailmix/version.longStamp={{ .Tag }}
+      - -X github.com/maisem/tailmix/version.gitCommitStamp={{ .FullCommit }}
+  - id: tailmixd
+    main: ./cmd/tailmixd
+    binary: tailmixd
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/maisem/tailmix/version.shortStamp={{ .Tag }}
+      - -X github.com/maisem/tailmix/version.longStamp={{ .Tag }}
+      - -X github.com/maisem/tailmix/version.gitCommitStamp={{ .FullCommit }}
+
+archives:
+  - ids: [tailmix, tailmixd]
+    name_template: "tailmix_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - src: systemd/tailmixd.service.in
+        dst: service/tailmixd.service.in
+      - src: launchd/io.github.maisem.tailmixd.plist.in
+        dst: service/io.github.maisem.tailmixd.plist.in
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github-native
+
+release:
+  prerelease: auto
+  extra_files:
+    - glob: ./scripts/install.sh
