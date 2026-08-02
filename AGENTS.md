@@ -13,8 +13,8 @@ created safely, explain the blocker in the final response.
 Do not amend, rewrite, force-push, or otherwise alter existing history unless
 the user explicitly requests it.
 
-Follow the [Tailscale commit message guidelines](https://github.com/tailscale/tailscale/blob/main/docs/commit-messages.md)
-for every commit.
+Follow the repository's [commit message guidelines](docs/commit-messages.md) for
+every commit.
 
 ## Logging and privacy
 
