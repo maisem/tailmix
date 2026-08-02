@@ -316,10 +316,86 @@ func TestRootHelpShowsFullSubcommandSpace(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	for _, command := range []string{"status", "profiles", "routes", "exit-node", "dns routes", "dns search", "tailscale", "ts", "version"} {
+	for _, command := range []string{"status", "profiles", "routes", "exit-node", "dns routes", "dns search", "tailscale", "ts", "completion", "version"} {
 		if !strings.Contains(stdout.String(), command) {
 			t.Errorf("help does not contain %q:\n%s", command, stdout.String())
 		}
+	}
+}
+
+func TestCompletionScripts(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish", "powershell", "pwsh"} {
+		t.Run(shell, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"completion", shell},
+				testDependencies(&fakeManagementClient{}, &stdout, &stderr, nil))
+			if code != 0 {
+				t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "completion __complete --") {
+				t.Fatalf("completion script does not invoke tailmix's completion endpoint:\n%s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestCompletionSuggestsCommandsFlagsAndValues(t *testing.T) {
+	client := &fakeManagementClient{statusProfiles: []controlapi.Profile{
+		{Name: "home", RuntimeState: "running"},
+		{Name: "work", RuntimeState: "disabled"},
+	}}
+	tests := []struct {
+		name  string
+		words []string
+		want  []string
+	}{
+		{name: "root commands", words: []string{""}, want: []string{"profiles\t", "completion\t", "--socket-dir\t"}},
+		{name: "subcommands", words: []string{"profiles", ""}, want: []string{"list\t", "rename\t", "help\t"}},
+		{name: "long flag", words: []string{"routes", "bind", "--pro"}, want: []string{"--profile\t"}},
+		{name: "profile flag value", words: []string{"routes", "bind", "--profile", "w"}, want: []string{"work\tdisabled"}},
+		{name: "profile operand", words: []string{"profiles", "show", "h"}, want: []string{"home\trunning"}},
+		{name: "boolean flag value", words: []string{"routes", "set", "--accept-all="}, want: []string{"false\t", "true\t"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args := []string{"completion", "__complete", "--"}
+			args = append(args, test.words...)
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), args,
+				testDependencies(client, &stdout, &stderr, nil))
+			if code != 0 {
+				t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+			}
+			for _, want := range test.want {
+				if !strings.Contains(stdout.String(), want) {
+					t.Errorf("completion output does not contain %q:\n%s", want, stdout.String())
+				}
+			}
+			if !strings.HasSuffix(stdout.String(), ":4\n") {
+				t.Errorf("completion output does not disable file completion:\n%s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestCompletionDelegatesToSelectedTailscaleProfile(t *testing.T) {
+	client := &fakeManagementClient{profile: controlapi.Profile{
+		Name: "work", LocalAPISocket: "/tmp/work.sock",
+	}}
+	var gotArgs []string
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(),
+		[]string{"completion", "__complete", "--", "ts", "--profile", "work", "st"},
+		testDependencies(client, &stdout, &stderr, func(_ context.Context, args []string) error {
+			gotArgs = slices.Clone(args)
+			return nil
+		}))
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	want := []string{"--socket=/tmp/work.sock", "completion", "__complete", "--", "st"}
+	if !slices.Equal(gotArgs, want) {
+		t.Fatalf("upstream completion args = %q, want %q", gotArgs, want)
 	}
 }
 

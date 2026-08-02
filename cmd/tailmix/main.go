@@ -111,6 +111,8 @@ func runWithDependencies(ctx context.Context, args []string, deps dependencies) 
 		err = runDNS(ctx, client, args[1:], deps)
 	case "tailscale", "ts":
 		err = runTailscale(ctx, client, socketDir, args[1:], deps)
+	case "completion":
+		err = runCompletion(ctx, socketDir, args[1:], deps)
 	case "version":
 		err = runVersion(ctx, client, args[1:], deps)
 	default:
@@ -790,12 +792,9 @@ func runTailscale(ctx context.Context, client managementClient, socketDir string
 	if err != nil {
 		return err
 	}
-	socketPath := selected.LocalAPISocket
-	if socketPath == "" {
-		socketPath, err = profilesocket.Path(socketDir, selected.ID)
-		if err != nil {
-			return err
-		}
+	socketPath, err := profileLocalAPISocket(socketDir, selected)
+	if err != nil {
+		return err
 	}
 	cliArgs := append([]string{"--socket=" + socketPath}, rest...)
 	oldStdout, oldStderr := cli.Stdout, cli.Stderr
@@ -804,6 +803,13 @@ func runTailscale(ctx context.Context, client managementClient, socketDir string
 		cli.Stdout, cli.Stderr = oldStdout, oldStderr
 	}()
 	return deps.runCLI(ctx, cliArgs)
+}
+
+func profileLocalAPISocket(socketDir string, selected controlapi.Profile) (string, error) {
+	if selected.LocalAPISocket != "" {
+		return selected.LocalAPISocket, nil
+	}
+	return profilesocket.Path(socketDir, selected.ID)
 }
 
 func globalOptions(args []string) (string, []string, error) {
@@ -1324,6 +1330,7 @@ Commands:
   dns search   Manage the ordered OS search-domain list
   tailscale    Run an upstream Tailscale command for one profile
   ts           Shortcut for tailscale
+  completion   Generate shell completion scripts
   version      Show the tailmix build version
   help         Show this help
 

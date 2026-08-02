@@ -10,6 +10,7 @@ class Tailmix < Formula
     ldflags = Utils.safe_popen_read("go", "run", "./cmd/mkversion").split
     system "go", "build", *std_go_args(ldflags: ldflags), "./cmd/tailmix"
     system "go", "build", *std_go_args(output: bin/"tailmixd", ldflags: ldflags), "./cmd/tailmixd"
+    generate_completions_from_executable bin/"tailmix", "completion", shells: [:bash, :zsh, :fish, :pwsh]
   end
 
   service do
@@ -23,6 +24,7 @@ class Tailmix < Formula
   test do
     system bin/"tailmix", "version"
     assert_match "tailmix manages multiple Tailscale profiles", shell_output("#{bin}/tailmix help")
+    assert_match "completion __complete --", shell_output("#{bin}/tailmix completion bash")
     assert_match "Usage of tailmixd:", shell_output("#{bin}/tailmixd -h 2>&1")
   end
 end

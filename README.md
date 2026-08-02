@@ -61,6 +61,32 @@ tailnet, you are done.
 
 To connect another tailnet, repeat step 2 with a different profile name.
 
+## Shell completion
+
+Homebrew installs completion scripts for Bash, Zsh, fish, and PowerShell
+automatically. For other installation methods, load a completion script in the
+current shell with one of these commands:
+
+```sh
+# Bash
+source <(tailmix completion bash)
+
+# Zsh
+source <(tailmix completion zsh)
+
+# fish
+tailmix completion fish | source
+```
+
+For PowerShell:
+
+```powershell
+tailmix completion powershell | Out-String | Invoke-Expression
+```
+
+The scripts complete tailmix commands and flags, local profile names, and the
+embedded Tailscale CLI after `tailmix ts --profile <profile>`.
+
 ## Common next steps
 
 List everything before changing policy:
