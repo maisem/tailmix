@@ -6,6 +6,9 @@ on:
       - "**/*.go"
       - go.mod
       - go.sum
+      - Makefile
+      - licenses/**
+      - scripts/licenses.sh
       - .github/workflows/checks.yml
   push:
     branches: [main]
@@ -13,25 +16,22 @@ on:
       - "**/*.go"
       - go.mod
       - go.sum
+      - Makefile
+      - licenses/**
+      - scripts/licenses.sh
       - .github/workflows/checks.yml
+  schedule:
+    - cron: "23 9 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  staticcheck:
+  check:
     runs-on: [self-hosted, tailmix-vm]
     container:
       image: golang:1.26
     steps:
       - uses: actions/checkout@v6
-      - run: go tool staticcheck ./...
-
-  tidy:
-    runs-on: [self-hosted, tailmix-vm]
-    container:
-      image: golang:1.26
-    steps:
-      - uses: actions/checkout@v6
-      - run: go mod tidy -diff
+      - run: make check
