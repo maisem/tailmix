@@ -32,7 +32,8 @@ fi
 check_target() {
 	goos=$1
 	goarch=$2
-	env GOOS="$goos" GOARCH="$goarch" "$go_licenses" check \
+	cgo_enabled=$3
+	env GOOS="$goos" GOARCH="$goarch" CGO_ENABLED="$cgo_enabled" "$go_licenses" check \
 		./cmd/tailmix ./cmd/tailmixd \
 		--ignore github.com/maisem/tailmix \
 		--ignore github.com/golang/freetype
@@ -41,18 +42,19 @@ check_target() {
 report_target() {
 	goos=$1
 	goarch=$2
-	destination=$3
-	env GOOS="$goos" GOARCH="$goarch" "$go_licenses" report \
+	cgo_enabled=$3
+	destination=$4
+	env GOOS="$goos" GOARCH="$goarch" CGO_ENABLED="$cgo_enabled" "$go_licenses" report \
 		./cmd/tailmix ./cmd/tailmixd \
 		--ignore github.com/maisem/tailmix \
 		--template "$root/licenses/report.tmpl" >"$destination"
 }
 
 cd "$root"
-check_target darwin arm64
-check_target linux amd64
-report_target darwin arm64 "$tmp/darwin.md"
-report_target linux amd64 "$tmp/linux.md"
+check_target darwin arm64 1
+check_target linux amd64 1
+report_target darwin arm64 1 "$tmp/darwin.md"
+report_target linux amd64 1 "$tmp/linux.md"
 
 generated="$tmp/tailmix.md"
 {
