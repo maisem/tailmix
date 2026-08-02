@@ -444,6 +444,23 @@ func TestStatusJSONIncludesAcceptedPolicy(t *testing.T) {
 	}
 }
 
+func TestStatusOmitsEmptyPolicySections(t *testing.T) {
+	client := &fakeManagementClient{status: controlapi.Status{
+		Profiles: []controlapi.Profile{{ID: "work-id", Name: "work"}},
+	}}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"status"},
+		testDependencies(client, &stdout, &stderr, nil))
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, unwanted := range []string{"IP ROUTES", "EXIT NODE", "DNS ROUTES", "DNS SEARCH", "(none)"} {
+		if strings.Contains(stdout.String(), unwanted) {
+			t.Errorf("empty status unexpectedly contains %q:\n%s", unwanted, stdout.String())
+		}
+	}
+}
+
 func TestRouteBindingAndAcceptAllRequests(t *testing.T) {
 	client := &fakeManagementClient{}
 	code := runWithDependencies(context.Background(),

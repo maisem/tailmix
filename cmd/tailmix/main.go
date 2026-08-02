@@ -1061,11 +1061,10 @@ func writeStatus(w io.Writer, status controlapi.Status) {
 }
 
 func writeStatusSection(w io.Writer, title string, present bool, write func()) {
-	fmt.Fprintf(w, "\n%s\n", title)
 	if !present {
-		fmt.Fprintln(w, "(none)")
 		return
 	}
+	fmt.Fprintf(w, "\n%s\n", title)
 	write()
 }
 
