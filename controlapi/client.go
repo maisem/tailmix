@@ -41,6 +41,18 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	return out, err
 }
 
+func (c *Client) UpdateStatus(ctx context.Context) (UpdateStatus, error) {
+	var out UpdateStatus
+	err := c.do(ctx, http.MethodGet, "/v1/update", nil, &out)
+	return out, err
+}
+
+func (c *Client) UpdateAction(ctx context.Context, action string) (UpdateStatus, error) {
+	var out UpdateStatus
+	err := c.do(ctx, http.MethodPost, "/v1/update/"+url.PathEscape(action), nil, &out)
+	return out, err
+}
+
 func (c *Client) Profiles(ctx context.Context, all bool) (Profiles, error) {
 	var out Profiles
 	err := c.do(ctx, http.MethodGet, "/v1/profiles?all="+strconv.FormatBool(all), nil, &out)

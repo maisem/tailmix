@@ -20,17 +20,15 @@ Choose your operating system.
 **macOS**
 
 ```sh
-brew tap maisem/tailmix https://github.com/maisem/tailmix.git
-brew install --HEAD tailmix
-sudo brew services start tailmix
+curl -fLO https://github.com/maisem/tailmix/releases/latest/download/install.sh
+sudo sh install.sh
 ```
 
 **Linux with systemd**
 
-From this repository checkout:
-
 ```sh
-sudo make install-systemd
+curl -fLO https://github.com/maisem/tailmix/releases/latest/download/install.sh
+sudo sh install.sh
 ```
 
 For Linux prerequisites and troubleshooting, see the
@@ -60,6 +58,22 @@ If the version prints, `work` is listed, and the final command shows the
 tailnet, you are done.
 
 To connect another tailnet, repeat step 2 with a different profile name.
+
+Direct installations check stable GitHub releases after a randomized startup
+delay and then daily. Both binaries switch versions together and the daemon
+restarts itself without a service timer. Release checksums are verified after
+download; authenticity relies on GitHub's HTTPS and release access controls.
+Manage the policy with:
+
+```sh
+tailmix update status
+sudo tailmix update check
+sudo tailmix update apply
+sudo tailmix update disable # or: enable
+```
+
+Homebrew remains available for source-based macOS installations, but those
+installations are updated by Homebrew rather than tailmix itself.
 
 ## Shell completion
 

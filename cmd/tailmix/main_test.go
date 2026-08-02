@@ -29,6 +29,8 @@ type fakeManagementClient struct {
 	statusProfiles []controlapi.Profile
 	serverVersion  tailmixversion.Meta
 	versionErr     error
+	updateStatus   controlapi.UpdateStatus
+	updateAction   string
 }
 
 func (f *fakeManagementClient) Version(context.Context) (tailmixversion.Meta, error) {
@@ -36,6 +38,13 @@ func (f *fakeManagementClient) Version(context.Context) (tailmixversion.Meta, er
 }
 func (f *fakeManagementClient) Status(context.Context) (controlapi.Status, error) {
 	return f.status, nil
+}
+func (f *fakeManagementClient) UpdateStatus(context.Context) (controlapi.UpdateStatus, error) {
+	return f.updateStatus, nil
+}
+func (f *fakeManagementClient) UpdateAction(_ context.Context, action string) (controlapi.UpdateStatus, error) {
+	f.updateAction = action
+	return f.updateStatus, nil
 }
 func (f *fakeManagementClient) Profiles(context.Context, bool) (controlapi.Profiles, error) {
 	if f.statusProfiles != nil {
@@ -108,6 +117,49 @@ func testDependencies(client managementClient, stdout, stderr io.Writer, runner 
 			return client
 		},
 		version: "tailmix test-version",
+	}
+}
+
+func TestUpdateCommands(t *testing.T) {
+	for _, command := range []string{"status", "enable", "disable", "check", "apply"} {
+		t.Run(command, func(t *testing.T) {
+			client := &fakeManagementClient{updateStatus: controlapi.UpdateStatus{
+				Enabled: true, CurrentVersion: "1.2.3", AvailableVersion: "1.2.4", State: "available",
+			}}
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"update", command},
+				testDependencies(client, &stdout, &stderr, nil))
+			if code != 0 || stderr.Len() != 0 {
+				t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+			}
+			if command == "status" {
+				if client.updateAction != "" {
+					t.Fatalf("action = %q", client.updateAction)
+				}
+			} else if client.updateAction != command {
+				t.Fatalf("action = %q, want %q", client.updateAction, command)
+			}
+			if !strings.Contains(stdout.String(), "1.2.4") {
+				t.Fatalf("output = %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestUpdateStatusJSON(t *testing.T) {
+	client := &fakeManagementClient{updateStatus: controlapi.UpdateStatus{Enabled: true, State: "idle"}}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"update", "status", "--json"},
+		testDependencies(client, &stdout, &stderr, nil))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	var got controlapi.UpdateStatus
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Enabled || got.State != "idle" {
+		t.Fatalf("status = %+v", got)
 	}
 }
 
@@ -351,6 +403,7 @@ func TestCompletionSuggestsCommandsFlagsAndValues(t *testing.T) {
 	}{
 		{name: "root commands", words: []string{""}, want: []string{"profiles\t", "completion\t", "--socket-dir\t"}},
 		{name: "subcommands", words: []string{"profiles", ""}, want: []string{"list\t", "rename\t", "help\t"}},
+		{name: "update subcommands", words: []string{"update", ""}, want: []string{"status\t", "check\t", "apply\t"}},
 		{name: "long flag", words: []string{"routes", "bind", "--pro"}, want: []string{"--profile\t"}},
 		{name: "profile flag value", words: []string{"routes", "bind", "--profile", "w"}, want: []string{"work\tdisabled"}},
 		{name: "profile operand", words: []string{"profiles", "show", "h"}, want: []string{"home\trunning"}},

@@ -1,6 +1,6 @@
 # Install tailmix on Linux
 
-You need systemd, Go 1.26.4 or newer, and root access.
+You need systemd, `curl`, and root access.
 
 ## Do this
 
@@ -11,10 +11,12 @@ You need systemd, Go 1.26.4 or newer, and root access.
    sudo systemctl disable --now tailscaled
    ```
 
-2. From the tailmix repository checkout, install and start the service:
+2. Download the stable-release installer, inspect it, then install and start
+   the service:
 
    ```sh
-   sudo make install-systemd
+   curl -fLO https://github.com/maisem/tailmix/releases/latest/download/install.sh
+   sudo sh install.sh
    ```
 
 3. Add a profile and log in:
@@ -53,12 +55,19 @@ Restart it after fixing the problem:
 sudo systemctl restart tailmixd
 ```
 
-## Update
+## Updates
 
 ```sh
-git pull
-sudo make install-systemd
+tailmix update status
+sudo tailmix update check
+sudo tailmix update apply
 ```
+
+Automatic stable-release updates are enabled by default. The daemon checks
+after a randomized startup delay and then daily, verifies the release checksum,
+switches `tailmix` and `tailmixd` together, and restarts itself. No systemd timer
+is installed. Use `sudo tailmix update disable` to opt out and
+`sudo tailmix update enable` to turn automatic updates back on.
 
 ## Change daemon flags
 

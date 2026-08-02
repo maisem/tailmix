@@ -14,10 +14,31 @@ import (
 
 type recordingBackend struct {
 	Backend
-	ipPatch     PatchIPRoutesRequest
-	exitRequest SetExitNodeRequest
-	profiles    Profiles
-	status      Status
+	ipPatch      PatchIPRoutesRequest
+	exitRequest  SetExitNodeRequest
+	profiles     Profiles
+	status       Status
+	update       UpdateStatus
+	updateAction string
+}
+
+func (b *recordingBackend) UpdateStatus(context.Context) (UpdateStatus, error) { return b.update, nil }
+func (b *recordingBackend) SetUpdatesEnabled(_ context.Context, enabled bool) (UpdateStatus, error) {
+	if enabled {
+		b.updateAction = "enable"
+	} else {
+		b.updateAction = "disable"
+	}
+	b.update.Enabled = enabled
+	return b.update, nil
+}
+func (b *recordingBackend) CheckForUpdate(context.Context) (UpdateStatus, error) {
+	b.updateAction = "check"
+	return b.update, nil
+}
+func (b *recordingBackend) ApplyUpdate(context.Context) (UpdateStatus, error) {
+	b.updateAction = "apply"
+	return b.update, nil
 }
 
 func (b *recordingBackend) Status(context.Context) (Status, error) {
@@ -82,6 +103,40 @@ func TestHandlerReturnsAggregateStatus(t *testing.T) {
 	if len(got.Profiles) != 1 || got.Profiles[0].Name != "work" ||
 		len(got.DNSRoutes.Automatic) != 1 || got.DNSRoutes.Automatic[0].Domain != "work.example" {
 		t.Fatalf("aggregate status = %+v", got)
+	}
+}
+
+func TestHandlerUpdateEndpoints(t *testing.T) {
+	for _, tc := range []struct{ path, action string }{
+		{"/v1/update/enable", "enable"},
+		{"/v1/update/disable", "disable"},
+		{"/v1/update/check", "check"},
+		{"/v1/update/apply", "apply"},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			backend := &recordingBackend{update: UpdateStatus{CurrentVersion: "1.2.3", State: "idle"}}
+			response := httptest.NewRecorder()
+			Handler(backend).ServeHTTP(response, httptest.NewRequest(http.MethodPost, tc.path, nil))
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			if backend.updateAction != tc.action {
+				t.Fatalf("action = %q", backend.updateAction)
+			}
+		})
+	}
+	backend := &recordingBackend{update: UpdateStatus{Enabled: true, State: "idle"}}
+	response := httptest.NewRecorder()
+	Handler(backend).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/update", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+	var got UpdateStatus
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Enabled {
+		t.Fatalf("status = %+v", got)
 	}
 }
 

@@ -413,12 +413,23 @@ func completionCommandTree() *completionCommand {
 			leaf("pwsh", "Alias for powershell", nil),
 		},
 	}
+	update := &completionCommand{
+		name: "update", description: "Manage automatic binary updates", help: true,
+		subcommands: []*completionCommand{
+			leaf("status", "Show automatic update status", []completionFlag{jsonFlag()}),
+			leaf("enable", "Enable automatic updates", []completionFlag{jsonFlag()}),
+			leaf("disable", "Disable automatic updates", []completionFlag{jsonFlag()}),
+			leaf("check", "Check for an update now", []completionFlag{jsonFlag()}),
+			leaf("apply", "Apply an available update now", []completionFlag{jsonFlag()}),
+		},
+	}
 
 	return &completionCommand{
 		name:  "tailmix",
 		flags: []completionFlag{flag("Use a different daemon socket directory", completionDirectory, "--socket-dir")},
 		subcommands: []*completionCommand{
 			{name: "status", description: "Show active profiles and accepted network policy", flags: []completionFlag{jsonFlag()}, help: true},
+			update,
 			profiles,
 			routes,
 			exitNode,

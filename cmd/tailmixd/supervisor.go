@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/maisem/tailmix/controlapi"
 	tailmixdns "github.com/maisem/tailmix/dns"
@@ -37,6 +38,10 @@ type daemonConfig struct {
 	LogUpload    bool
 	LogUploadURL string
 	Stderr       io.Writer
+	Updater      binaryUpdater
+	Version      string
+	UpdateRoot   string
+	UpdateDelay  func(bool) time.Duration
 }
 
 type managedProfile struct {
@@ -77,6 +82,9 @@ type supervisor struct {
 	socksRouter   *socksproxy.DynamicRouter
 	networkErr    chan error
 	reconcileErr  string
+	updateMu      sync.Mutex
+	updateWake    chan struct{}
+	updateRestart chan updateRestart
 }
 
 func newSupervisor(store *state.JSONStore, st state.State, initial []runtimeProfile, cfg daemonConfig) *supervisor {
@@ -88,14 +96,16 @@ func newSupervisor(store *state.JSONStore, st state.State, initial []runtimeProf
 		initialByID[rp.State.ID] = rp
 	}
 	return &supervisor{
-		store:      store,
-		cfg:        cfg,
-		st:         cloneState(st),
-		initial:    initialByID,
-		runtimes:   map[string]*managedProfile{},
-		lastErrors: map[string]string{},
-		updates:    make(chan runtimeUpdate, 128),
-		networkErr: make(chan error, 4),
+		store:         store,
+		cfg:           cfg,
+		st:            cloneState(st),
+		initial:       initialByID,
+		runtimes:      map[string]*managedProfile{},
+		lastErrors:    map[string]string{},
+		updates:       make(chan runtimeUpdate, 128),
+		networkErr:    make(chan error, 4),
+		updateWake:    make(chan struct{}, 1),
+		updateRestart: make(chan updateRestart, 1),
 	}
 }
 
@@ -130,6 +140,9 @@ func (s *supervisor) Run(ctx context.Context) (retErr error) {
 	fmt.Fprintf(s.cfg.Stderr, "daemon control socket %s\n", profilesocket.ControlPath(s.cfg.SocketDir))
 	fmt.Fprintf(s.cfg.Stderr, "started %d enabled profile runtime(s)\n", len(s.runtimes))
 	s.mu.Unlock()
+	if s.cfg.Updater != nil {
+		go s.runUpdateLoop(s.ctx)
+	}
 
 	defer func() {
 		retErr = errors.Join(retErr, s.close())
@@ -163,6 +176,8 @@ func (s *supervisor) Run(ctx context.Context) (retErr error) {
 				}
 			}
 			s.mu.Unlock()
+		case restart := <-s.updateRestart:
+			return &restart
 		}
 	}
 }

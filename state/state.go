@@ -2,6 +2,16 @@ package state
 
 import "net/netip"
 
+type UpdateState struct {
+	// Disabled is stored instead of Enabled so existing state files default to
+	// automatic updates being enabled.
+	Disabled         bool   `json:"disabled,omitempty"`
+	AvailableVersion string `json:"availableVersion,omitempty"`
+	State            string `json:"state,omitempty"`
+	LastChecked      string `json:"lastChecked,omitempty"`
+	LastError        string `json:"lastError,omitempty"`
+}
+
 type State struct {
 	SyntheticPool    string            `json:"syntheticPool"`
 	SyntheticPoolV6  string            `json:"syntheticPoolV6,omitempty"`
@@ -13,6 +23,7 @@ type State struct {
 	DNSRouteBindings []DNSRouteBinding `json:"dnsRouteBindings,omitempty"`
 	SearchDomains    []string          `json:"searchDomains,omitempty"`
 	ExitNode         *ExitNode         `json:"exitNode,omitempty"`
+	Updates          UpdateState       `json:"updates,omitempty"`
 }
 
 type Profile struct {

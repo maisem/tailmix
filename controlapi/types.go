@@ -5,6 +5,17 @@ import (
 	"net/netip"
 )
 
+// UpdateStatus describes the daemon's automatic-update policy and most recent
+// update activity.
+type UpdateStatus struct {
+	Enabled          bool   `json:"enabled"`
+	CurrentVersion   string `json:"currentVersion"`
+	AvailableVersion string `json:"availableVersion,omitempty"`
+	State            string `json:"state"`
+	LastChecked      string `json:"lastChecked,omitempty"`
+	LastError        string `json:"lastError,omitempty"`
+}
+
 type Error struct {
 	Code        string `json:"code"`
 	Message     string `json:"message"`

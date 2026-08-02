@@ -42,8 +42,22 @@ type Backend interface {
 	ClearSearchDomains(context.Context) (SearchDomains, error)
 }
 
+// UpdateBackend is implemented by daemons that support self-updates. It is
+// separate from Backend so the control API remains usable by restricted and
+// test backends that do not manage installed binaries.
+type UpdateBackend interface {
+	UpdateStatus(context.Context) (UpdateStatus, error)
+	SetUpdatesEnabled(context.Context, bool) (UpdateStatus, error)
+	CheckForUpdate(context.Context) (UpdateStatus, error)
+	ApplyUpdate(context.Context) (UpdateStatus, error)
+}
+
 func Handler(backend Backend) http.Handler {
 	mux := http.NewServeMux()
+	updates, hasUpdates := backend.(UpdateBackend)
+	updateUnavailable := func(w http.ResponseWriter) {
+		writeResult(w, nil, NewError("unsupported", "this daemon does not support automatic updates"))
+	}
 	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		writeResult(w, tailmixversion.GetMeta(), nil)
 	})
@@ -51,6 +65,36 @@ func Handler(backend Backend) http.Handler {
 		result, err := backend.Status(r.Context())
 		writeResult(w, result, err)
 	})
+	mux.HandleFunc("GET /v1/update", func(w http.ResponseWriter, r *http.Request) {
+		if !hasUpdates {
+			updateUnavailable(w)
+			return
+		}
+		result, err := updates.UpdateStatus(r.Context())
+		writeResult(w, result, err)
+	})
+	for _, action := range []string{"enable", "disable", "check", "apply"} {
+		action := action
+		mux.HandleFunc("POST /v1/update/"+action, func(w http.ResponseWriter, r *http.Request) {
+			if !hasUpdates {
+				updateUnavailable(w)
+				return
+			}
+			var result UpdateStatus
+			var err error
+			switch action {
+			case "enable":
+				result, err = updates.SetUpdatesEnabled(r.Context(), true)
+			case "disable":
+				result, err = updates.SetUpdatesEnabled(r.Context(), false)
+			case "check":
+				result, err = updates.CheckForUpdate(r.Context())
+			case "apply":
+				result, err = updates.ApplyUpdate(r.Context())
+			}
+			writeResult(w, result, err)
+		})
+	}
 	mux.HandleFunc("GET /v1/profiles", func(w http.ResponseWriter, r *http.Request) {
 		all, _ := strconv.ParseBool(r.URL.Query().Get("all"))
 		result, err := backend.ListProfiles(r.Context(), all)

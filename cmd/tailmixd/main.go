@@ -26,6 +26,7 @@ import (
 	"github.com/maisem/tailmix/routingpolicy"
 	"github.com/maisem/tailmix/state"
 	"github.com/maisem/tailmix/tunmux"
+	tailmixupdate "github.com/maisem/tailmix/update"
 	tailmixversion "github.com/maisem/tailmix/version"
 	"tailscale.com/net/tsaddr"
 )
@@ -100,6 +101,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	verbose := fs.Bool("verbose", false, "enable verbose per-profile tsnet logs")
 	logUpload := fs.Bool("log-upload", false, "opt in to remote per-profile logtail uploads")
 	logUploadURL := fs.String("log-upload-url", "", "replace the remote logtail upload base URL (requires -log-upload)")
+	updateRoot := fs.String("update-root", installedUpdateRoot(os.Args[0]), "root of a direct installation eligible for automatic updates")
+	autoUpdate := fs.Bool("auto-update", true, "automatically install stable tailmix updates")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	registerProfileFlags(fs, &profiles)
 	if err := fs.Parse(args); err != nil {
@@ -136,6 +139,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	switch st.Updates.State {
+	case "checking", "applying", "restarting":
+		st.Updates.State = "idle"
+		st.Updates.AvailableVersion = ""
+	}
 	if err := configureSyntheticPools(&st, *syntheticPool, *syntheticPoolV6); err != nil {
 		return err
 	}
@@ -149,6 +157,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stderr, "effective IP pools: IPv4 %s, IPv6 %s\n", st.SyntheticPool, st.SyntheticPoolV6)
 	_ = stdout
+	var updater binaryUpdater
+	if *autoUpdate && *updateRoot != "" {
+		updater = tailmixupdate.Client{Root: *updateRoot}
+	}
 	supervisor := newSupervisor(store, st, runtimeProfiles, daemonConfig{
 		Mode:         *mode,
 		TUNName:      *tunName,
@@ -158,8 +170,17 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		LogUpload:    *logUpload,
 		LogUploadURL: *logUploadURL,
 		Stderr:       stderr,
+		Updater:      updater,
+		Version:      tailmixversion.GetMeta().Short,
+		UpdateRoot:   *updateRoot,
+		UpdateDelay:  defaultUpdateDelay,
 	})
-	return supervisor.Run(ctx)
+	err = supervisor.Run(ctx)
+	var restart *updateRestart
+	if errors.As(err, &restart) {
+		return restart.exec(os.Args, os.Environ())
+	}
+	return err
 }
 
 func registerProfileFlags(fs *flag.FlagSet, profiles *profileFlag) {
@@ -174,6 +195,18 @@ func defaultStatePath() string {
 		return filepath.Join(".", "tailmix-state.json")
 	}
 	return filepath.Join(dir, "tailmix", "state.json")
+}
+
+func installedUpdateRoot(argv0 string) string {
+	path, err := filepath.Abs(argv0)
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Dir(path)
+	if filepath.Base(dir) != "current" {
+		return ""
+	}
+	return filepath.Dir(dir)
 }
 
 func defaultTUNName() string {

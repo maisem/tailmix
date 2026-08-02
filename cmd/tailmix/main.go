@@ -28,6 +28,8 @@ type cliRunner func(context.Context, []string) error
 type managementClient interface {
 	Version(context.Context) (tailmixversion.Meta, error)
 	Status(context.Context) (controlapi.Status, error)
+	UpdateStatus(context.Context) (controlapi.UpdateStatus, error)
+	UpdateAction(context.Context, string) (controlapi.UpdateStatus, error)
 	Profiles(context.Context, bool) (controlapi.Profiles, error)
 	Profile(context.Context, string) (controlapi.Profile, error)
 	AddProfile(context.Context, controlapi.AddProfileRequest) (controlapi.Profile, error)
@@ -101,6 +103,8 @@ func runWithDependencies(ctx context.Context, args []string, deps dependencies) 
 	switch args[0] {
 	case "status":
 		err = runStatus(ctx, client, args[1:], deps)
+	case "update":
+		err = runUpdate(ctx, client, args[1:], deps)
 	case "profiles":
 		err = runProfiles(ctx, client, args[1:], deps)
 	case "routes":
@@ -133,6 +137,54 @@ func runWithDependencies(ctx context.Context, args []string, deps dependencies) 
 	}
 	fmt.Fprintln(deps.stderr, err)
 	return 1
+}
+
+func runUpdate(ctx context.Context, client managementClient, args []string, deps dependencies) error {
+	if len(args) == 0 || isHelp(args[0]) {
+		fmt.Fprint(deps.stdout, updateHelp)
+		return nil
+	}
+	action := args[0]
+	if action != "status" && action != "enable" && action != "disable" && action != "check" && action != "apply" {
+		return usageError{fmt.Sprintf("unknown update command %q", action)}
+	}
+	rest := args[1:]
+	jsonOutput, err := takeBool(&rest, "--json")
+	if err != nil {
+		return err
+	}
+	if err := noOperands(rest); err != nil {
+		return err
+	}
+	var result controlapi.UpdateStatus
+	if action == "status" {
+		result, err = client.UpdateStatus(ctx)
+	} else {
+		result, err = client.UpdateAction(ctx, action)
+	}
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(deps.stdout, result)
+	}
+	writeUpdateStatus(deps.stdout, result)
+	return nil
+}
+
+func writeUpdateStatus(w io.Writer, status controlapi.UpdateStatus) {
+	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(table, "ENABLED\t%s\nCURRENT VERSION\t%s\nSTATE\t%s\n", yesNo(status.Enabled), status.CurrentVersion, status.State)
+	if status.AvailableVersion != "" {
+		fmt.Fprintf(table, "AVAILABLE VERSION\t%s\n", status.AvailableVersion)
+	}
+	if status.LastChecked != "" {
+		fmt.Fprintf(table, "LAST CHECKED\t%s\n", status.LastChecked)
+	}
+	if status.LastError != "" {
+		fmt.Fprintf(table, "LAST ERROR\t%s\n", status.LastError)
+	}
+	_ = table.Flush()
 }
 
 func runVersion(ctx context.Context, client managementClient, args []string, deps dependencies) error {
@@ -1323,6 +1375,7 @@ Usage:
 
 Commands:
   status       Show active profiles and accepted network policy
+  update       Manage automatic binary updates
   profiles     Manage profile lifecycle and configuration
   routes       Accept IP routes and pin prefixes to profiles
   exit-node    Select one profile's exit node for default traffic
@@ -1346,6 +1399,17 @@ const versionHelp = `Usage:
 Shows client and server versions, source revisions, and full embedded Tailscale
 module versions. The server is shown as unavailable when tailmixd cannot be
 reached.
+`
+
+const updateHelp = `Usage:
+  tailmix update status [--json]
+  tailmix update enable [--json]
+  tailmix update disable [--json]
+  tailmix update check [--json]
+  tailmix update apply [--json]
+
+Automatic updates are enabled by default. Check queries the stable release
+channel immediately; apply installs an available update immediately.
 `
 
 const statusHelp = `Usage:

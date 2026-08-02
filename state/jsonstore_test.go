@@ -26,6 +26,7 @@ func TestStoreRoundTripPreservesEffectiveLeases(t *testing.T) {
 			NodeID:    "exit-node",
 			PeerIP:    netip.MustParseAddr("100.64.0.20"),
 		},
+		Updates: UpdateState{AvailableVersion: "1.2.4", State: "available", LastChecked: "2026-08-02T00:00:00Z"},
 	}
 	if err := store.Save(want); err != nil {
 		t.Fatal(err)
@@ -42,6 +43,9 @@ func TestStoreRoundTripPreservesEffectiveLeases(t *testing.T) {
 	}
 	if got.ExitNode == nil || *got.ExitNode != *want.ExitNode {
 		t.Fatalf("exit node did not round trip: got %+v want %+v", got.ExitNode, want.ExitNode)
+	}
+	if got.Updates != want.Updates {
+		t.Fatalf("updates did not round trip: got %+v want %+v", got.Updates, want.Updates)
 	}
 }
 
