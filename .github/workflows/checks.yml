@@ -34,5 +34,4 @@ jobs:
       image: golang:1.26
     steps:
       - uses: actions/checkout@v6
-      - run: go mod tidy
-      - run: git diff --exit-code -- go.mod go.sum
+      - run: go mod tidy -diff
