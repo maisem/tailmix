@@ -1,4 +1,5 @@
 /tailmix
 /tailmixd
+/dist/
 *.test
 .DS_Store

@@ -84,6 +84,7 @@ func metaFromBuildInfo(info *debug.BuildInfo, tailscaleVersion string, stamps bu
 	}
 	if stamps.commit != "" {
 		meta.GitCommit = stamps.commit
+		meta.GitDirty = false
 	}
 	if stamps.short != "" {
 		meta.Short = stamps.short
