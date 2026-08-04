@@ -13,7 +13,7 @@ func TestEmbeddedVersionIsSemver(t *testing.T) {
 	if !semver.IsValid(version) {
 		t.Fatalf("embedded version %q is not valid semver", version)
 	}
-	if got, want := version, "v0.1.0-dev"; got != want {
+	if got, want := version, "v0.1.1-rc"; got != want {
 		t.Fatalf("embedded version = %q, want %q", got, want)
 	}
 }
@@ -49,10 +49,10 @@ func TestMetaFromBuildInfo(t *testing.T) {
 		{Key: "vcs.modified", Value: "true"},
 	}}
 	meta := metaFromBuildInfo(info, "v1.100.2", buildStamps{})
-	if got, want := meta.Short, "v0.1.0-dev.20260727"; got != want {
+	if got, want := meta.Short, "v0.1.1-rc.20260727"; got != want {
 		t.Fatalf("Short = %q, want %q", got, want)
 	}
-	if got, want := meta.Long, "v0.1.0-dev.20260727-t012345678-dirty"; got != want {
+	if got, want := meta.Long, "v0.1.1-rc.20260727-t012345678-dirty"; got != want {
 		t.Fatalf("Long = %q, want %q", got, want)
 	}
 	if got, want := meta.GitCommit, "0123456789abcdef"; got != want {
