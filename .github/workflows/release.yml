@@ -26,3 +26,6 @@ jobs:
         run: goreleaser release --clean --parallelism 2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: safe.directory
+          GIT_CONFIG_VALUE_0: ${{ github.workspace }}
