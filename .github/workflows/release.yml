@@ -20,10 +20,9 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make check
-      - uses: goreleaser/goreleaser-action@v7
-        with:
-          distribution: goreleaser
-          version: "~> v2"
-          args: release --clean --parallelism 2
+      - name: Install GoReleaser
+        run: go install github.com/goreleaser/goreleaser/v2@v2.12.7
+      - name: Release
+        run: goreleaser release --clean --parallelism 2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
