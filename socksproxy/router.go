@@ -132,7 +132,7 @@ func NewRouterWithPolicies(profiles []Profile, leases []effectiveip.Lease, subne
 			continue
 		}
 		if existing, ok := r.effectiveIPs[lease.EffectiveIP]; ok && (existing.profileID != lease.NodeKey.ProfileID || existing.canonical != lease.NodeKey.CanonicalIP) {
-			return nil, fmt.Errorf("effective IP %v is leased to multiple nodes", lease.EffectiveIP)
+			return nil, fmt.Errorf("effective IP %v is leased to multiple targets", lease.EffectiveIP)
 		}
 		r.effectiveIPs[lease.EffectiveIP] = effectiveRoute{
 			profileID: lease.NodeKey.ProfileID,

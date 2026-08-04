@@ -114,3 +114,43 @@ func TestPeerLocationCopiesExitNodeDisplayMetadata(t *testing.T) {
 		t.Fatal("nil upstream location did not remain nil")
 	}
 }
+
+func TestServiceStatusesBuildStableMagicDNSTargets(t *testing.T) {
+	zetaIPs := []netip.Addr{
+		netip.MustParseAddr("100.100.1.2"),
+		netip.MustParseAddr("fd7a:115c:a1e0::102"),
+	}
+	got := serviceStatuses(map[tailcfg.ServiceName]tailcfg.ServiceDetails{
+		"svc:zeta": {
+			Name:  "svc:zeta",
+			Addrs: zetaIPs,
+		},
+		"svc:alpha": {
+			// Exercise the map-key fallback used for older or partial data.
+			Addrs: []netip.Addr{netip.MustParseAddr("100.100.1.1")},
+		},
+		"not-a-service": {
+			Addrs: []netip.Addr{netip.MustParseAddr("100.100.1.3")},
+		},
+	}, "example.ts.net")
+	if len(got) != 2 {
+		t.Fatalf("service statuses = %+v, want two valid services", got)
+	}
+	if got[0].Name != "svc:alpha" || got[0].DNSName != "alpha.example.ts.net" {
+		t.Fatalf("first service = %+v, want alpha MagicDNS target", got[0])
+	}
+	if got[1].Name != "svc:zeta" || got[1].DNSName != "zeta.example.ts.net" || len(got[1].TailscaleIPs) != 2 {
+		t.Fatalf("second service = %+v, want zeta dual-stack target", got[1])
+	}
+	zetaIPs[0] = netip.MustParseAddr("100.100.1.99")
+	if got[1].TailscaleIPs[0] == zetaIPs[0] {
+		t.Fatal("service status aliases upstream address storage")
+	}
+
+	withoutDNS := serviceStatuses(map[tailcfg.ServiceName]tailcfg.ServiceDetails{
+		"svc:alpha": {Name: "svc:alpha"},
+	}, "")
+	if len(withoutDNS) != 1 || withoutDNS[0].DNSName != "" {
+		t.Fatalf("service without MagicDNS suffix = %+v", withoutDNS)
+	}
+}

@@ -95,8 +95,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	tunName := fs.String("tun-name", defaultTUNName(), "host TUN interface name")
 	socketDir := fs.String("socket-dir", profilesocket.DefaultDir(), "directory for per-profile LocalAPI sockets")
 	socksAddr := fs.String("socks", "127.0.0.1:1080", "aggregate SOCKS5 listen address")
-	syntheticPool := fs.String("synthetic-pool", "", "IPv4 CIDR for effective peer and host NAT addresses (persisted; default "+defaultSyntheticPool+")")
-	syntheticPoolV6 := fs.String("synthetic-pool-v6", "", "IPv6 CIDR for effective peer and host NAT addresses (persisted; default "+defaultSyntheticPoolV6+")")
+	syntheticPool := fs.String("synthetic-pool", "", "IPv4 CIDR for effective peer/service and host NAT addresses (persisted; default "+defaultSyntheticPool+")")
+	syntheticPoolV6 := fs.String("synthetic-pool-v6", "", "IPv6 CIDR for effective peer/service and host NAT addresses (persisted; default "+defaultSyntheticPoolV6+")")
 	verbose := fs.Bool("verbose", false, "enable verbose per-profile tsnet logs")
 	logUpload := fs.Bool("log-upload", false, "opt in to remote per-profile logtail uploads")
 	logUploadURL := fs.String("log-upload-url", "", "replace the remote logtail upload base URL (requires -log-upload)")
@@ -476,15 +476,38 @@ func updateProfileMetadata(st *state.State, statuses []tailmixprofile.Status) {
 	}
 }
 
-func leaseNodes(statuses []tailmixprofile.Status) []effectiveip.Node {
+// reachableTarget is either a peer node or a Tailscale Service. Both kinds of
+// target receive the same effective-address, DNS, and packet-mapping treatment.
+type reachableTarget struct {
+	ID      string
+	DNSName string
+	IPs     []netip.Addr
+}
+
+func reachableTargets(status tailmixprofile.Status) []reachableTarget {
+	targets := make([]reachableTarget, 0, len(status.Peers)+len(status.Services))
+	for _, peer := range status.Peers {
+		targets = append(targets, reachableTarget{
+			ID: peer.NodeID, DNSName: peer.DNSName, IPs: peer.TailscaleIPs,
+		})
+	}
+	for _, service := range status.Services {
+		targets = append(targets, reachableTarget{
+			ID: service.Name, DNSName: service.DNSName, IPs: service.TailscaleIPs,
+		})
+	}
+	return targets
+}
+
+func leaseTargets(statuses []tailmixprofile.Status) []effectiveip.Node {
 	var nodes []effectiveip.Node
 	for _, ps := range statuses {
-		for _, peer := range ps.Peers {
-			if peer.NodeID == "" {
+		for _, target := range reachableTargets(ps) {
+			if target.ID == "" {
 				continue
 			}
-			for _, ip := range peer.TailscaleIPs {
-				nodes = append(nodes, effectiveip.Node{ProfileID: ps.ProfileID, NodeID: peer.NodeID, CanonicalIP: ip})
+			for _, ip := range target.IPs {
+				nodes = append(nodes, effectiveip.Node{ProfileID: ps.ProfileID, NodeID: target.ID, CanonicalIP: ip})
 			}
 		}
 	}
@@ -520,7 +543,7 @@ func leasesFromState(stLeases []state.EffectiveLease) []effectiveip.Lease {
 }
 
 func assignEffectiveIPs(st state.State, statuses []tailmixprofile.Status) (active, all []effectiveip.Lease, err error) {
-	nodes := leaseNodes(statuses)
+	nodes := leaseTargets(statuses)
 	existing := leasesFromState(st.Leases)
 	for _, family := range []struct {
 		name string
@@ -649,7 +672,7 @@ func tunDNSLiveConfig(st state.State, statuses []tailmixprofile.Status, leases [
 	byKey := make(map[effectiveip.NodeKey]netip.Addr, len(leases))
 	for _, lease := range leases {
 		if existing, ok := byKey[lease.NodeKey]; ok && existing != lease.EffectiveIP {
-			return tailmixdns.LiveConfig{}, fmt.Errorf("node %+v has conflicting effective IP leases %v and %v", lease.NodeKey, existing, lease.EffectiveIP)
+			return tailmixdns.LiveConfig{}, fmt.Errorf("target %+v has conflicting effective IP leases %v and %v", lease.NodeKey, existing, lease.EffectiveIP)
 		}
 		byKey[lease.NodeKey] = lease.EffectiveIP
 	}
@@ -695,8 +718,8 @@ func tunDNSLiveConfig(st state.State, statuses []tailmixprofile.Status, leases [
 		if err := addRecords(ps.SelfNodeID, ps.SelfDNSName, ps.SelfIPs, true); err != nil {
 			return tailmixdns.LiveConfig{}, err
 		}
-		for _, peer := range ps.Peers {
-			if err := addRecords(peer.NodeID, peer.DNSName, peer.TailscaleIPs, false); err != nil {
+		for _, target := range reachableTargets(ps) {
+			if err := addRecords(target.ID, target.DNSName, target.IPs, false); err != nil {
 				return tailmixdns.LiveConfig{}, err
 			}
 		}
@@ -823,7 +846,7 @@ func tunConfigWithPolicy(st state.State, statuses []tailmixprofile.Status, lease
 	byKey := map[effectiveip.NodeKey]netip.Addr{}
 	for _, lease := range leases {
 		if existing, ok := byKey[lease.NodeKey]; ok && existing != lease.EffectiveIP {
-			return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("node %+v has conflicting effective IP leases %v and %v", lease.NodeKey, existing, lease.EffectiveIP)
+			return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("target %+v has conflicting effective IP leases %v and %v", lease.NodeKey, existing, lease.EffectiveIP)
 		}
 		byKey[lease.NodeKey] = lease.EffectiveIP
 	}
@@ -848,16 +871,16 @@ func tunConfigWithPolicy(st state.State, statuses []tailmixprofile.Status, lease
 			}
 			table.Sources[sourceKey] = packetmap.Source{HostIP: hostIP, CanonicalIP: canonical}
 		}
-		for _, peer := range ps.Peers {
-			for _, canonical := range peer.TailscaleIPs {
-				key := effectiveip.NodeKey{ProfileID: ps.ProfileID, NodeID: peer.NodeID, CanonicalIP: canonical}
+		for _, target := range reachableTargets(ps) {
+			for _, canonical := range target.IPs {
+				key := effectiveip.NodeKey{ProfileID: ps.ProfileID, NodeID: target.ID, CanonicalIP: canonical}
 				effective, ok := byKey[key]
 				if !ok {
-					return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q peer %q IP %v has no effective lease", ps.ProfileID, peer.NodeID, canonical)
+					return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q target %q IP %v has no effective lease", ps.ProfileID, target.ID, canonical)
 				}
 				effectivePrefix := netip.PrefixFrom(effective, effective.BitLen())
 				if existing, ok := table.Destinations.Get(effectivePrefix); ok && (existing.ProfileID != ps.ProfileID || existing.CanonicalIP != canonical) {
-					return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("effective destination %v maps to multiple peers", effective)
+					return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("effective destination %v maps to multiple targets", effective)
 				}
 				table.Destinations.Insert(effectivePrefix, packetmap.Destination{ProfileID: ps.ProfileID, CanonicalIP: canonical})
 				inbound := table.InboundPeers[ps.ProfileID]
@@ -867,12 +890,12 @@ func tunConfigWithPolicy(st state.State, statuses []tailmixprofile.Status, lease
 				}
 				canonicalPrefix := netip.PrefixFrom(canonical, canonical.BitLen())
 				if existing, ok := inbound.Get(canonicalPrefix); ok && existing != effective {
-					return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q canonical peer IP %v maps to multiple effective IPs", ps.ProfileID, canonical)
+					return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q canonical target IP %v maps to multiple effective IPs", ps.ProfileID, canonical)
 				}
 				inbound.Insert(canonicalPrefix, effective)
 				source, ok := table.Sources[packetmap.SourceKey{ProfileID: ps.ProfileID, IPv6: canonical.Is6()}]
 				if !ok {
-					return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q peer %v has no matching %s self address", ps.ProfileID, canonical, ipFamily(canonical))
+					return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q target %v has no matching %s self address", ps.ProfileID, canonical, ipFamily(canonical))
 				}
 				hostCfg.Routes = append(hostCfg.Routes, hosttun.Route{
 					Destination: effectivePrefix,
@@ -935,7 +958,7 @@ func tunConfigWithPolicy(st state.State, statuses []tailmixprofile.Status, lease
 		}
 	}
 	if destination, ok := table.Destinations.Lookup(serviceIP); ok {
-		return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q effective peer IP conflicts with MagicDNS service IP %v", destination.ProfileID, serviceIP)
+		return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q effective target IP conflicts with MagicDNS service IP %v", destination.ProfileID, serviceIP)
 	}
 	if !st.NATIP.IsValid() {
 		return packetmap.Table{}, hosttun.Config{}, errors.New("host IPv4 NAT address is unavailable")

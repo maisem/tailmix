@@ -211,7 +211,7 @@ func TestEnsureNATIPsSkipsAndMigratesPrefixBase(t *testing.T) {
 	}
 }
 
-func TestLeaseNodesIncludesPeersInStableOrder(t *testing.T) {
+func TestLeaseTargetsIncludesPeersAndServicesInStableOrder(t *testing.T) {
 	statuses := []tailmixprofile.Status{{
 		ProfileID:  "work",
 		SelfNodeID: "self",
@@ -223,11 +223,16 @@ func TestLeaseNodesIncludesPeersInStableOrder(t *testing.T) {
 			NodeID:       "peer-a",
 			TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.1")},
 		}},
+		Services: []tailmixprofile.ServiceStatus{{
+			Name:         "svc:api",
+			TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.100.0.1")},
+		}},
 	}}
-	got := leaseNodes(statuses)
+	got := leaseTargets(statuses)
 	want := []effectiveip.Node{
 		{ProfileID: "work", NodeID: "peer-a", CanonicalIP: netip.MustParseAddr("100.64.0.1")},
 		{ProfileID: "work", NodeID: "peer-b", CanonicalIP: netip.MustParseAddr("100.64.0.2")},
+		{ProfileID: "work", NodeID: "svc:api", CanonicalIP: netip.MustParseAddr("100.100.0.1")},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("node count = %d, want %d: %+v", len(got), len(want), got)
@@ -452,6 +457,107 @@ func TestTunDNSConfigUsesEffectiveAddresses(t *testing.T) {
 	}
 	if !hasDNSRecord(records, "tailmix.home.ts.net", st.NATIP) || !hasDNSRecord(records, "tailmix.work.ts.net", st.NATIP) {
 		t.Fatalf("self MagicDNS records do not point at shared NAT IP %v: %v", st.NATIP, records)
+	}
+}
+
+func TestTUNPlanTreatsServicesLikeNodesAcrossProfiles(t *testing.T) {
+	canonicalV4 := netip.MustParseAddr("100.100.1.10")
+	canonicalV6 := netip.MustParseAddr("fd7a:115c:a1e0::110")
+	statuses := []tailmixprofile.Status{
+		{
+			ProfileID:      "home",
+			MagicDNSSuffix: "home.ts.net",
+			SelfNodeID:     "home-self",
+			SelfIPs: []netip.Addr{
+				netip.MustParseAddr("100.64.0.1"),
+				netip.MustParseAddr("fd7a:115c:a1e0::1"),
+			},
+			Services: []tailmixprofile.ServiceStatus{{
+				Name:         "svc:api",
+				DNSName:      "api.home.ts.net",
+				TailscaleIPs: []netip.Addr{canonicalV4, canonicalV6},
+			}},
+		},
+		{
+			ProfileID:      "work",
+			MagicDNSSuffix: "work.ts.net",
+			SelfNodeID:     "work-self",
+			SelfIPs: []netip.Addr{
+				netip.MustParseAddr("100.64.0.2"),
+				netip.MustParseAddr("fd7a:115c:a1e0::2"),
+			},
+			Services: []tailmixprofile.ServiceStatus{{
+				Name:         "svc:api",
+				DNSName:      "api.work.ts.net",
+				TailscaleIPs: []netip.Addr{canonicalV4, canonicalV6},
+			}},
+		},
+	}
+	plan, err := buildTUNPlan(state.State{
+		SyntheticPool:   "10.250.0.0/24",
+		SyntheticPoolV6: "fd6d:6e65:7400::/120",
+	}, statuses)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.ActiveLeases) != 4 || plan.Table.Destinations.Size() != 4 {
+		t.Fatalf("service plan = leases %v destinations %v", plan.ActiveLeases, plan.Table.Destinations)
+	}
+
+	effective := map[string]map[netip.Addr]netip.Addr{}
+	for _, lease := range plan.ActiveLeases {
+		if lease.NodeKey.NodeID != "svc:api" {
+			t.Fatalf("service lease has identity %q, want svc:api", lease.NodeKey.NodeID)
+		}
+		if effective[lease.NodeKey.ProfileID] == nil {
+			effective[lease.NodeKey.ProfileID] = map[netip.Addr]netip.Addr{}
+		}
+		effective[lease.NodeKey.ProfileID][lease.NodeKey.CanonicalIP] = lease.EffectiveIP
+	}
+	for _, canonical := range []netip.Addr{canonicalV4, canonicalV6} {
+		homeIP := effective["home"][canonical]
+		workIP := effective["work"][canonical]
+		if !homeIP.IsValid() || !workIP.IsValid() || homeIP == workIP {
+			t.Fatalf("colliding service IP %v mapped to home=%v work=%v", canonical, homeIP, workIP)
+		}
+		if !hasDNSRecord(plan.Records, "api.home.ts.net", homeIP) ||
+			!hasDNSRecord(plan.Records, "api.work.ts.net", workIP) {
+			t.Fatalf("service DNS records = %v, want profile-specific effective addresses", plan.Records)
+		}
+		for profileID, want := range map[string]netip.Addr{"home": homeIP, "work": workIP} {
+			inbound := plan.Table.InboundPeers[profileID]
+			got, ok := inbound.Get(netip.PrefixFrom(canonical, canonical.BitLen()))
+			if !ok || got != want {
+				t.Fatalf("%s inbound service mapping for %v = %v, %v; want %v", profileID, canonical, got, ok, want)
+			}
+		}
+	}
+
+	withoutServices := append([]tailmixprofile.Status(nil), statuses...)
+	for i := range withoutServices {
+		withoutServices[i].Services = nil
+	}
+	removed, err := buildTUNPlan(plan.State, withoutServices)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed.Table.Destinations.Size() != 0 ||
+		hasDNSRecord(removed.Records, "api.home.ts.net", effective["home"][canonicalV4]) ||
+		hasDNSRecord(removed.Records, "api.work.ts.net", effective["work"][canonicalV4]) {
+		t.Fatalf("service remained active after removal: destinations=%v records=%v", removed.Table.Destinations, removed.Records)
+	}
+	if len(removed.State.Leases) != 4 {
+		t.Fatalf("removed service leases were not retained: %v", removed.State.Leases)
+	}
+	restored, err := buildTUNPlan(removed.State, statuses)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, lease := range restored.ActiveLeases {
+		want := effective[lease.NodeKey.ProfileID][lease.NodeKey.CanonicalIP]
+		if lease.EffectiveIP != want {
+			t.Fatalf("restored service lease %+v changed from %v", lease, want)
+		}
 	}
 }
 

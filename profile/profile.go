@@ -36,6 +36,7 @@ type Status struct {
 	SelfDNSName     string
 	SelfIPs         []netip.Addr
 	Peers           []PeerStatus
+	Services        []ServiceStatus
 	PeerCount       int
 	ShieldsUp       bool
 	AvailableRoutes []RouteStatus
@@ -53,6 +54,14 @@ type PeerStatus struct {
 	ExitNode       bool
 	ExitNodeOption bool
 	Location       *PeerLocation
+}
+
+// ServiceStatus describes a Tailscale Service that is visible to this profile.
+// Name is the stable, tailnet-scoped service name, including its "svc:" prefix.
+type ServiceStatus struct {
+	Name         string
+	DNSName      string
+	TailscaleIPs []netip.Addr
 }
 
 type PeerLocation struct {

@@ -225,8 +225,10 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 	}
 	var dnsRoutes []DNSRouteStatus
 	var searchDomains []string
+	var services []ServiceStatus
 	if backend, err := e.LocalBackend(); err == nil {
 		if nm := backend.NetMapNoPeers(); nm != nil {
+			services = serviceStatuses(nm.Services(), suffix)
 			if suffix != "" && nm.DNS.Proxied {
 				dnsRoutes = append(dnsRoutes, DNSRouteStatus{Domain: normalizeDNSRoute(suffix), Source: "magicdns"})
 			}
@@ -280,6 +282,7 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		SelfDNSName:     selfDNSName,
 		SelfIPs:         ips,
 		Peers:           peers,
+		Services:        services,
 		PeerCount:       len(peers),
 		ShieldsUp:       shieldsUp,
 		AvailableRoutes: availableRoutes,
@@ -288,6 +291,35 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		RouteAll:        routeAll,
 		ExitNodeID:      exitNodeID,
 	}, nil
+}
+
+func serviceStatuses(services map[tailcfg.ServiceName]tailcfg.ServiceDetails, magicDNSSuffix string) []ServiceStatus {
+	result := make([]ServiceStatus, 0, len(services))
+	for mapName, service := range services {
+		name := service.Name
+		if name == "" {
+			name = mapName
+		}
+		if name.Validate() != nil {
+			continue
+		}
+		dnsName := ""
+		if magicDNSSuffix != "" {
+			dnsName = normalizeDNSRoute(name.WithoutPrefix() + "." + magicDNSSuffix)
+		}
+		result = append(result, ServiceStatus{
+			Name:         name.String(),
+			DNSName:      dnsName,
+			TailscaleIPs: append([]netip.Addr(nil), service.Addrs...),
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Name != result[j].Name {
+			return result[i].Name < result[j].Name
+		}
+		return result[i].DNSName < result[j].DNSName
+	})
+	return result
 }
 
 func peerLocation(location *tailcfg.Location) *PeerLocation {

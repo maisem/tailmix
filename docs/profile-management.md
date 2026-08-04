@@ -832,11 +832,12 @@ bringing the profile up or blocking.
 
 Aggregate status must return a result per profile, including a per-profile
 error, instead of failing the entire snapshot when one profile is unhealthy.
-Capability readiness is evaluated separately: direct peer and subnet routing
-need a usable netmap and self address, MagicDNS needs node data and a suffix,
-and split DNS needs a usable netmap DNS configuration. A profile without one
-capability can still contribute the others. A profile in `needs-login` or
-`error` remains inspectable and does not take down healthy profiles.
+Capability readiness is evaluated separately: direct peer, Tailscale Service,
+and subnet routing need a usable netmap and self address, MagicDNS needs target
+data and a suffix, and split DNS needs a usable netmap DNS configuration. A
+profile without one capability can still contribute the others. A profile in
+`needs-login` or `error` remains inspectable and does not take down healthy
+profiles.
 
 The passive snapshot must include approved primary subnet routes and the
 netmap's DNS route map and resolver descriptors. These observations are not
@@ -901,7 +902,7 @@ advertisements are followed without changing persisted state.
 The installed prefix table records a policy tier and route kind:
 
 ```text
-effective peer address -> profile + canonical peer address
+effective peer/Service address -> profile + canonical target address
 accepted subnet prefix -> profile, destination preserved
 ```
 
@@ -948,10 +949,10 @@ The current SOCKS router is immutable. The SOCKS server should hold an atomic
 pointer to a newly validated router snapshot. New connections use the latest
 snapshot; established connections continue through their selected engine until
 they close or that profile is stopped. IP destinations consult the same
-effective-peer and bound-prefix table as TUN mode. Domain destinations use the
-DNS plan for resolution, then the resolved address must still select an
-effective peer, installed IP binding, or accept-all import; a DNS binding alone
-does not authorize an application route.
+effective-target and bound-prefix table as TUN mode. Domain destinations use
+the DNS plan for resolution, then the resolved address must still select an
+effective peer or Service, installed IP binding, or accept-all import; a DNS
+binding alone does not authorize an application route.
 
 ### Aggregate reconciliation
 
@@ -962,7 +963,7 @@ immutable aggregate plan from:
 persisted desired state + passive healthy profile snapshots + retained leases
 ```
 
-The plan includes effective-IP leases, direct-peer and bound-subnet packet
+The plan includes effective-IP leases, direct-target and bound-subnet packet
 mappings, host routes, DNS bindings and profile forwarders, records, installed
 search domains, and the SOCKS routing snapshot. It is fully validated before
 any live component changes.

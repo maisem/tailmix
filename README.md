@@ -158,10 +158,11 @@ commands that change daemon-managed state require root.
 ## How it works
 
 `tailmixd` runs one embedded Tailscale node per profile and connects them to one
-host TUN. It gives overlapping tailnet addresses stable local addresses, then
-uses your route and DNS bindings to choose the right profile. `tailmix` changes
-that policy through a local socket, so adding profiles or changing bindings
-does not restart unrelated profiles.
+host TUN. It gives overlapping node and Tailscale Service addresses stable
+local addresses, then uses your route and DNS bindings to choose the right
+profile. Service MagicDNS names resolve to those effective addresses just like
+node names. `tailmix` changes policy through a local socket, so adding profiles
+or changing bindings does not restart unrelated profiles.
 
 One exit node can be selected across all profiles. Direct peer and accepted
 subnet routes remain profile-specific and take precedence over that default.

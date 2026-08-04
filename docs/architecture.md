@@ -13,9 +13,10 @@ macOS or Linux.
 ## System overview
 
 There is no active-tailnet switch. The OS sees one interface and a
-collision-free set of effective peer addresses. tailmix selects a profile for
-each packet; upstream Tailscale continues to own authentication, netmaps,
-WireGuard, DERP, ACL-visible identity, and transport behavior.
+collision-free set of effective peer and Tailscale Service addresses. tailmix
+selects a profile for each packet; upstream Tailscale continues to own
+authentication, netmaps, WireGuard, DERP, ACL-visible identity, and transport
+behavior.
 
 ```mermaid
 flowchart LR
@@ -65,11 +66,11 @@ Three invariants keep the profiles isolated:
 
 1. **One engine, one identity.** Every profile has its own machine keys, node
    keys, login session, netmap, preferences, and state directory.
-2. **No canonical peer addresses on the host.** Direct peers use effective
-   addresses. Canonical CGNAT and ULA addresses appear only after profile
-   selection.
+2. **No canonical target addresses on the host.** Direct peers and Tailscale
+   Services use effective addresses. Canonical CGNAT and ULA addresses appear
+   only after profile selection.
 3. **DNS returns effective addresses.** Local MagicDNS answers do not expose a
-   direct peer's canonical address to applications.
+   peer's or Service's canonical address to applications.
 
 ## Ownership boundaries
 
@@ -83,7 +84,7 @@ remaining engine, LocalAPI, credential, and transport behavior.
 | Concern | tailmix owns | Profile engine / upstream Tailscale owns |
 | --- | --- | --- |
 | Host networking | Shared TUN, host addresses, selected routes | No direct host interface |
-| Addressing | Effective leases, host NAT addresses, profile selection, SNAT/DNAT | Canonical self and peer addresses from the netmap |
+| Addressing | Effective leases, host NAT addresses, profile selection, SNAT/DNAT | Canonical self, peer, and Service addresses from the netmap |
 | Route policy | Explicit bindings, accept-all imports, ambiguity handling | Advertised route and resolver data |
 | Control plane | Profile lifecycle and aggregate reconciliation | Login, coordination, netmap, peer updates, preferences |
 | LocalAPI | Profile selection and one socket per profile | `ipnserver`, peer credentials, operator permissions |
@@ -98,26 +99,28 @@ would for an ordinary Tailscale node.
 ## Address model
 
 Canonical addresses can collide across tailnets. tailmix leases a unique
-effective address to each `(profile, node, canonical IP)` tuple and reserves one
-host NAT address per active address family.
+effective address to each `(profile, target, canonical IP)` tuple and reserves
+one host NAT address per active address family. A target is either a peer node
+or a Tailscale Service.
 
 | Address | Visible where | Purpose | Lifetime |
 | --- | --- | --- | --- |
-| Effective peer IP | Host DNS, routes, sockets, shared TUN | Collision-free local dial target and profile lookup key | Persisted and retained when a peer disappears |
+| Effective target IP | Host DNS, routes, sockets, shared TUN | Collision-free node or Service dial target and profile lookup key | Persisted and retained when a target disappears |
 | Host NAT IP | Host interface and packet translation | Stable local source/destination per address family | Persisted with the selected pool |
-| Canonical Tailscale IP | One profile engine and its tailnet | Real Tailscale self/peer addressing and ACL-visible traffic | Assigned by that tailnet |
+| Canonical Tailscale IP | One profile engine and its tailnet | Real Tailscale self, peer, or Service addressing and ACL-visible traffic | Assigned by that tailnet |
 | `100.100.100.100` | Host DNS configuration and shared TUN | Tailscale-defined MagicDNS service address | Fixed and never allocated from an effective pool |
 | Subnet destination IP | Host routes and selected profile | Original address behind an advertised subnet router | Not translated as a peer address |
 
 The lease key is:
 
 ```text
-(profile ID, stable node ID, canonical Tailscale IP)
+(profile ID, stable node or Service ID, canonical Tailscale IP)
     -> persisted effective IP
 ```
 
 Including the profile ID distinguishes identical canonical addresses in two
-tailnets. Including the canonical IP gives IPv4 and IPv6 independent leases.
+tailnets. Node stable IDs and `svc:` names identify their respective targets.
+Including the canonical IP gives IPv4 and IPv6 independent leases.
 
 The default pools are:
 
@@ -130,19 +133,20 @@ Pool selection is persisted. Changing one family retires that family's leases
 and host NAT address, then allocates new values. A pool must not overlap other
 local routes.
 
-### Direct-peer translation example
+### Direct-target translation example
 
 | Stage | Source | Destination |
 | --- | --- | --- |
-| Host emits | `100.127.0.1` host NAT | `100.127.0.8` effective peer |
-| work engine receives | `100.64.0.1` canonical self | `100.64.0.42` canonical peer |
+| Host emits | `100.127.0.1` host NAT | `100.127.0.8` effective target |
+| work engine receives | `100.64.0.1` canonical self | `100.64.0.42` canonical target |
 | work engine replies | `100.64.0.42` | `100.64.0.1` |
 | Host receives | `100.127.0.8` | `100.127.0.1` |
 
 The values are illustrative. tailmix leaves the pool's prefix base unassigned,
 reserves the first available non-base address for host NAT, excludes it from
-peer allocation, and selects it as the preferred source for host TUN routes.
-Host routes are installed only for active peers and selected subnet routes.
+target allocation, and selects it as the preferred source for host TUN routes.
+Host routes are installed only for active peers, visible Services, and selected
+subnet routes.
 
 ## Route policy
 
@@ -200,18 +204,19 @@ short-name expansion separate from resolver selection.
 
 ## Packet path
 
-Routing uses immutable BART tables. Direct peers occupy exact `/32` or `/128`
-entries; selected subnet routes use longest-prefix matching.
+Routing uses immutable BART tables. Direct peers and Tailscale Services occupy
+exact `/32` or `/128` entries; selected subnet routes use longest-prefix
+matching.
 
 ### Outbound: host to tailnet
 
 1. The OS sends a packet through the shared TUN.
 2. The mux offers traffic for `100.100.100.100` to the local DNS service.
-3. A direct-peer entry or selected subnet route chooses the profile.
+3. A direct-target entry or selected subnet route chooses the profile.
 4. The source table returns that profile's canonical self address.
 5. The mapper rewrites the source in place and updates checksums.
-6. For a direct peer, it also replaces the effective destination with the
-   canonical peer address. A subnet destination is preserved.
+6. For a direct peer or Service, it also replaces the effective destination
+   with the canonical target address. A subnet destination is preserved.
 7. The packet crosses the selected `ChanTUN`.
 8. Tailscale encrypts and sends it directly or through DERP.
 
@@ -219,8 +224,8 @@ entries; selected subnet routes use longest-prefix matching.
 
 1. A profile engine decrypts a packet and writes it to its `ChanTUN`.
 2. The producing channel identifies the profile.
-3. A canonical direct-peer source becomes its effective source. A subnet source
-   must match an active route pinned to that same profile.
+3. A canonical direct-peer or Service source becomes its effective source. A
+   subnet source must match an active route pinned to that same profile.
 4. The canonical self destination becomes the host NAT address.
 5. Checksums are updated and the packet is written to the shared host TUN.
 6. The OS delivers it to a local socket; normal host firewall behavior applies.
@@ -233,14 +238,14 @@ sequenceDiagram
     participant Engine as Selected profile
     participant Peer as Tailnet peer/router
 
-    App->>TUN: effective peer or selected subnet destination
+    App->>TUN: effective peer/Service or selected subnet destination
     TUN->>Mux: host packet
-    Mux->>Mux: select profile + SNAT<br/>translate direct-peer destination
+    Mux->>Mux: select profile + SNAT<br/>translate direct-target destination
     Mux->>Engine: canonical packet
     Engine->>Peer: WireGuard via direct path or DERP
     Peer-->>Engine: encrypted reply
     Engine-->>Mux: decrypted canonical packet
-    Mux-->>Mux: validate profile + DNAT<br/>translate direct-peer source
+    Mux-->>Mux: validate profile + DNAT<br/>translate direct-target source
     Mux-->>TUN: host-visible packet
     TUN-->>App: reply
 ```
@@ -398,7 +403,7 @@ and does not install host routes or DNS configuration.
 | [`hosttun`](../hosttun/hosttun.go) | Shared host interface and macOS/Linux route reconciliation |
 | [`tunmux`](../tunmux/mux.go) | Bidirectional packet pumps and profile channel TUNs |
 | [`packetmap`](../packetmap/packetmap.go) | BART lookups and in-place address/checksum translation |
-| [`effectiveip`](../effectiveip/effectiveip.go) | Stable, family-aware peer lease allocation |
+| [`effectiveip`](../effectiveip/effectiveip.go) | Stable, family-aware peer and Service lease allocation |
 | [`dns`](../dns/service.go) | Aggregate DNS service, OS integration, and profile forwarders |
 | [`state`](../state/state.go) | Persistent schema and atomic JSON store |
 | [`socksproxy`](../socksproxy/router.go) | Userspace-mode profile selection and TCP forwarding |
@@ -409,6 +414,7 @@ and does not install host routes or DNS configuration.
 Implemented:
 
 - concurrent direct-peer reachability across multiple profiles;
+- concurrent Tailscale Service reachability across multiple profiles;
 - stable effective IPv4 and IPv6 leases;
 - shared host SNAT/DNAT and selected subnet routes;
 - live profile add, enable, disable, restart, rename, and removal;

@@ -50,16 +50,17 @@ Each `tsnet` profile engine owns:
 - Tailnet transport behavior for that profile.
 - Native LocalAPI behavior, credentials, and operator permissions.
 
-Outbound packet flow supports direct peers and accepted subnets:
+Outbound packet flow supports direct peers, Tailscale Services, and accepted
+subnets:
 
-1. A local process sends traffic to an effective peer IP or an explicitly
-   accepted subnet destination.
+1. A local process sends traffic to an effective peer or Service IP, or an
+   explicitly accepted subnet destination.
 2. The OS routes that traffic to the shared daemon-owned TUN using the shared
    host NAT address as its source.
 3. A BART longest-prefix-match table maps the destination to a profile and
    route kind.
 4. The daemon SNATs the shared host NAT address to that profile's canonical
-   self address. It translates a direct peer's effective destination to its
+   self address. It translates a direct target's effective destination to its
    canonical address, but preserves a subnet destination.
 5. The packet enters the selected `tsnet` engine's packet path.
 6. The selected profile engine sends the packet through its normal Tailscale transport.
@@ -67,9 +68,9 @@ Outbound packet flow supports direct peers and accepted subnets:
 Inbound packet flow:
 
 1. A profile engine receives canonical tailnet traffic for its local profile identity.
-2. A per-profile BART table maps a canonical peer source to its stable
-   effective address. An accepted subnet source remains unchanged and is
-   admitted only if longest-prefix match pins it to the receiving profile.
+2. A per-profile BART table maps a canonical peer or Service source to its
+   stable effective address. An accepted subnet source remains unchanged and
+   is admitted only if longest-prefix match pins it to the receiving profile.
    The daemon DNATs the canonical self destination to the shared host NAT
    address.
 3. The packet is injected toward the host through the shared TUN/listener path.
@@ -147,7 +148,12 @@ Allocation failures are reported per peer/profile. A peer whose effective IP can
 
 Tailscale policy is evaluated on the inbound path by the receiving node/profile.
 
-Effective IPs do not create a new authorization namespace. They only select which profile and canonical peer a local packet should use. Before a packet enters a profile engine, the daemon maps the effective local addresses to the canonical addresses expected in that tailnet. The receiving node evaluates policy against canonical tailnet identity and profile-local policy state.
+Effective IPs do not create a new authorization namespace. They only select
+which profile and canonical peer or Service a local packet should use. Before a
+packet enters a profile engine, the daemon maps the effective local addresses
+to the canonical addresses expected in that tailnet. The receiving node
+evaluates policy against canonical tailnet identity and profile-local policy
+state.
 
 Consequences:
 
@@ -201,7 +207,7 @@ Rules:
   tailmix does not pick a profile by priority.
 - Configured domains without a current DNS route remain desired but
   are not installed.
-- DNS answers for node names return effective IPs.
+- DNS answers for node and Tailscale Service names return effective IPs.
 - Addresses returned by split DNS follow ordinary host IP routing. A
   destination that must traverse a tailnet needs a separate IP route policy;
   DNS bindings do not create application or app-connector routes.
@@ -238,8 +244,10 @@ profile ID.
 
 Rules:
 
-- All active tailnet node peers are reachable concurrently through effective IPs.
-- Route lookup maps each effective IP to exactly one profile and canonical node.
+- All active tailnet node peers and visible Tailscale Services are reachable
+  concurrently through effective IPs.
+- Route lookup maps each effective IP to exactly one profile and canonical
+  node or Service.
 - A subnet binding is installed only while the selected profile reports an
   approved primary advertised route equal to or covering the requested prefix.
   A narrower binding can accept only part of an advertisement.
@@ -402,6 +410,7 @@ Core contract tests:
 - Devices in both tailnets are reachable at the same time without switching.
 - Every peer receives a stable address from the configured effective pool.
 - Same canonical node IPs in different tailnets receive stable, distinct effective IPs.
+- Same canonical Service VIPs in different tailnets receive stable, distinct effective IPs.
 - Effective IPs survive daemon restart.
 - Effective IPs do not leak into profile engine identity, peer identity, netmap, or ACL-visible packet metadata.
 - Inbound policy remains evaluated by the receiving profile/tailnet.
