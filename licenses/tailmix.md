@@ -78,8 +78,8 @@ package can appear more than once when it contains multiple license files.
 - [k8s.io/client-go/util/homedir](https://pkg.go.dev/k8s.io/client-go/util/homedir) ([Apache-2.0](https://github.com/kubernetes/client-go/blob/v0.34.0/LICENSE))
 - [sigs.k8s.io/yaml](https://pkg.go.dev/sigs.k8s.io/yaml) ([Apache-2.0](https://github.com/kubernetes-sigs/yaml/blob/v1.6.0/LICENSE))
 - [software.sslmate.com/src/go-pkcs12](https://pkg.go.dev/software.sslmate.com/src/go-pkcs12) ([BSD-3-Clause](https://github.com/SSLMate/go-pkcs12/blob/v0.4.0/LICENSE))
-- [tailscale.com](https://pkg.go.dev/tailscale.com) ([BSD-3-Clause](https://github.com/tailscale/tailscale/blob/v1.102.1/LICENSE))
-- [tailscale.com/tempfork/spf13/cobra](https://pkg.go.dev/tailscale.com/tempfork/spf13/cobra) ([Apache-2.0](https://github.com/tailscale/tailscale/blob/v1.102.1/tempfork/spf13/cobra/LICENSE.txt))
+- [tailscale.com](https://pkg.go.dev/tailscale.com) ([BSD-3-Clause](https://github.com/tailscale/tailscale/blob/v1.102.2/LICENSE))
+- [tailscale.com/tempfork/spf13/cobra](https://pkg.go.dev/tailscale.com/tempfork/spf13/cobra) ([Apache-2.0](https://github.com/tailscale/tailscale/blob/v1.102.2/tempfork/spf13/cobra/LICENSE.txt))
 
 ## Linux (amd64)
 
@@ -167,5 +167,5 @@ package can appear more than once when it contains multiple license files.
 - [k8s.io/client-go/util/homedir](https://pkg.go.dev/k8s.io/client-go/util/homedir) ([Apache-2.0](https://github.com/kubernetes/client-go/blob/v0.34.0/LICENSE))
 - [sigs.k8s.io/yaml](https://pkg.go.dev/sigs.k8s.io/yaml) ([Apache-2.0](https://github.com/kubernetes-sigs/yaml/blob/v1.6.0/LICENSE))
 - [software.sslmate.com/src/go-pkcs12](https://pkg.go.dev/software.sslmate.com/src/go-pkcs12) ([BSD-3-Clause](https://github.com/SSLMate/go-pkcs12/blob/v0.4.0/LICENSE))
-- [tailscale.com](https://pkg.go.dev/tailscale.com) ([BSD-3-Clause](https://github.com/tailscale/tailscale/blob/v1.102.1/LICENSE))
-- [tailscale.com/tempfork/spf13/cobra](https://pkg.go.dev/tailscale.com/tempfork/spf13/cobra) ([Apache-2.0](https://github.com/tailscale/tailscale/blob/v1.102.1/tempfork/spf13/cobra/LICENSE.txt))
+- [tailscale.com](https://pkg.go.dev/tailscale.com) ([BSD-3-Clause](https://github.com/tailscale/tailscale/blob/v1.102.2/LICENSE))
+- [tailscale.com/tempfork/spf13/cobra](https://pkg.go.dev/tailscale.com/tempfork/spf13/cobra) ([Apache-2.0](https://github.com/tailscale/tailscale/blob/v1.102.2/tempfork/spf13/cobra/LICENSE.txt))
