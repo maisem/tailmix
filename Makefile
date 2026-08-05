@@ -8,7 +8,7 @@ SYSTEMCTL ?= systemctl
 SYSTEMD_UNIT_DIR ?= $(PREFIX)/lib/systemd/system
 SYSTEMD_UNIT ?= tailmixd.service
 
-.PHONY: check install install-systemd install-test licenses licenses-check
+.PHONY: check install install-systemd install-test licenses licenses-check release-check
 
 check:
 	$(GO) test ./...
@@ -45,3 +45,6 @@ licenses:
 
 licenses-check:
 	./scripts/licenses.sh check
+
+release-check: check
+	$(GO) run github.com/goreleaser/goreleaser/v2@v2.12.7 release --snapshot --clean --parallelism 2

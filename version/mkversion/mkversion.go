@@ -31,6 +31,20 @@ func InfoFrom(dir string) (Info, error) {
 	if err != nil {
 		return Info{}, fmt.Errorf("getting Git hash: %w", err)
 	}
+	releaseTags, err := gitOutput(root, "tag", "--points-at", hash)
+	if err != nil {
+		return Info{}, fmt.Errorf("finding release tag: %w", err)
+	}
+	release := highestVersion(strings.Fields(releaseTags))
+	if release != "" {
+		status, err := gitOutput(root, "status", "--porcelain", "--untracked-files=normal")
+		if err != nil {
+			return Info{}, fmt.Errorf("checking worktree status: %w", err)
+		}
+		if status == "" {
+			return derive(targetVersion{}, 0, hash, release)
+		}
+	}
 	baseHash, err := gitOutput(root, "rev-list", "--max-count=1", hash, "--", versionFile)
 	if err != nil {
 		return Info{}, fmt.Errorf("finding last %s change: %w", versionFile, err)
@@ -54,29 +68,17 @@ func InfoFrom(dir string) (Info, error) {
 	if err != nil {
 		return Info{}, fmt.Errorf("parsing change count %q: %w", rawCount, err)
 	}
-	releaseTags, err := gitOutput(root, "tag", "--points-at", hash, "--list", target.releaseTag())
-	if err != nil {
-		return Info{}, fmt.Errorf("finding release tag: %w", err)
-	}
-	released := releaseTags == target.releaseTag()
-	if released {
-		status, err := gitOutput(root, "status", "--porcelain", "--untracked-files=normal")
-		if err != nil {
-			return Info{}, fmt.Errorf("checking worktree status: %w", err)
-		}
-		released = status == ""
-	}
-	return derive(target, changeCount, hash, released)
+	return derive(target, changeCount, hash, "")
 }
 
-func derive(target targetVersion, changeCount int, hash string, released bool) (Info, error) {
+func derive(target targetVersion, changeCount int, hash, release string) (Info, error) {
 	if changeCount < 0 {
 		return Info{}, fmt.Errorf("change count must not be negative")
 	}
 
 	short := target.version
-	if released {
-		short = target.core
+	if release != "" {
+		short = release
 	} else if changeCount != 0 {
 		short += "." + strconv.Itoa(changeCount)
 	}
@@ -94,7 +96,6 @@ func derive(target targetVersion, changeCount int, hash string, released bool) (
 
 type targetVersion struct {
 	version string
-	core    string
 }
 
 func parseVersion(raw string) (targetVersion, error) {
@@ -111,12 +112,21 @@ func parseVersion(raw string) (targetVersion, error) {
 	}
 	return targetVersion{
 		version: version,
-		core:    strings.TrimSuffix(version, prerelease),
 	}, nil
 }
 
-func (target targetVersion) releaseTag() string {
-	return target.core
+func highestVersion(tags []string) string {
+	var highest string
+	for _, tag := range tags {
+		if !semver.IsValid(tag) {
+			continue
+		}
+		comparison := semver.Compare(tag, highest)
+		if highest == "" || comparison > 0 || comparison == 0 && tag > highest {
+			highest = tag
+		}
+	}
+	return highest
 }
 
 func shortHash(hash string) string {

@@ -48,26 +48,42 @@ different systemctl command. See
 
 ## Versioning
 
-The target version lives in `version/VERSION.txt` as a semantic version without
-a leading `v` and with an explicit prerelease channel. Main development uses a
-`-dev` target such as `0.2.0-dev`; release branches use the next patch target
-with `-rc`, such as `0.1.1-rc`.
+The development version lives in `version/VERSION.txt` as a semantic version
+without a leading `v` and with an explicit prerelease channel, such as
+`0.2.0-dev`. It identifies untagged builds; it does not need to change for each
+release.
 
 Packaged builds append the number of commits since `VERSION.txt` last changed.
 The target commit reports `v0.1.0-dev`, seven later commits report
 `v0.1.0-dev.7`, and the long form also includes the source revision, such as
 `v0.1.0-dev.7-t012345678`.
 
-An exact clean Git tag matching the target's release version is authoritative:
-a commit containing `0.1.0-dev` or `0.1.0-rc` and tagged `v0.1.0` reports
-`v0.1.0`. After a release, update main to the next `-dev` target and the release
-branch to the next patch's `-rc` target so subsequent builds remain ordered
-after the release.
+An exact clean semantic-version Git tag is authoritative. For example, a clean
+commit tagged `v0.1.4` reports `v0.1.4`, regardless of the development version.
+This keeps ordinary releases from requiring version-bump commits.
 
 The Make and Homebrew builds inject the derived short version, long version,
 and Git commit. A plain `go build` cannot calculate the commit count inside the
 resulting binary, so it appends the commit date to the explicit channel, such
 as `v0.1.0-dev.20260727`, instead.
+
+Before publishing a release tag, validate the full package build locally. The
+target runs the consolidated checks and a snapshot release using the same
+pinned GoReleaser version as the release workflow:
+
+```sh
+make release-check
+```
+
+If it succeeds, create and publish the tag that should become the release:
+
+```sh
+git tag -a v0.1.5 -m v0.1.5
+git push origin v0.1.5
+```
+
+The tag push starts the release workflow. No version-file change or release
+commit is needed.
 
 ## Validate
 
