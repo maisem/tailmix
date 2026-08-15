@@ -1,6 +1,6 @@
 module github.com/maisem/tailmix
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/gaissmai/bart v0.26.1
