@@ -19,6 +19,13 @@ func Normalize(st *State) {
 		if st.Profiles[i].Name == "" {
 			st.Profiles[i].Name = st.Profiles[i].ID
 		}
+		if st.Profiles[i].Kind == "" {
+			st.Profiles[i].Kind = ProfileKindTailscale
+		}
+		if st.Profiles[i].WireGuard != nil {
+			cfg := st.Profiles[i].WireGuard.Clone()
+			st.Profiles[i].WireGuard = &cfg
+		}
 	}
 	sort.SliceStable(st.Profiles, func(i, j int) bool {
 		return st.Profiles[i].ID < st.Profiles[j].ID

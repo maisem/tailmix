@@ -3,6 +3,9 @@ package controlapi
 import (
 	"fmt"
 	"net/netip"
+	"time"
+
+	"github.com/maisem/tailmix/wireguardcfg"
 )
 
 // UpdateStatus describes the daemon's automatic-update policy and most recent
@@ -33,6 +36,7 @@ func (e *Error) Error() string {
 type Profile struct {
 	ID                     string                  `json:"id"`
 	Name                   string                  `json:"name"`
+	Kind                   string                  `json:"kind,omitempty"`
 	StateDir               string                  `json:"stateDir"`
 	Hostname               string                  `json:"hostname,omitempty"`
 	Enabled                bool                    `json:"enabled"`
@@ -52,6 +56,42 @@ type Profile struct {
 	AvailableDNSRoutes     []AvailableDNSRoute     `json:"availableDnsRoutes,omitempty"`
 	AvailableSearchDomains []AvailableSearchDomain `json:"availableSearchDomains,omitempty"`
 	LastError              string                  `json:"lastError,omitempty"`
+}
+
+// ApplyWireGuardRequest is the transient local-control request used to apply a
+// declarative WireGuard profile. Secrets are never included in profile
+// responses or persisted as part of this request object by the control API.
+type ApplyWireGuardRequest struct {
+	Config  wireguardcfg.Config  `json:"config"`
+	Secrets wireguardcfg.Secrets `json:"secrets"`
+}
+
+// WireGuardProfile is the public runtime view of a WireGuard profile.
+type WireGuardProfile struct {
+	Name       string          `json:"name"`
+	Kind       string          `json:"kind"`
+	PublicKey  string          `json:"publicKey"`
+	ListenPort uint16          `json:"listenPort,omitempty"`
+	Addresses  []netip.Addr    `json:"addresses,omitempty"`
+	DNSSuffix  string          `json:"dnsSuffix"`
+	Peers      []WireGuardPeer `json:"peers,omitempty"`
+}
+
+// WireGuardPeer is the public configured and effective view of one peer.
+// It intentionally contains no private or preshared key material.
+type WireGuardPeer struct {
+	Name               string         `json:"name"`
+	PublicKey          string         `json:"publicKey"`
+	Endpoint           string         `json:"endpoint,omitempty"`
+	Online             bool           `json:"online"`
+	LastHandshake      time.Time      `json:"lastHandshake,omitzero"`
+	ReceiveBytes       int64          `json:"receiveBytes,omitempty"`
+	TransmitBytes      int64          `json:"transmitBytes,omitempty"`
+	Addresses          []netip.Addr   `json:"canonicalAddresses,omitempty"`
+	EffectiveAddresses []netip.Addr   `json:"effectiveAddresses,omitempty"`
+	Routes             []netip.Prefix `json:"routes,omitempty"`
+	ExitNode           bool           `json:"exitNode"`
+	ExitNodeSelected   bool           `json:"exitNodeSelected"`
 }
 
 type Profiles struct {

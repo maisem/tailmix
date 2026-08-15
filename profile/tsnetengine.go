@@ -153,7 +153,7 @@ func (e *TSNetEngine) WatchUpdates(ctx context.Context, notify func()) error {
 
 func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 	if e.server == nil {
-		return Status{ProfileID: e.cfg.ProfileID, Alias: e.cfg.Alias, MagicDNSSuffix: e.cfg.MagicDNSSuffix}, nil
+		return Status{ProfileID: e.cfg.ProfileID, Alias: e.cfg.Alias, Kind: "tailscale", MagicDNSSuffix: e.cfg.MagicDNSSuffix}, nil
 	}
 	lc, err := e.server.LocalClient()
 	if err != nil {
@@ -275,6 +275,7 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 	return Status{
 		ProfileID:       e.cfg.ProfileID,
 		Alias:           e.cfg.Alias,
+		Kind:            "tailscale",
 		MagicDNSSuffix:  suffix,
 		BackendState:    st.BackendState,
 		AuthURL:         st.AuthURL,

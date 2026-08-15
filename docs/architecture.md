@@ -2,13 +2,14 @@
 
 > Implementation snapshot: July 2026
 
-tailmix runs an independent Tailscale node for every profile, then joins their
-packet paths behind one host TUN. Stable local addresses remove cross-tailnet
-IP collisions. Translation restores each tailnet's canonical identity before
-traffic reaches Tailscale.
+tailmix runs an independent network engine for every profile, then joins their
+packet paths behind one host TUN. An engine is either an embedded Tailscale node
+or a userspace raw WireGuard device. Stable local addresses remove cross-profile
+IP collisions. Translation restores each profile's canonical addresses before
+traffic reaches its engine.
 
-The result is one daemon, one shared TUN, and one `tsnet.Server` per profile on
-macOS or Linux.
+The result is one daemon, one shared TUN, and one isolated engine per profile
+on macOS or Linux.
 
 ## System overview
 
@@ -64,8 +65,8 @@ flowchart LR
 
 Three invariants keep the profiles isolated:
 
-1. **One engine, one identity.** Every profile has its own machine keys, node
-   keys, login session, netmap, preferences, and state directory.
+1. **One engine, one identity.** Every profile has its own keys, configuration,
+   runtime, and state directory.
 2. **No canonical target addresses on the host.** Direct peers and Tailscale
    Services use effective addresses. Canonical CGNAT and ULA addresses appear
    only after profile selection.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"time"
 
 	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/types/dnstype"
@@ -29,6 +30,7 @@ type Update struct {
 type Status struct {
 	ProfileID       string
 	Alias           string
+	Kind            string
 	MagicDNSSuffix  string
 	BackendState    string
 	AuthURL         string
@@ -44,13 +46,20 @@ type Status struct {
 	SearchDomains   []string
 	RouteAll        bool
 	ExitNodeID      string
+	PublicKey       string
+	ListenPort      uint16
 }
 
 type PeerStatus struct {
 	NodeID         string
 	DNSName        string
+	PublicKey      string
+	Endpoint       string
 	TailscaleIPs   []netip.Addr
 	Online         bool
+	LastHandshake  time.Time
+	RxBytes        uint64
+	TxBytes        uint64
 	ExitNode       bool
 	ExitNodeOption bool
 	Location       *PeerLocation

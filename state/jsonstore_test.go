@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/maisem/tailmix/wireguardcfg"
 )
 
 func TestStoreRoundTripPreservesEffectiveLeases(t *testing.T) {
@@ -115,5 +117,55 @@ func TestNormalizeMigratesProfileNameAndDNSPolicy(t *testing.T) {
 	}
 	if len(st.SearchDomains) != 1 || st.SearchDomains[0] != "work.example.com" {
 		t.Fatalf("search domains = %q", st.SearchDomains)
+	}
+}
+
+func TestStoreRoundTripWireGuardExcludesSecrets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewJSONStore(path)
+	private := wireguardcfg.Key{9}
+	config := wireguardcfg.Config{
+		Version: wireguardcfg.Version, Name: "lab", DNSSuffix: "wg.example",
+		Addresses: []netip.Addr{netip.MustParseAddr("10.0.0.1")},
+		Peers: []wireguardcfg.Peer{{
+			Name: "peer", PublicKey: wireguardcfg.Key{1},
+			Addresses: []netip.Addr{netip.MustParseAddr("10.0.0.2")}, HasPresharedKey: true,
+		}},
+	}
+	want := State{Profiles: []Profile{{
+		ID: "p_lab", Name: "lab", Kind: ProfileKindWireGuard, StateDir: "profiles/p_lab",
+		WireGuard: &config, WireGuardSecretFile: "wireguard-secrets-random.json",
+	}}}
+	if err := store.Save(want); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), private.String()) || strings.Contains(string(data), "presharedKeyByPeer") || strings.Contains(string(data), "privateKey") {
+		t.Fatalf("daemon state contains secret material:\n%s", data)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := got.Profiles[0]
+	if profile.Kind != ProfileKindWireGuard || profile.WireGuardSecretFile != want.Profiles[0].WireGuardSecretFile || profile.WireGuard == nil || profile.WireGuard.Peers[0].Name != "peer" {
+		t.Fatalf("WireGuard profile did not round trip: %+v", profile)
+	}
+}
+
+func TestStoreRejectsUnsafeWireGuardSecretReference(t *testing.T) {
+	config := wireguardcfg.Config{
+		Version: wireguardcfg.Version, Name: "lab", DNSSuffix: "wg.example",
+		Addresses: []netip.Addr{netip.MustParseAddr("10.0.0.1")},
+	}
+	st := State{Profiles: []Profile{{
+		ID: "p_lab", Name: "lab", Kind: ProfileKindWireGuard, StateDir: "profiles/p_lab",
+		WireGuard: &config, WireGuardSecretFile: "../wireguard-secrets-stolen.json",
+	}}}
+	if err := NewJSONStore(filepath.Join(t.TempDir(), "state.json")).Save(st); err == nil || !strings.Contains(err.Error(), "invalid secret file reference") {
+		t.Fatalf("got error %v", err)
 	}
 }

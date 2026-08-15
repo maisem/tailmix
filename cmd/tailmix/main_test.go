@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -14,23 +16,28 @@ import (
 	"github.com/maisem/tailmix/controlapi"
 	"github.com/maisem/tailmix/profilesocket"
 	tailmixversion "github.com/maisem/tailmix/version"
+	"github.com/maisem/tailmix/wireguardcfg"
 )
 
 type fakeManagementClient struct {
-	profile        controlapi.Profile
-	profileName    string
-	status         controlapi.Status
-	ipPatch        controlapi.PatchIPRoutesRequest
-	exitSet        controlapi.SetExitNodeRequest
-	exitCleared    bool
-	exitNodes      controlapi.ExitNodes
-	dnsPatch       controlapi.PatchDNSRoutesRequest
-	searchReplace  []string
-	statusProfiles []controlapi.Profile
-	serverVersion  tailmixversion.Meta
-	versionErr     error
-	updateStatus   controlapi.UpdateStatus
-	updateAction   string
+	profile          controlapi.Profile
+	profileName      string
+	status           controlapi.Status
+	ipPatch          controlapi.PatchIPRoutesRequest
+	exitSet          controlapi.SetExitNodeRequest
+	exitCleared      bool
+	exitNodes        controlapi.ExitNodes
+	dnsPatch         controlapi.PatchDNSRoutesRequest
+	searchReplace    []string
+	statusProfiles   []controlapi.Profile
+	serverVersion    tailmixversion.Meta
+	versionErr       error
+	updateStatus     controlapi.UpdateStatus
+	updateAction     string
+	wireGuardConfig  wireguardcfg.Config
+	wireGuardSecrets wireguardcfg.Secrets
+	wireGuardProfile controlapi.WireGuardProfile
+	wireGuardName    string
 }
 
 func (f *fakeManagementClient) Version(context.Context) (tailmixversion.Meta, error) {
@@ -106,6 +113,15 @@ func (f *fakeManagementClient) PatchSearchDomains(context.Context, controlapi.Pa
 func (f *fakeManagementClient) ClearSearchDomains(context.Context) (controlapi.SearchDomains, error) {
 	return controlapi.SearchDomains{}, nil
 }
+func (f *fakeManagementClient) ApplyWireGuard(_ context.Context, config wireguardcfg.Config, secrets wireguardcfg.Secrets) (controlapi.WireGuardProfile, error) {
+	f.wireGuardConfig = config
+	f.wireGuardSecrets = secrets
+	return f.wireGuardProfile, nil
+}
+func (f *fakeManagementClient) WireGuardProfile(_ context.Context, name string) (controlapi.WireGuardProfile, error) {
+	f.wireGuardName = name
+	return f.wireGuardProfile, nil
+}
 
 func testDependencies(client managementClient, stdout, stderr io.Writer, runner cliRunner) dependencies {
 	return dependencies{
@@ -160,6 +176,82 @@ func TestUpdateStatusJSON(t *testing.T) {
 	}
 	if !got.Enabled || got.State != "idle" {
 		t.Fatalf("status = %+v", got)
+	}
+}
+
+func TestWireGuardApplyResolvesKeyFilesRelativeToManifest(t *testing.T) {
+	dir := t.TempDir()
+	private, err := wireguardcfg.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerPrivate, err := wireguardcfg.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerPublic, err := peerPrivate.Public()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "private.key"), []byte(private.String()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "version: 1\nname: lab\ndnsSuffix: wg.example\naddresses: [10.0.0.1]\nprivateKeyFile: private.key\npeers:\n  - name: peer\n    publicKey: " + peerPublic.String() + "\n    addresses: [10.0.0.2]\n"
+	manifestPath := filepath.Join(dir, "profile.yaml")
+	if err := os.WriteFile(manifestPath, []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeManagementClient{wireGuardProfile: controlapi.WireGuardProfile{Name: "lab", Kind: "wireguard"}}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"wireguard", "apply", "--file", manifestPath},
+		testDependencies(client, &stdout, &stderr, nil))
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if client.wireGuardConfig.Name != "lab" || client.wireGuardSecrets.PrivateKey == nil || *client.wireGuardSecrets.PrivateKey != private {
+		t.Fatalf("apply request = config %+v, secrets %+v", client.wireGuardConfig, client.wireGuardSecrets)
+	}
+	if !strings.Contains(stdout.String(), "lab") || !strings.Contains(stdout.String(), "wireguard") {
+		t.Fatalf("output = %q", stdout.String())
+	}
+}
+
+func TestWireGuardApplyReadsManifestFromStdin(t *testing.T) {
+	private, err := wireguardcfg.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := private.Public()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := "version: 1\nname: lab\ndnsSuffix: wg.example\naddresses: [10.0.0.1]\npeers:\n  - name: peer\n    publicKey: " + public.String() + "\n    addresses: [10.0.0.2]\n"
+	client := &fakeManagementClient{wireGuardProfile: controlapi.WireGuardProfile{Name: "lab"}}
+	deps := testDependencies(client, io.Discard, io.Discard, nil)
+	deps.stdin = strings.NewReader(manifest)
+	if code := runWithDependencies(context.Background(), []string{"wireguard", "apply", "--file=-"}, deps); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if client.wireGuardConfig.Name != "lab" {
+		t.Fatalf("config = %+v", client.wireGuardConfig)
+	}
+}
+
+func TestWireGuardShowJSON(t *testing.T) {
+	want := controlapi.WireGuardProfile{Name: "lab", Kind: "wireguard", PublicKey: "public", ListenPort: 51820}
+	client := &fakeManagementClient{wireGuardProfile: want}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"wireguard", "show", "lab", "--json"},
+		testDependencies(client, &stdout, &stderr, nil))
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	var got controlapi.WireGuardProfile
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != want.Name || got.Kind != want.Kind || got.PublicKey != want.PublicKey || got.ListenPort != want.ListenPort || client.wireGuardName != "lab" {
+		t.Fatalf("profile = %+v, name = %q", got, client.wireGuardName)
 	}
 }
 
@@ -368,7 +460,7 @@ func TestRootHelpShowsFullSubcommandSpace(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	for _, command := range []string{"status", "profiles", "routes", "exit-node", "dns routes", "dns search", "tailscale", "ts", "completion", "version"} {
+	for _, command := range []string{"status", "profiles", "routes", "exit-node", "dns routes", "dns search", "wireguard", "tailscale", "ts", "completion", "version"} {
 		if !strings.Contains(stdout.String(), command) {
 			t.Errorf("help does not contain %q:\n%s", command, stdout.String())
 		}
@@ -404,6 +496,7 @@ func TestCompletionSuggestsCommandsFlagsAndValues(t *testing.T) {
 		{name: "root commands", words: []string{""}, want: []string{"profiles\t", "completion\t", "--socket-dir\t"}},
 		{name: "subcommands", words: []string{"profiles", ""}, want: []string{"list\t", "rename\t", "help\t"}},
 		{name: "update subcommands", words: []string{"update", ""}, want: []string{"status\t", "check\t", "apply\t"}},
+		{name: "wireguard subcommands", words: []string{"wireguard", ""}, want: []string{"apply\t", "show\t"}},
 		{name: "long flag", words: []string{"routes", "bind", "--pro"}, want: []string{"--profile\t"}},
 		{name: "profile flag value", words: []string{"routes", "bind", "--profile", "w"}, want: []string{"work\tdisabled"}},
 		{name: "profile operand", words: []string{"profiles", "show", "h"}, want: []string{"home\trunning"}},

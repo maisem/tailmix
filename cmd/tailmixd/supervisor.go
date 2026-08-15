@@ -26,6 +26,7 @@ import (
 	"github.com/maisem/tailmix/socksproxy"
 	"github.com/maisem/tailmix/state"
 	"github.com/maisem/tailmix/tunmux"
+	"github.com/maisem/tailmix/wireguardcfg"
 	"tailscale.com/types/dnstype"
 )
 
@@ -240,15 +241,42 @@ func (s *supervisor) startProfileLocked(configured state.Profile, authKey, authK
 	if s.cfg.Mode == "tun" {
 		rp.Tun = tunmux.NewChanTUN("tailmix-" + dnsLabel(configured.ID))
 	}
-	cfg, err := tsnetConfig(rp, s.cfg.Stderr, s.cfg.Verbose, s.cfg.LogUpload, s.cfg.LogUploadURL)
-	if err != nil {
+	switch configured.Kind {
+	case "", state.ProfileKindTailscale:
+		cfg, err := tsnetConfig(rp, s.cfg.Stderr, s.cfg.Verbose, s.cfg.LogUpload, s.cfg.LogUploadURL)
+		if err != nil {
+			cancel()
+			return err
+		}
+		if authKey != "" {
+			cfg.AuthKey = authKey
+		}
+		rp.Engine = tailmixprofile.NewTSNetEngine(cfg)
+	case state.ProfileKindWireGuard:
+		if s.cfg.Mode != "tun" {
+			cancel()
+			return errors.New("WireGuard profiles require TUN mode")
+		}
+		if configured.WireGuard == nil {
+			cancel()
+			return errors.New("WireGuard profile has no configuration")
+		}
+		secrets, err := readWireGuardSecrets(configured.StateDir, configured.WireGuardSecretFile)
+		if err != nil {
+			cancel()
+			return fmt.Errorf("read WireGuard profile secrets: %w", err)
+		}
+		rp.Engine = tailmixprofile.NewWireGuardEngine(tailmixprofile.WireGuardEngineConfig{
+			ProfileID: configured.ID,
+			Alias:     profileName(configured),
+			Config:    configured.WireGuard.Clone(),
+			Secrets:   secrets,
+			Tun:       rp.Tun,
+		})
+	default:
 		cancel()
-		return err
+		return fmt.Errorf("unsupported profile kind %q", configured.Kind)
 	}
-	if authKey != "" {
-		cfg.AuthKey = authKey
-	}
-	rp.Engine = tailmixprofile.NewTSNetEngine(cfg)
 	if err := rp.Engine.Start(runtimeCtx); err != nil {
 		cancel()
 		_ = rp.Engine.Close()
@@ -264,14 +292,16 @@ func (s *supervisor) startProfileLocked(configured state.Profile, authKey, authK
 			return err
 		}
 	}
-	if err := s.profileAPIs.Start(rp); err != nil {
-		if s.mux != nil {
-			s.mux.RemoveProfile(configured.ID)
+	if _, exposesLocalAPI := rp.Engine.(tailmixprofile.LocalBackendProvider); exposesLocalAPI {
+		if err := s.profileAPIs.Start(rp); err != nil {
+			if s.mux != nil {
+				s.mux.RemoveProfile(configured.ID)
+			}
+			delete(s.runtimes, configured.ID)
+			cancel()
+			_ = rp.Engine.Close()
+			return err
 		}
-		delete(s.runtimes, configured.ID)
-		cancel()
-		_ = rp.Engine.Close()
-		return err
 	}
 	status, err := rp.Engine.Status(runtimeCtx)
 	if err == nil {
@@ -635,6 +665,12 @@ func profileName(configured state.Profile) string {
 
 func cloneState(st state.State) state.State {
 	st.Profiles = append([]state.Profile(nil), st.Profiles...)
+	for i := range st.Profiles {
+		if st.Profiles[i].WireGuard != nil {
+			cfg := st.Profiles[i].WireGuard.Clone()
+			st.Profiles[i].WireGuard = &cfg
+		}
+	}
 	st.Leases = append([]state.EffectiveLease(nil), st.Leases...)
 	st.IPRouteBindings = append([]state.IPRouteBinding(nil), st.IPRouteBindings...)
 	st.DNSRouteBindings = append([]state.DNSRouteBinding(nil), st.DNSRouteBindings...)
@@ -682,9 +718,14 @@ func validProfileName(name string) bool {
 }
 
 func (s *supervisor) projectProfileLocked(configured state.Profile) controlapi.Profile {
+	kind := configured.Kind
+	if kind == "" {
+		kind = state.ProfileKindTailscale
+	}
 	result := controlapi.Profile{
 		ID:                 configured.ID,
 		Name:               profileName(configured),
+		Kind:               kind,
 		StateDir:           configured.StateDir,
 		Hostname:           configured.Hostname,
 		Enabled:            !configured.Disabled && !configured.Removed,
@@ -750,8 +791,10 @@ func (s *supervisor) projectProfileLocked(configured state.Profile) controlapi.P
 			})
 		}
 	}
-	if path, err := profilesocket.Path(s.cfg.SocketDir, configured.ID); err == nil {
-		result.LocalAPISocket = path
+	if kind == state.ProfileKindTailscale {
+		if path, err := profilesocket.Path(s.cfg.SocketDir, configured.ID); err == nil {
+			result.LocalAPISocket = path
+		}
 	}
 	return result
 }
@@ -854,6 +897,7 @@ func (s *supervisor) AddProfile(_ context.Context, request controlapi.AddProfile
 	configured := state.Profile{
 		ID:       id,
 		Name:     request.Name,
+		Kind:     state.ProfileKindTailscale,
 		StateDir: stateDir,
 		Hostname: hostname,
 		Disabled: request.Disabled,
@@ -892,7 +936,23 @@ func (s *supervisor) PatchProfile(_ context.Context, name string, request contro
 		if other, findErr := s.configuredByNameLocked(nextName); findErr == nil && other.ID != configured.ID {
 			return controlapi.Profile{}, controlapi.NewError("profile_exists", "profile %q already exists", nextName)
 		}
+		var renamedWireGuard *wireguardcfg.Config
+		if configured.WireGuard != nil {
+			candidate := configured.WireGuard.Clone()
+			candidate.Name = nextName
+			normalized, normalizeErr := wireguardcfg.NormalizeConfig(candidate)
+			if normalizeErr != nil {
+				return controlapi.Profile{}, controlapi.NewError("invalid_request", "invalid WireGuard profile name %q", nextName)
+			}
+			renamedWireGuard = &normalized
+		}
 		configured.Name = nextName
+		if renamedWireGuard != nil {
+			configured.WireGuard = renamedWireGuard
+		}
+	}
+	if request.Hostname != nil && configured.Kind != "" && configured.Kind != state.ProfileKindTailscale {
+		return controlapi.Profile{}, controlapi.NewError("invalid_request", "profile %q is not a Tailscale profile", name)
 	}
 	if request.Hostname != nil && configured.Hostname != strings.TrimSpace(*request.Hostname) {
 		configured.Hostname = strings.TrimSpace(*request.Hostname)

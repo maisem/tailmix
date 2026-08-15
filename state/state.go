@@ -1,6 +1,15 @@
 package state
 
-import "net/netip"
+import (
+	"net/netip"
+
+	"github.com/maisem/tailmix/wireguardcfg"
+)
+
+const (
+	ProfileKindTailscale = "tailscale"
+	ProfileKindWireGuard = "wireguard"
+)
 
 type UpdateState struct {
 	// Disabled is stored instead of Enabled so existing state files default to
@@ -27,16 +36,19 @@ type State struct {
 }
 
 type Profile struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name,omitempty"`
-	Alias              string `json:"alias,omitempty"`
-	StateDir           string `json:"stateDir"`
-	Hostname           string `json:"hostname,omitempty"`
-	MagicDNSSuffix     string `json:"magicDnsSuffix,omitempty"`
-	Disabled           bool   `json:"disabled,omitempty"`
-	Removed            bool   `json:"removed,omitempty"`
-	AcceptAllRoutes    bool   `json:"acceptAllRoutes,omitempty"`
-	AcceptAllDNSRoutes bool   `json:"acceptAllDnsRoutes,omitempty"`
+	ID                  string               `json:"id"`
+	Name                string               `json:"name,omitempty"`
+	Alias               string               `json:"alias,omitempty"`
+	Kind                string               `json:"kind,omitempty"`
+	StateDir            string               `json:"stateDir"`
+	Hostname            string               `json:"hostname,omitempty"`
+	MagicDNSSuffix      string               `json:"magicDnsSuffix,omitempty"`
+	Disabled            bool                 `json:"disabled,omitempty"`
+	Removed             bool                 `json:"removed,omitempty"`
+	AcceptAllRoutes     bool                 `json:"acceptAllRoutes,omitempty"`
+	AcceptAllDNSRoutes  bool                 `json:"acceptAllDnsRoutes,omitempty"`
+	WireGuard           *wireguardcfg.Config `json:"wireguard,omitempty"`
+	WireGuardSecretFile string               `json:"wireguardSecretFile,omitempty"`
 }
 
 type IPRouteBinding struct {

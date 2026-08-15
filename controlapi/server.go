@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	tailmixversion "github.com/maisem/tailmix/version"
+	"github.com/maisem/tailmix/wireguardcfg"
 )
 
 type Backend interface {
@@ -21,6 +22,8 @@ type Backend interface {
 	SetProfileEnabled(context.Context, string, bool) (Profile, error)
 	RestartProfile(context.Context, string) (Profile, error)
 	RemoveProfile(context.Context, string, bool) (Profile, error)
+	ApplyWireGuard(context.Context, wireguardcfg.Config, wireguardcfg.Secrets) (WireGuardProfile, error)
+	WireGuardProfile(context.Context, string) (WireGuardProfile, error)
 
 	IPRoutes(context.Context, bool) (IPRoutes, error)
 	PatchIPRoutes(context.Context, PatchIPRoutesRequest) (IPRoutes, error)
@@ -141,6 +144,23 @@ func Handler(backend Backend) http.Handler {
 		}
 		purge, _ := strconv.ParseBool(r.URL.Query().Get("purge"))
 		result, backendErr := backend.RemoveProfile(r.Context(), name, purge)
+		writeResult(w, result, backendErr)
+	})
+	mux.HandleFunc("POST /v1/wireguard", func(w http.ResponseWriter, r *http.Request) {
+		var request ApplyWireGuardRequest
+		if !decodeRequest(w, r, &request) {
+			return
+		}
+		result, err := backend.ApplyWireGuard(r.Context(), request.Config, request.Secrets)
+		writeResult(w, result, err)
+	})
+	mux.HandleFunc("GET /v1/wireguard/by-name/{name}", func(w http.ResponseWriter, r *http.Request) {
+		name, err := url.PathUnescape(r.PathValue("name"))
+		if err != nil {
+			writeResult(w, nil, NewError("invalid_request", "invalid escaped profile name"))
+			return
+		}
+		result, backendErr := backend.WireGuardProfile(r.Context(), name)
 		writeResult(w, result, backendErr)
 	})
 

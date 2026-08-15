@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/maisem/tailmix/exitnodeview"
 	"github.com/maisem/tailmix/profilesocket"
 	tailmixversion "github.com/maisem/tailmix/version"
+	"github.com/maisem/tailmix/wireguardcfg"
 	"tailscale.com/cmd/tailscale/cli"
 	"tailscale.com/util/dnsname"
 )
@@ -36,6 +38,8 @@ type managementClient interface {
 	PatchProfile(context.Context, string, controlapi.PatchProfileRequest) (controlapi.Profile, error)
 	ProfileAction(context.Context, string, string) (controlapi.Profile, error)
 	RemoveProfile(context.Context, string, bool) (controlapi.Profile, error)
+	ApplyWireGuard(context.Context, wireguardcfg.Config, wireguardcfg.Secrets) (controlapi.WireGuardProfile, error)
+	WireGuardProfile(context.Context, string) (controlapi.WireGuardProfile, error)
 	IPRoutes(context.Context, bool) (controlapi.IPRoutes, error)
 	PatchIPRoutes(context.Context, controlapi.PatchIPRoutesRequest) (controlapi.IPRoutes, error)
 	ExitNodes(context.Context) (controlapi.ExitNodes, error)
@@ -113,6 +117,8 @@ func runWithDependencies(ctx context.Context, args []string, deps dependencies) 
 		err = runExitNode(ctx, client, args[1:], deps)
 	case "dns":
 		err = runDNS(ctx, client, args[1:], deps)
+	case "wireguard":
+		err = runWireGuard(ctx, client, args[1:], deps)
 	case "tailscale", "ts":
 		err = runTailscale(ctx, client, socketDir, args[1:], deps)
 	case "completion":
@@ -137,6 +143,96 @@ func runWithDependencies(ctx context.Context, args []string, deps dependencies) 
 	}
 	fmt.Fprintln(deps.stderr, err)
 	return 1
+}
+
+func runWireGuard(ctx context.Context, client managementClient, args []string, deps dependencies) error {
+	if len(args) == 0 || isHelp(args[0]) {
+		fmt.Fprint(deps.stdout, wireGuardHelp)
+		return nil
+	}
+	switch args[0] {
+	case "apply":
+		rest := args[1:]
+		manifestPath, found, err := takeString(&rest, "--file")
+		if err != nil {
+			return err
+		}
+		if !found || manifestPath == "" {
+			return usageError{"wireguard apply requires --file <path|->"}
+		}
+		jsonOutput, err := takeBool(&rest, "--json")
+		if err != nil {
+			return err
+		}
+		if err := noOperands(rest); err != nil {
+			return err
+		}
+		config, secrets, err := parseWireGuardManifest(manifestPath, deps.stdin)
+		if err != nil {
+			return err
+		}
+		result, err := client.ApplyWireGuard(ctx, config, secrets)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(deps.stdout, result)
+		}
+		writeWireGuardProfile(deps.stdout, result)
+		return nil
+
+	case "show":
+		rest := args[1:]
+		jsonOutput, err := takeBool(&rest, "--json")
+		if err != nil {
+			return err
+		}
+		name, err := oneOperand(rest, "WireGuard profile name")
+		if err != nil {
+			return err
+		}
+		result, err := client.WireGuardProfile(ctx, name)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(deps.stdout, result)
+		}
+		writeWireGuardProfile(deps.stdout, result)
+		return nil
+	default:
+		return usageError{fmt.Sprintf("unknown wireguard command %q", args[0])}
+	}
+}
+
+func parseWireGuardManifest(manifestPath string, stdin io.Reader) (wireguardcfg.Config, wireguardcfg.Secrets, error) {
+	var (
+		data []byte
+		err  error
+		base string
+	)
+	if manifestPath == "-" {
+		data, err = io.ReadAll(stdin)
+		if err == nil {
+			base, err = os.Getwd()
+		}
+	} else {
+		data, err = os.ReadFile(manifestPath)
+		base = filepath.Dir(manifestPath)
+	}
+	if err != nil {
+		return wireguardcfg.Config{}, wireguardcfg.Secrets{}, fmt.Errorf("read WireGuard manifest %q: %w", manifestPath, err)
+	}
+	config, secrets, err := wireguardcfg.Parse(data, func(path string) ([]byte, error) {
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(base, path)
+		}
+		return os.ReadFile(path)
+	})
+	if err != nil {
+		return wireguardcfg.Config{}, wireguardcfg.Secrets{}, fmt.Errorf("parse WireGuard manifest %q: %w", manifestPath, err)
+	}
+	return config, secrets, nil
 }
 
 func runUpdate(ctx context.Context, client managementClient, args []string, deps dependencies) error {
@@ -1092,10 +1188,10 @@ func writeJSON(w io.Writer, value any) error {
 
 func writeProfiles(w io.Writer, profiles []controlapi.Profile) {
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "PROFILE\tENABLED\tRUNTIME\tTAILNET\tPEERS\tERROR")
+	fmt.Fprintln(table, "PROFILE\tKIND\tENABLED\tRUNTIME\tTAILNET\tPEERS\tERROR")
 	for _, profile := range profiles {
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%d\t%s\n",
-			profile.Name, yesNo(profile.Enabled), profile.RuntimeState,
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
+			profile.Name, profile.Kind, yesNo(profile.Enabled), profile.RuntimeState,
 			profile.MagicDNSSuffix, profile.PeerCount, profile.LastError)
 	}
 	_ = table.Flush()
@@ -1145,6 +1241,7 @@ func writeProfile(w io.Writer, profile controlapi.Profile) {
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	rows := [][2]string{
 		{"Profile", profile.Name},
+		{"Kind", profile.Kind},
 		{"ID", profile.ID},
 		{"Enabled", yesNo(profile.Enabled)},
 		{"Removed", yesNo(profile.Removed)},
@@ -1163,6 +1260,39 @@ func writeProfile(w io.Writer, profile controlapi.Profile) {
 		fmt.Fprintf(table, "%s:\t%s\n", row[0], row[1])
 	}
 	_ = table.Flush()
+}
+
+func writeWireGuardProfile(w io.Writer, profile controlapi.WireGuardProfile) {
+	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(table, "PROFILE:\t%s\nKIND:\t%s\nPUBLIC KEY:\t%s\nLISTEN PORT:\t%d\nADDRESSES:\t%s\nDNS SUFFIX:\t%s\n",
+		profile.Name, profile.Kind, profile.PublicKey, profile.ListenPort,
+		joinStrings(profile.Addresses), profile.DNSSuffix)
+	if len(profile.Peers) > 0 {
+		fmt.Fprintln(table, "\nPEER\tPUBLIC KEY\tONLINE\tENDPOINT\tCANONICAL\tEFFECTIVE\tROUTES\tEXIT\tHANDSHAKE\tRX\tTX")
+	}
+	for _, peer := range profile.Peers {
+		handshake := ""
+		if !peer.LastHandshake.IsZero() {
+			handshake = peer.LastHandshake.Format("2006-01-02T15:04:05Z07:00")
+		}
+		exit := yesNo(peer.ExitNode)
+		if peer.ExitNodeSelected {
+			exit = "selected"
+		}
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n",
+			peer.Name, peer.PublicKey, yesNo(peer.Online), peer.Endpoint, joinStrings(peer.Addresses),
+			joinStrings(peer.EffectiveAddresses), joinStrings(peer.Routes), exit,
+			handshake, peer.ReceiveBytes, peer.TransmitBytes)
+	}
+	_ = table.Flush()
+}
+
+func joinStrings[T fmt.Stringer](values []T) string {
+	items := make([]string, len(values))
+	for i, value := range values {
+		items[i] = value.String()
+	}
+	return strings.Join(items, ",")
 }
 
 func writeIPRoutes(w io.Writer, routes controlapi.IPRoutes, available bool) {
@@ -1381,6 +1511,7 @@ Commands:
   exit-node    Select one profile's exit node for default traffic
   dns routes   Route DNS suffixes through selected profiles
   dns search   Manage the ordered OS search-domain list
+  wireguard    Apply and inspect raw WireGuard profiles
   tailscale    Run an upstream Tailscale command for one profile
   ts           Shortcut for tailscale
   completion   Generate shell completion scripts
@@ -1391,6 +1522,16 @@ Use "tailmix <command> help" for command-specific help.
 
 Environment:
   TAILMIX_SOCKET_DIR   Default directory for daemon and profile sockets
+`
+
+const wireGuardHelp = `Usage:
+  tailmix wireguard apply --file <path|-> [--json]
+  tailmix wireguard show <profile> [--json]
+
+Apply validates a declarative YAML profile and reconciles it live. Relative key
+paths are resolved from the manifest directory, or from the current directory
+when the manifest is read from standard input. Show never includes private or
+preshared key material.
 `
 
 const versionHelp = `Usage:

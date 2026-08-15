@@ -10,16 +10,21 @@ import (
 	"testing"
 
 	tailmixversion "github.com/maisem/tailmix/version"
+	"github.com/maisem/tailmix/wireguardcfg"
 )
 
 type recordingBackend struct {
 	Backend
-	ipPatch      PatchIPRoutesRequest
-	exitRequest  SetExitNodeRequest
-	profiles     Profiles
-	status       Status
-	update       UpdateStatus
-	updateAction string
+	ipPatch          PatchIPRoutesRequest
+	exitRequest      SetExitNodeRequest
+	profiles         Profiles
+	status           Status
+	update           UpdateStatus
+	updateAction     string
+	wireGuardConfig  wireguardcfg.Config
+	wireGuardSecrets wireguardcfg.Secrets
+	wireGuardProfile WireGuardProfile
+	wireGuardName    string
 }
 
 func (b *recordingBackend) UpdateStatus(context.Context) (UpdateStatus, error) { return b.update, nil }
@@ -67,6 +72,17 @@ func (b *recordingBackend) SetExitNode(_ context.Context, request SetExitNodeReq
 	}}, nil
 }
 
+func (b *recordingBackend) ApplyWireGuard(_ context.Context, config wireguardcfg.Config, secrets wireguardcfg.Secrets) (WireGuardProfile, error) {
+	b.wireGuardConfig = config
+	b.wireGuardSecrets = secrets
+	return b.wireGuardProfile, nil
+}
+
+func (b *recordingBackend) WireGuardProfile(_ context.Context, name string) (WireGuardProfile, error) {
+	b.wireGuardName = name
+	return b.wireGuardProfile, nil
+}
+
 func TestHandlerReturnsServerVersion(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/v1/version", nil)
 	response := httptest.NewRecorder()
@@ -80,6 +96,41 @@ func TestHandlerReturnsServerVersion(t *testing.T) {
 	}
 	if got.Short == "" || got.Long == "" || got.TailscaleVersion == "" {
 		t.Fatalf("version = %+v", got)
+	}
+}
+
+func TestHandlerAppliesAndShowsWireGuardProfile(t *testing.T) {
+	private, err := wireguardcfg.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &recordingBackend{wireGuardProfile: WireGuardProfile{
+		Name: "lab", Kind: "wireguard", PublicKey: "public",
+		Peers: []WireGuardPeer{{Name: "peer", PublicKey: "peer-public", Addresses: []netip.Addr{netip.MustParseAddr("10.0.0.2")}}},
+	}}
+	body, err := json.Marshal(ApplyWireGuardRequest{
+		Config:  wireguardcfg.Config{Version: 1, Name: "lab", DNSSuffix: "wg.example", Addresses: []netip.Addr{netip.MustParseAddr("10.0.0.1")}},
+		Secrets: wireguardcfg.Secrets{PrivateKey: &private},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	Handler(backend).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/wireguard", strings.NewReader(string(body))))
+	if response.Code != http.StatusOK || backend.wireGuardConfig.Name != "lab" || backend.wireGuardSecrets.PrivateKey == nil || *backend.wireGuardSecrets.PrivateKey != private {
+		t.Fatalf("status = %d, config = %+v, secrets = %+v, body = %s", response.Code, backend.wireGuardConfig, backend.wireGuardSecrets, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), private.String()) {
+		t.Fatalf("response exposed private key: %s", response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "lastHandshake") || !strings.Contains(response.Body.String(), `"canonicalAddresses":["10.0.0.2"]`) {
+		t.Fatalf("response did not preserve optional/runtime address contract: %s", response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	Handler(backend).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/wireguard/by-name/lab", nil))
+	if response.Code != http.StatusOK || backend.wireGuardName != "lab" || !strings.Contains(response.Body.String(), `"kind":"wireguard"`) {
+		t.Fatalf("status = %d, name = %q, body = %s", response.Code, backend.wireGuardName, response.Body.String())
 	}
 }
 

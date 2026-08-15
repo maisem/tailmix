@@ -189,6 +189,7 @@ configured when the exit node is changed or cleared.
 
 - [Linux service setup and troubleshooting](docs/linux-install.md)
 - [Profile, route, exit-node, and DNS command reference](docs/profile-management.md)
+- [Raw WireGuard profiles](docs/wireguard.md)
 - [Architecture](docs/architecture.md)
 - [Development workflows](DEVELOPMENT.md)
 

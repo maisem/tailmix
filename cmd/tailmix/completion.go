@@ -402,6 +402,13 @@ func completionCommandTree() *completionCommand {
 		name: "dns", description: "Manage DNS routing and search domains", help: true,
 		subcommands: []*completionCommand{dnsRoutes, dnsSearch},
 	}
+	wireguard := &completionCommand{
+		name: "wireguard", description: "Apply and inspect raw WireGuard profiles", help: true,
+		subcommands: []*completionCommand{
+			leaf("apply", "Apply a declarative WireGuard profile", []completionFlag{flag("Read the YAML manifest", completionFile, "--file"), jsonFlag()}),
+			leaf("show", "Show one WireGuard profile", []completionFlag{jsonFlag()}, completionProfile),
+		},
+	}
 
 	completion := &completionCommand{
 		name: "completion", description: "Generate shell completion scripts", help: true,
@@ -434,6 +441,7 @@ func completionCommandTree() *completionCommand {
 			routes,
 			exitNode,
 			dns,
+			wireguard,
 			tailscaleCompletionCommand("tailscale", "Run an upstream Tailscale command for one profile", profileFlag()),
 			tailscaleCompletionCommand("ts", "Shortcut for tailscale", profileFlag()),
 			completion,

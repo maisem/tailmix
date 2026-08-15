@@ -13,6 +13,7 @@ import (
 
 	"github.com/maisem/tailmix/profilesocket"
 	tailmixversion "github.com/maisem/tailmix/version"
+	"github.com/maisem/tailmix/wireguardcfg"
 )
 
 type Client struct {
@@ -62,6 +63,18 @@ func (c *Client) Profiles(ctx context.Context, all bool) (Profiles, error) {
 func (c *Client) Profile(ctx context.Context, name string) (Profile, error) {
 	var out Profile
 	err := c.do(ctx, http.MethodGet, profilePath(name), nil, &out)
+	return out, err
+}
+
+func (c *Client) ApplyWireGuard(ctx context.Context, config wireguardcfg.Config, secrets wireguardcfg.Secrets) (WireGuardProfile, error) {
+	var out WireGuardProfile
+	err := c.do(ctx, http.MethodPost, "/v1/wireguard", ApplyWireGuardRequest{Config: config, Secrets: secrets}, &out)
+	return out, err
+}
+
+func (c *Client) WireGuardProfile(ctx context.Context, name string) (WireGuardProfile, error) {
+	var out WireGuardProfile
+	err := c.do(ctx, http.MethodGet, wireGuardProfilePath(name), nil, &out)
 	return out, err
 }
 
@@ -202,4 +215,8 @@ func (c *Client) do(ctx context.Context, method, path string, request, response 
 
 func profilePath(name string) string {
 	return "/v1/profiles/by-name/" + url.PathEscape(name)
+}
+
+func wireGuardProfilePath(name string) string {
+	return "/v1/wireguard/by-name/" + url.PathEscape(name)
 }
