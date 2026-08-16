@@ -70,6 +70,8 @@ func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Co
 		})
 		configured, _ = profileByName(&next, config.Name)
 	}
+	profileID := configured.ID
+	profileStateDir := configured.StateDir
 
 	secrets, err := completeWireGuardSecrets(config, supplied, oldSecrets, create)
 	if err != nil {
@@ -78,14 +80,14 @@ func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Co
 	if err := validateWireGuardKeyOwnership(config, secrets); err != nil {
 		return controlapi.WireGuardProfile{}, controlapi.NewError("invalid_request", "%v", err)
 	}
-	secretFile, err := writeWireGuardSecrets(configured.StateDir, secrets)
+	secretFile, err := writeWireGuardSecrets(profileStateDir, secrets)
 	if err != nil {
 		return controlapi.WireGuardProfile{}, fmt.Errorf("write WireGuard profile secrets: %w", err)
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			_ = removeWireGuardSecrets(configured.StateDir, secretFile)
+			_ = removeWireGuardSecrets(profileStateDir, secretFile)
 		}
 	}()
 
@@ -98,7 +100,10 @@ func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Co
 	configured.MagicDNSSuffix = config.DNSSuffix
 	configured.WireGuard = configPointer(config)
 	configured.WireGuardSecretFile = secretFile
-	state.Normalize(&next)
+	configured, err = normalizeProfileByID(&next, profileID)
+	if err != nil {
+		return controlapi.WireGuardProfile{}, controlapi.NewError("invalid_state", "%v", err)
+	}
 
 	var engine *tailmixprofile.WireGuardEngine
 	if wasRunning {
@@ -138,7 +143,7 @@ func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Co
 	}
 	committed = true
 	if oldSecretFile != "" && oldSecretFile != secretFile {
-		_ = removeWireGuardSecrets(configured.StateDir, oldSecretFile)
+		_ = removeWireGuardSecrets(profileStateDir, oldSecretFile)
 	}
 	return s.wireGuardProfileLocked(*configured)
 }
@@ -227,6 +232,24 @@ func beforeProfileRemoved(st state.State, profileID string) bool {
 		}
 	}
 	return false
+}
+
+func profileByID(st *state.State, profileID string) *state.Profile {
+	for i := range st.Profiles {
+		if st.Profiles[i].ID == profileID {
+			return &st.Profiles[i]
+		}
+	}
+	return nil
+}
+
+func normalizeProfileByID(st *state.State, profileID string) (*state.Profile, error) {
+	state.Normalize(st)
+	configured := profileByID(st, profileID)
+	if configured == nil {
+		return nil, errors.New("profile disappeared during normalization")
+	}
+	return configured, nil
 }
 
 func validateWireGuardKeyOwnership(config wireguardcfg.Config, secrets wireguardcfg.Secrets) error {

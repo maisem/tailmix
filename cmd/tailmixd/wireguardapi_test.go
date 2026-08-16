@@ -62,3 +62,26 @@ func TestValidateWireGuardEndpointNamesRejectsProfileDNSRecursion(t *testing.T) 
 		t.Fatalf("rejected independent endpoint: %v", err)
 	}
 }
+
+func TestNormalizeProfileByIDReacquiresSortedProfile(t *testing.T) {
+	config := wireguardcfg.Config{
+		Version: wireguardcfg.Version, Name: "lab", DNSSuffix: "lab.example",
+		Addresses: []netip.Addr{netip.MustParseAddr("10.80.0.1")},
+	}
+	st := state.State{Profiles: []state.Profile{
+		{ID: "z_existing", Name: "existing", Kind: state.ProfileKindTailscale},
+		{ID: "p_new", Name: "lab", Kind: state.ProfileKindWireGuard, WireGuard: &config},
+	}}
+	stale := &st.Profiles[1]
+
+	configured, err := normalizeProfileByID(&st, "p_new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.ID != "z_existing" {
+		t.Fatalf("test did not force the original pointer to become stale: points to %q", stale.ID)
+	}
+	if configured.ID != "p_new" || configured.WireGuard == nil || configured.WireGuard.Name != "lab" {
+		t.Fatalf("reacquired profile = %+v", configured)
+	}
+}
