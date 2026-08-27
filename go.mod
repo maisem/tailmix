@@ -1,6 +1,6 @@
 module github.com/maisem/tailmix
 
-go 1.26.6
+go 1.27.0
 
 require (
 	github.com/gaissmai/bart v0.26.1
@@ -98,7 +98,7 @@ require (
 	golang.org/x/tools v0.48.0 // indirect
 	golang.org/x/vuln v1.6.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	honnef.co/go/tools v0.7.0 // indirect
+	honnef.co/go/tools v0.8.1 // indirect
 	k8s.io/client-go v0.34.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 	software.sslmate.com/src/go-pkcs12 v0.4.0 // indirect

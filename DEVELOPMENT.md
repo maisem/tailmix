@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-Go 1.26.4 or newer is required. Runtime testing of TUN, route, and DNS changes
+Go 1.27.0 or newer is required. Runtime testing of TUN, route, and DNS changes
 also requires root privileges on macOS or `CAP_NET_ADMIN` on Linux.
 
 ## Build
