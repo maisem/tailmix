@@ -14,7 +14,7 @@ require (
 	golang.org/x/sys v0.47.0
 	golang.zx2c4.com/wireguard/windows v0.5.3
 	gvisor.dev/gvisor v0.0.0-20260224225140-573d5e7127a8
-	tailscale.com v1.102.2
+	tailscale.com v1.102.3
 )
 
 require (
