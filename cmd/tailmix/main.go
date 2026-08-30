@@ -30,6 +30,7 @@ type cliRunner func(context.Context, []string) error
 type managementClient interface {
 	Version(context.Context) (tailmixversion.Meta, error)
 	Status(context.Context) (controlapi.Status, error)
+	SetDaemonUp(context.Context, bool) (controlapi.DaemonState, error)
 	UpdateStatus(context.Context) (controlapi.UpdateStatus, error)
 	UpdateAction(context.Context, string) (controlapi.UpdateStatus, error)
 	Profiles(context.Context, bool) (controlapi.Profiles, error)
@@ -107,6 +108,8 @@ func runWithDependencies(ctx context.Context, args []string, deps dependencies) 
 	switch args[0] {
 	case "status":
 		err = runStatus(ctx, client, args[1:], deps)
+	case "up", "down":
+		err = runDaemonAction(ctx, client, args[0], args[1:], deps)
 	case "update":
 		err = runUpdate(ctx, client, args[1:], deps)
 	case "profiles":
@@ -299,6 +302,22 @@ func runVersion(ctx context.Context, client managementClient, args []string, dep
 		return nil
 	}
 	fmt.Fprintln(deps.stdout, serverVersion.Format("tailmixd"))
+	return nil
+}
+
+func runDaemonAction(ctx context.Context, client managementClient, action string, args []string, deps dependencies) error {
+	if len(args) > 0 && isHelp(args[0]) {
+		fmt.Fprintf(deps.stdout, "Usage:\n  tailmix %s\n", action)
+		return nil
+	}
+	if err := noOperands(args); err != nil {
+		return err
+	}
+	result, err := client.SetDaemonUp(ctx, action == "up")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(deps.stdout, "tailmix is %s.\n", result.State)
 	return nil
 }
 
@@ -940,6 +959,9 @@ func runTailscale(ctx context.Context, client managementClient, socketDir string
 	if err != nil {
 		return err
 	}
+	if selected.RuntimeState == "down" {
+		return errors.New("tailmix is down; run \"tailmix up\" first")
+	}
 	socketPath, err := profileLocalAPISocket(socketDir, selected)
 	if err != nil {
 		return err
@@ -1198,6 +1220,7 @@ func writeProfiles(w io.Writer, profiles []controlapi.Profile) {
 }
 
 func writeStatus(w io.Writer, status controlapi.Status) {
+	fmt.Fprintf(w, "STATE\t%s\n\n", status.State)
 	writeProfiles(w, status.Profiles)
 
 	writeStatusSection(w, "IP ROUTES", statusHasIPRoutes(status.IPRoutes), func() {
@@ -1505,6 +1528,8 @@ Usage:
 
 Commands:
   status       Show active profiles and accepted network policy
+  up           Start every enabled profile
+  down         Stop every profile without changing profile enablement
   update       Manage automatic binary updates
   profiles     Manage profile lifecycle and configuration
   routes       Accept IP routes and pin prefixes to profiles
@@ -1556,9 +1581,10 @@ channel immediately; apply installs an available update immediately.
 const statusHelp = `Usage:
   tailmix status [--json]
 
-Shows active profiles and the accepted IP routes, selected exit node, effective
-DNS routes, and configured DNS search domains. Advertised-but-unaccepted choices
-remain available through the corresponding list commands.
+Shows whether tailmix is up or down, active profiles and the accepted IP routes,
+selected exit node, effective DNS routes, and configured DNS search domains.
+Advertised-but-unaccepted choices remain available through the corresponding
+list commands.
 `
 
 const profilesHelp = `Usage:

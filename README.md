@@ -103,6 +103,18 @@ embedded Tailscale CLI after `tailmix ts --profile <profile>`.
 
 ## Common next steps
 
+Pause every profile without changing which profiles should normally run:
+
+```sh
+sudo tailmix down
+sudo tailmix up
+```
+
+The down state survives daemon restarts and host reboots. `tailmix up` restores
+only profiles that were enabled before the pause; use `tailmix profiles enable`
+or `disable` while tailmix is up to change that restore set. Profile lifecycle
+and configuration changes are rejected while tailmix is down.
+
 List everything before changing policy:
 
 ```sh
@@ -112,10 +124,10 @@ tailmix dns routes list
 tailmix dns search list
 ```
 
-`tailmix status` summarizes the policy currently selected from every active
-profile. It includes accepted IP routes, the selected exit node, effective DNS
-routes, and configured DNS search domains without listing every available
-choice.
+`tailmix status` starts with the global up/down state and summarizes the policy
+currently selected from every active profile. It includes accepted IP routes,
+the selected exit node, effective DNS routes, and configured DNS search domains
+without listing every available choice.
 
 Like Tailscale's CLI, `tailmix exit-node list` collapses located nodes to the
 highest-priority node per city and adds an **Any** row for countries with

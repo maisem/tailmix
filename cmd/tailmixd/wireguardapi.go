@@ -18,6 +18,12 @@ import (
 )
 
 func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Config, supplied wireguardcfg.Secrets) (controlapi.WireGuardProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requireDaemonUpLocked(); err != nil {
+		return controlapi.WireGuardProfile{}, err
+	}
+
 	config, err := wireguardcfg.NormalizeConfig(requested)
 	if err != nil {
 		return controlapi.WireGuardProfile{}, controlapi.NewError("invalid_request", "invalid WireGuard configuration: %v", err)
@@ -29,8 +35,6 @@ func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Co
 		return controlapi.WireGuardProfile{}, controlapi.NewError("invalid_request", "%v", err)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	before := cloneState(s.st)
 	next := cloneState(s.st)
 	configured, findErr := profileByName(&next, config.Name)

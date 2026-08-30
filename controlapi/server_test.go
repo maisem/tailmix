@@ -15,6 +15,7 @@ import (
 
 type recordingBackend struct {
 	Backend
+	daemonUp         bool
 	ipPatch          PatchIPRoutesRequest
 	exitRequest      SetExitNodeRequest
 	profiles         Profiles
@@ -48,6 +49,15 @@ func (b *recordingBackend) ApplyUpdate(context.Context) (UpdateStatus, error) {
 
 func (b *recordingBackend) Status(context.Context) (Status, error) {
 	return b.status, nil
+}
+
+func (b *recordingBackend) SetDaemonUp(_ context.Context, up bool) (DaemonState, error) {
+	b.daemonUp = up
+	state := "down"
+	if up {
+		state = "up"
+	}
+	return DaemonState{State: state}, nil
 }
 
 func (b *recordingBackend) PatchIPRoutes(_ context.Context, request PatchIPRoutesRequest) (IPRoutes, error) {
@@ -99,6 +109,39 @@ func TestHandlerReturnsServerVersion(t *testing.T) {
 	}
 }
 
+func TestHandlerChangesDaemonState(t *testing.T) {
+	for _, test := range []struct {
+		path string
+		up   bool
+	}{
+		{path: "/v1/up", up: true},
+		{path: "/v1/down", up: false},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			backend := &recordingBackend{}
+			response := httptest.NewRecorder()
+			Handler(backend).ServeHTTP(response, httptest.NewRequest(http.MethodPost, test.path, nil))
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			if backend.daemonUp != test.up {
+				t.Fatalf("daemon up = %v, want %v", backend.daemonUp, test.up)
+			}
+			var got DaemonState
+			if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			want := "down"
+			if test.up {
+				want = "up"
+			}
+			if got.State != want {
+				t.Fatalf("state = %q, want %q", got.State, want)
+			}
+		})
+	}
+}
+
 func TestHandlerAppliesAndShowsWireGuardProfile(t *testing.T) {
 	private, err := wireguardcfg.GeneratePrivateKey()
 	if err != nil {
@@ -136,6 +179,7 @@ func TestHandlerAppliesAndShowsWireGuardProfile(t *testing.T) {
 
 func TestHandlerReturnsAggregateStatus(t *testing.T) {
 	backend := &recordingBackend{status: Status{
+		State:    "down",
 		Profiles: []Profile{{Name: "work"}},
 		DNSRoutes: DNSRoutes{Automatic: []DNSRouteBinding{{
 			Domain: "work.example", ProfileName: "work", State: "installed",
@@ -151,7 +195,7 @@ func TestHandlerReturnsAggregateStatus(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Profiles) != 1 || got.Profiles[0].Name != "work" ||
+	if got.State != "down" || len(got.Profiles) != 1 || got.Profiles[0].Name != "work" ||
 		len(got.DNSRoutes.Automatic) != 1 || got.DNSRoutes.Automatic[0].Domain != "work.example" {
 		t.Fatalf("aggregate status = %+v", got)
 	}
@@ -275,6 +319,31 @@ func TestHandlerRejectsRemovedProfileControlURL(t *testing.T) {
 	if got.Code != "invalid_request" {
 		t.Fatalf("error = %+v", got)
 	}
+}
+
+func TestHandlerMapsDaemonDownToHTTPConflict(t *testing.T) {
+	backend := &daemonDownBackend{recordingBackend: recordingBackend{}}
+	request := httptest.NewRequest(http.MethodPost, "/v1/profiles", strings.NewReader(`{"name":"work"}`))
+	response := httptest.NewRecorder()
+	Handler(backend).ServeHTTP(response, request)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var got Error
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Code != "daemon_down" {
+		t.Fatalf("error = %+v", got)
+	}
+}
+
+type daemonDownBackend struct {
+	recordingBackend
+}
+
+func (b *daemonDownBackend) AddProfile(context.Context, AddProfileRequest) (Profile, error) {
+	return Profile{}, NewError("daemon_down", "tailmix is down")
 }
 
 func TestHandlerMapsConflictsToHTTPConflict(t *testing.T) {

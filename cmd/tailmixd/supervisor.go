@@ -119,7 +119,7 @@ func (s *supervisor) Run(ctx context.Context) (retErr error) {
 		return errors.Join(err, s.close())
 	}
 	for _, configured := range s.st.Profiles {
-		if configured.Disabled || configured.Removed {
+		if s.st.Down || configured.Disabled || configured.Removed {
 			continue
 		}
 		initial := s.initial[configured.ID]
@@ -181,6 +181,81 @@ func (s *supervisor) Run(ctx context.Context) (retErr error) {
 			return &restart
 		}
 	}
+}
+
+func (s *supervisor) SetDaemonUp(_ context.Context, up bool) (controlapi.DaemonState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	wantDown := !up
+	if s.st.Down != wantDown {
+		before := cloneState(s.st)
+		s.st.Down = wantDown
+		if err := s.store.Save(s.st); err != nil {
+			s.st = before
+			return controlapi.DaemonState{}, err
+		}
+	}
+
+	if up {
+		var stopErrs []error
+		for id := range s.runtimes {
+			configured := profileByID(&s.st, id)
+			if configured != nil && !configured.Disabled && !configured.Removed {
+				continue
+			}
+			if err := s.stopProfileLocked(id); err != nil {
+				stopErrs = append(stopErrs, err)
+			}
+		}
+		for _, configured := range s.st.Profiles {
+			if configured.Disabled || configured.Removed {
+				continue
+			}
+			initial := s.initial[configured.ID]
+			if err := s.startProfileLocked(configured, "", initial.AuthKeyEnv); err != nil {
+				s.lastErrors[configured.ID] = err.Error()
+			}
+		}
+		reconcileErr := s.reconcileLocked()
+		if stopErr := errors.Join(stopErrs...); stopErr != nil {
+			return s.daemonStateLocked(), controlapi.NewError("runtime_stop_failed", "%v", errors.Join(stopErr, reconcileErr))
+		}
+		if reconcileErr != nil {
+			return s.daemonStateLocked(), controlapi.NewError("reconcile_failed", "%v", reconcileErr)
+		}
+		return s.daemonStateLocked(), nil
+	}
+
+	var stopErrs []error
+	for id := range s.runtimes {
+		if err := s.stopProfileLocked(id); err != nil {
+			stopErrs = append(stopErrs, err)
+		}
+	}
+	reconcileErr := s.reconcileLocked()
+	if stopErr := errors.Join(stopErrs...); stopErr != nil {
+		return s.daemonStateLocked(), controlapi.NewError("runtime_stop_failed", "%v", errors.Join(stopErr, reconcileErr))
+	}
+	if reconcileErr != nil {
+		return s.daemonStateLocked(), controlapi.NewError("reconcile_failed", "%v", reconcileErr)
+	}
+	return s.daemonStateLocked(), nil
+}
+
+func (s *supervisor) daemonStateLocked() controlapi.DaemonState {
+	state := "up"
+	if s.st.Down {
+		state = "down"
+	}
+	return controlapi.DaemonState{State: state}
+}
+
+func (s *supervisor) requireDaemonUpLocked() error {
+	if !s.st.Down {
+		return nil
+	}
+	return controlapi.NewError("daemon_down", "tailmix is down; run \"tailmix up\" first")
 }
 
 func (s *supervisor) startAggregateLocked() error {
@@ -475,6 +550,9 @@ func usableStatuses(statuses []tailmixprofile.Status) []tailmixprofile.Status {
 }
 
 func (s *supervisor) statusesLocked() []tailmixprofile.Status {
+	if s.st.Down {
+		return nil
+	}
 	var statuses []tailmixprofile.Status
 	for _, configured := range s.st.Profiles {
 		if configured.Disabled || configured.Removed {
@@ -739,6 +817,8 @@ func (s *supervisor) projectProfileLocked(configured state.Profile) controlapi.P
 		result.RuntimeState = "removed"
 	case configured.Disabled:
 		result.RuntimeState = "disabled"
+	case s.st.Down:
+		result.RuntimeState = "down"
 	default:
 		managed := s.runtimes[configured.ID]
 		if managed == nil {
@@ -845,6 +925,9 @@ func (s *supervisor) GetProfile(_ context.Context, name string) (controlapi.Prof
 func (s *supervisor) AddProfile(_ context.Context, request controlapi.AddProfileRequest) (controlapi.Profile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.requireDaemonUpLocked(); err != nil {
+		return controlapi.Profile{}, err
+	}
 	before := cloneState(s.st)
 	request.Name = strings.TrimSpace(request.Name)
 	if !validProfileName(request.Name) {
@@ -922,6 +1005,9 @@ func (s *supervisor) AddProfile(_ context.Context, request controlapi.AddProfile
 func (s *supervisor) PatchProfile(_ context.Context, name string, request controlapi.PatchProfileRequest) (controlapi.Profile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.requireDaemonUpLocked(); err != nil {
+		return controlapi.Profile{}, err
+	}
 	before := cloneState(s.st)
 	configured, err := s.configuredByNameLocked(name)
 	if err != nil {
@@ -981,6 +1067,9 @@ func (s *supervisor) PatchProfile(_ context.Context, name string, request contro
 func (s *supervisor) SetProfileEnabled(_ context.Context, name string, enabled bool) (controlapi.Profile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.requireDaemonUpLocked(); err != nil {
+		return controlapi.Profile{}, err
+	}
 	before := cloneState(s.st)
 	configured, err := s.configuredByNameLocked(name)
 	if err != nil {
@@ -1018,6 +1107,9 @@ func (s *supervisor) SetProfileEnabled(_ context.Context, name string, enabled b
 func (s *supervisor) RestartProfile(_ context.Context, name string) (controlapi.Profile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.requireDaemonUpLocked(); err != nil {
+		return controlapi.Profile{}, err
+	}
 	configured, err := s.configuredByNameLocked(name)
 	if err != nil {
 		return controlapi.Profile{}, err
@@ -1041,6 +1133,9 @@ func (s *supervisor) RestartProfile(_ context.Context, name string) (controlapi.
 func (s *supervisor) RemoveProfile(_ context.Context, name string, purge bool) (controlapi.Profile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.requireDaemonUpLocked(); err != nil {
+		return controlapi.Profile{}, err
+	}
 	before := cloneState(s.st)
 	configured, err := s.configuredByNameLocked(name)
 	if err != nil {

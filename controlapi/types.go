@@ -8,6 +8,11 @@ import (
 	"github.com/maisem/tailmix/wireguardcfg"
 )
 
+// DaemonState describes whether tailmix is running profile data planes.
+type DaemonState struct {
+	State string `json:"state"`
+}
+
 // UpdateStatus describes the daemon's automatic-update policy and most recent
 // update activity.
 type UpdateStatus struct {
@@ -102,6 +107,7 @@ type Profiles struct {
 // from them. Available-but-unselected routes and exit nodes remain available
 // through their dedicated list endpoints.
 type Status struct {
+	State         string        `json:"state"`
 	Profiles      []Profile     `json:"profiles"`
 	IPRoutes      IPRoutes      `json:"ipRoutes"`
 	ExitNodes     ExitNodes     `json:"exitNodes"`

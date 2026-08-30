@@ -15,6 +15,7 @@ import (
 
 type Backend interface {
 	Status(context.Context) (Status, error)
+	SetDaemonUp(context.Context, bool) (DaemonState, error)
 	ListProfiles(context.Context, bool) (Profiles, error)
 	GetProfile(context.Context, string) (Profile, error)
 	AddProfile(context.Context, AddProfileRequest) (Profile, error)
@@ -68,6 +69,13 @@ func Handler(backend Backend) http.Handler {
 		result, err := backend.Status(r.Context())
 		writeResult(w, result, err)
 	})
+	for _, action := range []string{"up", "down"} {
+		action := action
+		mux.HandleFunc("POST /v1/"+action, func(w http.ResponseWriter, r *http.Request) {
+			result, err := backend.SetDaemonUp(r.Context(), action == "up")
+			writeResult(w, result, err)
+		})
+	}
 	mux.HandleFunc("GET /v1/update", func(w http.ResponseWriter, r *http.Request) {
 		if !hasUpdates {
 			updateUnavailable(w)
@@ -312,13 +320,13 @@ func writeResult(w http.ResponseWriter, result any, err error) {
 		switch apiErr.Code {
 		case "profile_not_found":
 			status = http.StatusNotFound
-		case "profile_exists", "profile_disabled", "transition_in_progress",
+		case "profile_exists", "profile_disabled", "transition_in_progress", "daemon_down",
 			"route_binding_conflict", "dns_route_binding_conflict",
 			"binding_profile_mismatch", "profile_has_bindings":
 			status = http.StatusConflict
 		case "permission_denied":
 			status = http.StatusForbidden
-		case "internal_error", "runtime_start_failed", "dns_configuration_failed",
+		case "internal_error", "runtime_start_failed", "runtime_stop_failed", "dns_configuration_failed",
 			"reconcile_failed", "purge_failed":
 			status = http.StatusInternalServerError
 		}

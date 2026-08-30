@@ -42,6 +42,16 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	return out, err
 }
 
+func (c *Client) SetDaemonUp(ctx context.Context, up bool) (DaemonState, error) {
+	action := "down"
+	if up {
+		action = "up"
+	}
+	var out DaemonState
+	err := c.do(ctx, http.MethodPost, "/v1/"+action, nil, &out)
+	return out, err
+}
+
 func (c *Client) UpdateStatus(ctx context.Context) (UpdateStatus, error) {
 	var out UpdateStatus
 	err := c.do(ctx, http.MethodGet, "/v1/update", nil, &out)

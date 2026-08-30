@@ -34,6 +34,7 @@ func (s *supervisor) Status(_ context.Context) (controlapi.Status, error) {
 	searchDomains.ReconcileError = s.reconcileErr
 
 	return controlapi.Status{
+		State:         s.daemonStateLocked().State,
 		Profiles:      s.listProfilesLocked(false).Profiles,
 		IPRoutes:      ipRoutes,
 		ExitNodes:     exitNodes,

@@ -104,7 +104,7 @@ func delegateTailscaleCompletion(ctx context.Context, socketDir string, words []
 		return false
 	}
 	selected, err := deps.newClient(innerSocketDir).Profile(ctx, profileName)
-	if err != nil {
+	if err != nil || selected.RuntimeState == "down" {
 		return false
 	}
 	socketPath, err := profileLocalAPISocket(innerSocketDir, selected)
@@ -436,6 +436,8 @@ func completionCommandTree() *completionCommand {
 		flags: []completionFlag{flag("Use a different daemon socket directory", completionDirectory, "--socket-dir")},
 		subcommands: []*completionCommand{
 			{name: "status", description: "Show active profiles and accepted network policy", flags: []completionFlag{jsonFlag()}, help: true},
+			{name: "up", description: "Start every enabled profile", help: true},
+			{name: "down", description: "Stop every profile without changing profile enablement", help: true},
 			update,
 			profiles,
 			routes,

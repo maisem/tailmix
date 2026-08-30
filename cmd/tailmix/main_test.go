@@ -23,6 +23,8 @@ type fakeManagementClient struct {
 	profile          controlapi.Profile
 	profileName      string
 	status           controlapi.Status
+	daemonState      controlapi.DaemonState
+	daemonUp         bool
 	ipPatch          controlapi.PatchIPRoutesRequest
 	exitSet          controlapi.SetExitNodeRequest
 	exitCleared      bool
@@ -45,6 +47,10 @@ func (f *fakeManagementClient) Version(context.Context) (tailmixversion.Meta, er
 }
 func (f *fakeManagementClient) Status(context.Context) (controlapi.Status, error) {
 	return f.status, nil
+}
+func (f *fakeManagementClient) SetDaemonUp(_ context.Context, up bool) (controlapi.DaemonState, error) {
+	f.daemonUp = up
+	return f.daemonState, nil
 }
 func (f *fakeManagementClient) UpdateStatus(context.Context) (controlapi.UpdateStatus, error) {
 	return f.updateStatus, nil
@@ -133,6 +139,41 @@ func testDependencies(client managementClient, stdout, stderr io.Writer, runner 
 			return client
 		},
 		version: "tailmix test-version",
+	}
+}
+
+func TestDaemonLifecycleCommands(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		up      bool
+	}{
+		{command: "up", up: true},
+		{command: "down", up: false},
+	} {
+		t.Run(test.command, func(t *testing.T) {
+			client := &fakeManagementClient{daemonState: controlapi.DaemonState{State: test.command}}
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{test.command},
+				testDependencies(client, &stdout, &stderr, nil))
+			if code != 0 || stderr.Len() != 0 {
+				t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+			}
+			if client.daemonUp != test.up {
+				t.Fatalf("daemon up = %v, want %v", client.daemonUp, test.up)
+			}
+			if got, want := stdout.String(), "tailmix is "+test.command+".\n"; got != want {
+				t.Fatalf("output = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestDaemonLifecycleCommandsRejectArguments(t *testing.T) {
+	var stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"down", "now"},
+		testDependencies(&fakeManagementClient{}, io.Discard, &stderr, nil))
+	if code != 2 || !strings.Contains(stderr.String(), "unexpected arguments: now") {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
 }
 
@@ -280,6 +321,22 @@ func TestTSSelectsOpaqueProfileLocalAPISocket(t *testing.T) {
 	}
 	if client.profileName != "work" {
 		t.Fatalf("profile selector = %q, want work", client.profileName)
+	}
+}
+
+func TestTSRejectsDelegationWhileDaemonDown(t *testing.T) {
+	client := &fakeManagementClient{profile: controlapi.Profile{
+		ID: "p_work", Name: "work", RuntimeState: "down",
+	}}
+	var stderr bytes.Buffer
+	code := runWithDependencies(context.Background(),
+		[]string{"ts", "--profile", "work", "status"},
+		testDependencies(client, io.Discard, &stderr, func(context.Context, []string) error {
+			t.Fatal("upstream CLI unexpectedly called")
+			return nil
+		}))
+	if code != 1 || !strings.Contains(stderr.String(), "tailmix is down; run \"tailmix up\" first") {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
 	}
 }
 
@@ -460,7 +517,7 @@ func TestRootHelpShowsFullSubcommandSpace(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	for _, command := range []string{"status", "profiles", "routes", "exit-node", "dns routes", "dns search", "wireguard", "tailscale", "ts", "completion", "version"} {
+	for _, command := range []string{"status", "up", "down", "profiles", "routes", "exit-node", "dns routes", "dns search", "wireguard", "tailscale", "ts", "completion", "version"} {
 		if !strings.Contains(stdout.String(), command) {
 			t.Errorf("help does not contain %q:\n%s", command, stdout.String())
 		}
@@ -493,7 +550,7 @@ func TestCompletionSuggestsCommandsFlagsAndValues(t *testing.T) {
 		words []string
 		want  []string
 	}{
-		{name: "root commands", words: []string{""}, want: []string{"profiles\t", "completion\t", "--socket-dir\t"}},
+		{name: "root commands", words: []string{""}, want: []string{"up\t", "down\t", "profiles\t", "completion\t", "--socket-dir\t"}},
 		{name: "subcommands", words: []string{"profiles", ""}, want: []string{"list\t", "rename\t", "help\t"}},
 		{name: "update subcommands", words: []string{"update", ""}, want: []string{"status\t", "check\t", "apply\t"}},
 		{name: "wireguard subcommands", words: []string{"wireguard", ""}, want: []string{"apply\t", "show\t"}},
@@ -542,6 +599,25 @@ func TestCompletionDelegatesToSelectedTailscaleProfile(t *testing.T) {
 	want := []string{"--socket=/tmp/work.sock", "completion", "__complete", "--", "st"}
 	if !slices.Equal(gotArgs, want) {
 		t.Fatalf("upstream completion args = %q, want %q", gotArgs, want)
+	}
+}
+
+func TestCompletionDoesNotDelegateWhileDaemonDown(t *testing.T) {
+	client := &fakeManagementClient{profile: controlapi.Profile{
+		Name: "work", RuntimeState: "down",
+	}}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(),
+		[]string{"completion", "__complete", "--", "ts", "--profile", "work", "st"},
+		testDependencies(client, &stdout, &stderr, func(context.Context, []string) error {
+			t.Fatal("upstream completion unexpectedly called")
+			return nil
+		}))
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "status\t") {
+		t.Fatalf("fallback completion = %q", stdout.String())
 	}
 }
 
@@ -595,6 +671,7 @@ func TestStatusShowsActiveProfilesAndAcceptedPolicy(t *testing.T) {
 	prefix := netip.MustParsePrefix("10.20.0.0/16")
 	client := &fakeManagementClient{
 		status: controlapi.Status{
+			State: "up",
 			Profiles: []controlapi.Profile{{
 				ID: "work-id", Name: "work", Enabled: true, RuntimeState: "running",
 				MagicDNSSuffix: "corp.example", PeerCount: 3,
@@ -626,7 +703,7 @@ func TestStatusShowsActiveProfilesAndAcceptedPolicy(t *testing.T) {
 		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
 	}
 	for _, want := range []string{
-		"PROFILE", "work", "running", "corp.example",
+		"STATE\tup", "PROFILE", "work", "running", "corp.example",
 		"IP ROUTES", prefix.String(),
 		"EXIT NODE", "gateway.corp.example",
 		"DNS ROUTES", "magicdns",
@@ -641,6 +718,7 @@ func TestStatusShowsActiveProfilesAndAcceptedPolicy(t *testing.T) {
 func TestStatusJSONIncludesAcceptedPolicy(t *testing.T) {
 	client := &fakeManagementClient{
 		status: controlapi.Status{
+			State:    "down",
 			Profiles: []controlapi.Profile{{ID: "work-id", Name: "work"}},
 			DNSRoutes: controlapi.DNSRoutes{Automatic: []controlapi.DNSRouteBinding{{
 				Domain: "corp.example", ProfileID: "work-id", ProfileName: "work",
@@ -658,7 +736,7 @@ func TestStatusJSONIncludesAcceptedPolicy(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Profiles) != 1 || got.Profiles[0].Name != "work" {
+	if got.State != "down" || len(got.Profiles) != 1 || got.Profiles[0].Name != "work" {
 		t.Fatalf("status JSON = %+v", got)
 	}
 	if len(got.DNSRoutes.Automatic) != 1 || got.DNSRoutes.Automatic[0].Domain != "corp.example" {
@@ -668,6 +746,7 @@ func TestStatusJSONIncludesAcceptedPolicy(t *testing.T) {
 
 func TestStatusOmitsEmptyPolicySections(t *testing.T) {
 	client := &fakeManagementClient{status: controlapi.Status{
+		State:    "down",
 		Profiles: []controlapi.Profile{{ID: "work-id", Name: "work"}},
 	}}
 	var stdout, stderr bytes.Buffer

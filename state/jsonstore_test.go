@@ -51,6 +51,33 @@ func TestStoreRoundTripPreservesEffectiveLeases(t *testing.T) {
 	}
 }
 
+func TestStoreRoundTripPreservesDaemonDownState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewJSONStore(path)
+	if err := store.Save(State{Down: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Down {
+		t.Fatal("daemon down state did not round trip")
+	}
+
+	legacyPath := filepath.Join(t.TempDir(), "legacy.json")
+	if err := os.WriteFile(legacyPath, []byte(`{"profiles":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := NewJSONStore(legacyPath).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Down {
+		t.Fatal("legacy state without down field did not default to up")
+	}
+}
+
 func TestStoreMissingFileReturnsEmptyState(t *testing.T) {
 	got, err := NewJSONStore(filepath.Join(t.TempDir(), "missing.json")).Load()
 	if err != nil {

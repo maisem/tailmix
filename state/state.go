@@ -22,6 +22,7 @@ type UpdateState struct {
 }
 
 type State struct {
+	Down             bool              `json:"down,omitempty"`
 	SyntheticPool    string            `json:"syntheticPool"`
 	SyntheticPoolV6  string            `json:"syntheticPoolV6,omitempty"`
 	NATIP            netip.Addr        `json:"natIp,omitempty"`
