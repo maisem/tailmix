@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/maisem/tailmix/wireguardcfg"
+	"github.com/maisem/tailmix/wireguardfilter"
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/device"
 	"github.com/tailscale/wireguard-go/tun"
@@ -32,6 +33,7 @@ type WireGuardEngineConfig struct {
 	Secrets   wireguardcfg.Secrets
 	Tun       tun.Device
 	Bind      conn.Bind
+	ShieldsUp bool
 }
 
 // WireGuardEngine owns one long-lived wireguard-go device. Configuration
@@ -39,19 +41,22 @@ type WireGuardEngineConfig struct {
 type WireGuardEngine struct {
 	mu sync.Mutex
 
-	profileID  string
-	alias      string
-	tun        tun.Device
-	bind       conn.Bind
-	bypassMark bool
-	dev        *device.Device
-	config     wireguardcfg.Config
-	runtime    wireguardcfg.Config
-	secrets    wireguardcfg.Secrets
-	exitIP     netip.Addr
-	started    bool
-	closed     bool
-	updateCh   chan struct{}
+	profileID   string
+	alias       string
+	tun         tun.Device
+	filteredTun *wireguardfilter.Device
+	policy      *wireguardfilter.Policy
+	bind        conn.Bind
+	bypassMark  bool
+	dev         *device.Device
+	config      wireguardcfg.Config
+	runtime     wireguardcfg.Config
+	secrets     wireguardcfg.Secrets
+	exitIP      netip.Addr
+	shieldsUp   bool
+	started     bool
+	closed      bool
+	updateCh    chan struct{}
 }
 
 func NewWireGuardEngine(cfg WireGuardEngineConfig) *WireGuardEngine {
@@ -62,6 +67,7 @@ func NewWireGuardEngine(cfg WireGuardEngineConfig) *WireGuardEngine {
 		bind:      cfg.Bind,
 		config:    cloneWGConfig(cfg.Config),
 		secrets:   cloneWGSecrets(cfg.Secrets),
+		shieldsUp: cfg.ShieldsUp,
 		updateCh:  make(chan struct{}),
 	}
 }
@@ -74,6 +80,10 @@ func (e *WireGuardEngine) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	policy, err := wireguardfilter.Compile(e.config, netip.Addr{}, e.shieldsUp, nil)
+	if err != nil {
+		return fmt.Errorf("compile wireguard packet filter: %w", err)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -85,6 +95,10 @@ func (e *WireGuardEngine) Start(ctx context.Context) error {
 	if e.tun == nil {
 		return errors.New("wireguard engine requires a TUN device")
 	}
+	filteredTun, err := wireguardfilter.NewDevice(e.tun, policy)
+	if err != nil {
+		return err
+	}
 	secrets, err := effectiveWGSecrets(wireguardcfg.Secrets{}, e.config, e.secrets, true)
 	if err != nil {
 		return err
@@ -94,7 +108,7 @@ func (e *WireGuardEngine) Start(ctx context.Context) error {
 	if bind == nil {
 		bind = conn.NewDefaultBind()
 	}
-	dev := device.NewDevice(e.tun, bind, device.NewLogger(device.LogLevelSilent, ""))
+	dev := device.NewDevice(filteredTun, bind, device.NewLogger(device.LogLevelSilent, ""))
 	if err := dev.IpcSet(fullWGConfig(runtime, secrets, netip.Addr{}, bypassMark)); err != nil {
 		dev.Close()
 		return errors.New("configure wireguard device")
@@ -104,6 +118,8 @@ func (e *WireGuardEngine) Start(ctx context.Context) error {
 		return errors.New("start wireguard device")
 	}
 	e.dev = dev
+	e.filteredTun = filteredTun
+	e.policy = policy
 	e.bind = bind
 	e.bypassMark = bypassMark
 	e.secrets = secrets
@@ -123,6 +139,8 @@ func (e *WireGuardEngine) Close() error {
 	e.started = false
 	dev := e.dev
 	e.dev = nil
+	e.filteredTun = nil
+	e.policy = nil
 	e.notifyLocked()
 	e.mu.Unlock()
 	if dev != nil {
@@ -135,39 +153,193 @@ func (e *WireGuardEngine) Dial(context.Context, string, string) (net.Conn, error
 	return nil, errors.New("dial is not supported by wireguard profiles")
 }
 
-// Apply incrementally reconciles cfg onto the running WireGuard device. If an
-// operation fails, it attempts the inverse reconciliation before returning.
-func (e *WireGuardEngine) Apply(ctx context.Context, cfg wireguardcfg.Config, supplied wireguardcfg.Secrets) error {
+// WireGuardApply is a staged update to a running WireGuard engine. Apply
+// installs any restrictive transition and changes the device. Commit publishes
+// the final policy after external state persistence; Rollback restores the old
+// device and policy.
+type WireGuardApply struct {
+	engine *WireGuardEngine
+
+	oldConfig  wireguardcfg.Config
+	oldRuntime wireguardcfg.Config
+	oldSecrets wireguardcfg.Secrets
+	oldExit    netip.Addr
+	oldPolicy  *wireguardfilter.Policy
+
+	newConfig  wireguardcfg.Config
+	newRuntime wireguardcfg.Config
+	newSecrets wireguardcfg.Secrets
+	newExit    netip.Addr
+
+	forward          string
+	transition       *wireguardfilter.Policy
+	final            *wireguardfilter.Policy
+	filterTransition bool
+	applied          bool
+}
+
+// PrepareApply validates and compiles cfg without changing the running engine.
+func (e *WireGuardEngine) PrepareApply(ctx context.Context, cfg wireguardcfg.Config, supplied wireguardcfg.Secrets) (*WireGuardApply, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	runtime, err := resolveWGConfigEndpoints(ctx, cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.started || e.dev == nil {
-		return errors.New("wireguard engine is not started")
+	if !e.started || e.dev == nil || e.filteredTun == nil || e.policy == nil {
+		e.mu.Unlock()
+		return nil, errors.New("wireguard engine is not started")
 	}
 	secrets, err := effectiveWGSecrets(e.secrets, cfg, supplied, false)
 	if err != nil {
-		return err
+		e.mu.Unlock()
+		return nil, err
 	}
-	oldRuntime, oldSecrets, oldExit := e.runtime, e.secrets, e.exitIP
-	newExit := validExitSelection(cfg, oldExit)
-	forward := diffWGConfig(oldRuntime, oldSecrets, oldExit, runtime, secrets, newExit)
-	if forward != "" {
-		if err := e.dev.IpcSet(forward); err != nil {
-			_ = e.dev.IpcSet(fullWGConfig(oldRuntime, oldSecrets, oldExit, e.bypassMark))
+	apply := &WireGuardApply{
+		engine:     e,
+		oldConfig:  cloneWGConfig(e.config),
+		oldRuntime: cloneWGConfig(e.runtime),
+		oldSecrets: cloneWGSecrets(e.secrets),
+		oldExit:    e.exitIP,
+		oldPolicy:  e.policy,
+		newConfig:  cloneWGConfig(cfg),
+		newRuntime: cloneWGConfig(runtime),
+		newSecrets: cloneWGSecrets(secrets),
+		newExit:    validExitSelection(cfg, e.exitIP),
+	}
+	apply.forward = diffWGConfig(apply.oldRuntime, apply.oldSecrets, apply.oldExit, apply.newRuntime, apply.newSecrets, apply.newExit)
+	identityChanged := !sameWGFilterIdentity(apply.oldConfig, apply.oldSecrets, apply.oldExit, apply.newConfig, apply.newSecrets, apply.newExit)
+	policyChanged := !sameWGPacketFilter(apply.oldConfig.PacketFilter, apply.newConfig.PacketFilter)
+	apply.filterTransition = identityChanged || policyChanged
+	shieldsUp := e.shieldsUp
+	e.mu.Unlock()
+
+	if apply.filterTransition {
+		share := apply.oldPolicy
+		if identityChanged {
+			share = nil
+		}
+		apply.transition, err = wireguardfilter.Compile(apply.newConfig, apply.newExit, true, share)
+		if err != nil {
+			return nil, fmt.Errorf("compile restrictive wireguard packet filter: %w", err)
+		}
+		apply.final, err = wireguardfilter.Compile(apply.newConfig, apply.newExit, shieldsUp, apply.transition)
+		if err != nil {
+			return nil, fmt.Errorf("compile wireguard packet filter: %w", err)
+		}
+	}
+	return apply, nil
+}
+
+// Apply installs the staged restrictive transition and WireGuard UAPI.
+func (a *WireGuardApply) Apply() error {
+	e := a.engine
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if a.applied {
+		return nil
+	}
+	if !e.started || e.dev == nil || e.filteredTun == nil || e.policy != a.oldPolicy {
+		return errors.New("wireguard engine changed while apply was staged")
+	}
+	if a.filterTransition {
+		if err := e.filteredTun.Install(a.transition); err != nil {
+			return err
+		}
+		e.policy = a.transition
+	}
+	if a.forward != "" {
+		if err := e.dev.IpcSet(a.forward); err != nil {
+			rollbackErr := e.dev.IpcSet(fullWGConfig(a.oldRuntime, a.oldSecrets, a.oldExit, e.bypassMark))
+			if rollbackErr == nil && a.filterTransition {
+				_ = e.filteredTun.Install(a.oldPolicy)
+				e.policy = a.oldPolicy
+			}
+			if rollbackErr != nil {
+				return errors.Join(errors.New("apply wireguard configuration"), errors.New("restore wireguard configuration"))
+			}
 			return errors.New("apply wireguard configuration")
 		}
 	}
-	e.config = cloneWGConfig(cfg)
-	e.runtime = cloneWGConfig(runtime)
-	e.secrets = cloneWGSecrets(secrets)
-	e.exitIP = newExit
+	e.config = cloneWGConfig(a.newConfig)
+	e.runtime = cloneWGConfig(a.newRuntime)
+	e.secrets = cloneWGSecrets(a.newSecrets)
+	e.exitIP = a.newExit
+	a.applied = true
 	e.notifyLocked()
+	return nil
+}
+
+// Commit publishes the staged final policy after desired state is durable.
+func (a *WireGuardApply) Commit() error {
+	e := a.engine
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !a.applied {
+		return errors.New("wireguard apply has not been applied")
+	}
+	if !a.filterTransition {
+		return nil
+	}
+	if e.policy != a.transition {
+		return errors.New("wireguard packet filter changed during apply")
+	}
+	if err := e.filteredTun.Install(a.final); err != nil {
+		return err
+	}
+	e.policy = a.final
+	return nil
+}
+
+// Rollback restores the old WireGuard UAPI and publishes the old policy last.
+// If device rollback fails, the restrictive transition remains installed.
+func (a *WireGuardApply) Rollback() error {
+	e := a.engine
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !a.applied {
+		return nil
+	}
+	if a.filterTransition {
+		if err := e.filteredTun.Install(a.transition); err != nil {
+			return err
+		}
+		e.policy = a.transition
+	}
+	if err := e.dev.IpcSet(fullWGConfig(a.oldRuntime, a.oldSecrets, a.oldExit, e.bypassMark)); err != nil {
+		return errors.New("restore wireguard configuration")
+	}
+	e.config = cloneWGConfig(a.oldConfig)
+	e.runtime = cloneWGConfig(a.oldRuntime)
+	e.secrets = cloneWGSecrets(a.oldSecrets)
+	e.exitIP = a.oldExit
+	if a.filterTransition {
+		if err := e.filteredTun.Install(a.oldPolicy); err != nil {
+			return err
+		}
+		e.policy = a.oldPolicy
+	}
+	a.applied = false
+	e.notifyLocked()
+	return nil
+}
+
+// Apply incrementally reconciles cfg and immediately commits its policy. Daemon
+// state transactions should use PrepareApply so persistence precedes Commit.
+func (e *WireGuardEngine) Apply(ctx context.Context, cfg wireguardcfg.Config, supplied wireguardcfg.Secrets) error {
+	apply, err := e.PrepareApply(ctx, cfg, supplied)
+	if err != nil {
+		return err
+	}
+	if err := apply.Apply(); err != nil {
+		return err
+	}
+	if err := apply.Commit(); err != nil {
+		_ = apply.Rollback()
+		return err
+	}
 	return nil
 }
 
@@ -176,21 +348,59 @@ func (e *WireGuardEngine) SetExitNodeIP(ctx context.Context, ip netip.Addr) erro
 		return err
 	}
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.started || e.dev == nil {
+	if !e.started || e.dev == nil || e.filteredTun == nil || e.policy == nil {
+		e.mu.Unlock()
 		return errors.New("wireguard engine is not started")
 	}
 	if ip.IsValid() && !validExitSelection(e.config, ip).IsValid() {
+		e.mu.Unlock()
 		return errors.New("address does not identify an eligible exit node")
 	}
 	if ip == e.exitIP {
+		e.mu.Unlock()
 		return nil
 	}
-	uapi := diffWGConfig(e.runtime, e.secrets, e.exitIP, e.runtime, e.secrets, ip)
+	cfg := cloneWGConfig(e.config)
+	oldExit := e.exitIP
+	oldPolicy := e.policy
+	shieldsUp := e.shieldsUp
+	e.mu.Unlock()
+
+	transition, err := wireguardfilter.Compile(cfg, ip, true, nil)
+	if err != nil {
+		return fmt.Errorf("compile restrictive wireguard packet filter: %w", err)
+	}
+	final, err := wireguardfilter.Compile(cfg, ip, shieldsUp, transition)
+	if err != nil {
+		return fmt.Errorf("compile wireguard packet filter: %w", err)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.started || e.dev == nil || e.filteredTun == nil || e.policy != oldPolicy || e.exitIP != oldExit {
+		return errors.New("wireguard engine changed while exit-node update was staged")
+	}
+	if err := e.filteredTun.Install(transition); err != nil {
+		return err
+	}
+	e.policy = transition
+	uapi := diffWGConfig(e.runtime, e.secrets, oldExit, e.runtime, e.secrets, ip)
 	if err := e.dev.IpcSet(uapi); err != nil {
+		rollbackErr := e.dev.IpcSet(fullWGConfig(e.runtime, e.secrets, oldExit, e.bypassMark))
+		if rollbackErr == nil {
+			_ = e.filteredTun.Install(oldPolicy)
+			e.policy = oldPolicy
+		}
+		if rollbackErr != nil {
+			return errors.Join(errors.New("set wireguard exit node"), errors.New("restore wireguard exit node"))
+		}
 		return errors.New("set wireguard exit node")
 	}
 	e.exitIP = ip
+	if err := e.filteredTun.Install(final); err != nil {
+		return err
+	}
+	e.policy = final
 	e.notifyLocked()
 	return nil
 }
@@ -416,13 +626,7 @@ func effectiveWGSecrets(old wireguardcfg.Secrets, cfg wireguardcfg.Config, suppl
 }
 
 func cloneWGConfig(cfg wireguardcfg.Config) wireguardcfg.Config {
-	cfg.Addresses = slices.Clone(cfg.Addresses)
-	cfg.Peers = slices.Clone(cfg.Peers)
-	for i := range cfg.Peers {
-		cfg.Peers[i].Addresses = slices.Clone(cfg.Peers[i].Addresses)
-		cfg.Peers[i].Routes = slices.Clone(cfg.Peers[i].Routes)
-	}
-	return cfg
+	return cfg.Clone()
 }
 
 func cloneWGSecrets(s wireguardcfg.Secrets) wireguardcfg.Secrets {
@@ -443,6 +647,38 @@ func mapsClone[K comparable, V any](in map[K]V) map[K]V {
 		out[k] = v
 	}
 	return out
+}
+
+func sameWGPacketFilter(a, b wireguardcfg.PacketFilter) bool {
+	if len(a.Grants) != len(b.Grants) {
+		return false
+	}
+	for i := range a.Grants {
+		if !slices.Equal(a.Grants[i].Src, b.Grants[i].Src) || !slices.Equal(a.Grants[i].Dst, b.Grants[i].Dst) || !slices.Equal(a.Grants[i].IP, b.Grants[i].IP) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameWGFilterIdentity(oldConfig wireguardcfg.Config, oldSecrets wireguardcfg.Secrets, oldExit netip.Addr, newConfig wireguardcfg.Config, newSecrets wireguardcfg.Secrets, newExit netip.Addr) bool {
+	if !slices.Equal(oldConfig.Addresses, newConfig.Addresses) || oldExit != newExit || !sameOptionalWGKey(oldSecrets.PrivateKey, newSecrets.PrivateKey) || len(oldConfig.Peers) != len(newConfig.Peers) {
+		return false
+	}
+	for i := range oldConfig.Peers {
+		oldPeer, newPeer := oldConfig.Peers[i], newConfig.Peers[i]
+		if oldPeer.Name != newPeer.Name || oldPeer.PublicKey != newPeer.PublicKey || oldPeer.ExitNode != newPeer.ExitNode || !slices.Equal(oldPeer.Addresses, newPeer.Addresses) || !slices.Equal(oldPeer.Routes, newPeer.Routes) || oldSecrets.PresharedKeyByPeer[oldPeer.Name] != newSecrets.PresharedKeyByPeer[newPeer.Name] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameOptionalWGKey(a, b *wireguardcfg.Key) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func sameWGPeer(a, b wireguardcfg.Peer) bool {

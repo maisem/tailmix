@@ -121,6 +121,9 @@ func wgLiveConfig(self wgLiveNode, peers ...wgLiveNode) wireguardcfg.Config {
 		Version: wireguardcfg.Version,
 		Name:    self.name, DNSSuffix: "wg.test", ListenPort: self.port,
 		Addresses: []netip.Addr{self.ip},
+		PacketFilter: wireguardcfg.PacketFilter{Grants: []wireguardcfg.Grant{{
+			Src: []string{"peer:*"}, Dst: []string{"self"}, IP: []string{"icmp:*"},
+		}}},
 	}
 	for _, peer := range peers {
 		cfg.Peers = append(cfg.Peers, wgLivePeer(peer))
