@@ -62,7 +62,7 @@ func TestCompileEnforcesSelectorsAndLongestPrefixOwnership(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := policy.filter.RunIn(&test.pkt, 0); got != test.want {
+			if got := policy.runIn(&test.pkt, 0); got != test.want {
 				t.Fatalf("RunIn() = %v, want %v", got, test.want)
 			}
 		})
@@ -76,7 +76,7 @@ func TestCompileInactiveDestinationsAndExplicitSourceValidation(t *testing.T) {
 	}}}
 	policy := mustCompile(t, cfg, netip.Addr{}, false, nil)
 	pkt := parsedPacket(ipproto.TCP, "10.0.0.2", "10.0.0.1", 40000, 22, packet.TCPSyn)
-	if got := policy.filter.RunIn(&pkt, 0); got != filter.Drop {
+	if got := policy.runIn(&pkt, 0); got != filter.Drop {
 		t.Fatalf("inactive destination grant accepted packet: %v", got)
 	}
 
@@ -104,21 +104,41 @@ func TestPolicyStateSharingAndIsolation(t *testing.T) {
 		t.Fatalf("RunOut() = %v, want accept", got)
 	}
 	reply := parsedPacket(ipproto.UDP, "10.0.0.2", "10.0.0.1", 53, 41000, 0)
-	if got := base.filter.RunIn(&reply, 0); got != filter.Accept {
+	if got := base.runIn(&reply, 0); got != filter.Accept {
 		t.Fatalf("reply through base = %v, want accept", got)
 	}
 
 	shared := mustCompile(t, cfg, netip.Addr{}, true, base)
-	if got := shared.filter.RunIn(&reply, 0); got != filter.Accept {
+	if got := shared.runIn(&reply, 0); got != filter.Accept {
 		t.Fatalf("reply through shared restrictive policy = %v, want accept", got)
 	}
 	isolated := mustCompile(t, cfg, netip.Addr{}, true, nil)
-	if got := isolated.filter.RunIn(&reply, 0); got != filter.Drop {
+	if got := isolated.runIn(&reply, 0); got != filter.Drop {
 		t.Fatalf("reply through isolated restrictive policy = %v, want drop", got)
 	}
 	otherProfile := mustCompile(t, cfg, netip.Addr{}, false, nil)
-	if got := otherProfile.filter.RunIn(&reply, 0); got != filter.Drop {
+	if got := otherProfile.runIn(&reply, 0); got != filter.Drop {
 		t.Fatalf("independent profile reused flow state: %v", got)
+	}
+}
+
+func TestPolicyRequiresExplicitICMPGrant(t *testing.T) {
+	cfg := filterTestConfig()
+	cfg.PacketFilter = wireguardcfg.PacketFilter{Grants: []wireguardcfg.Grant{{
+		Src: []string{"peer:alpha"}, Dst: []string{"self"}, IP: []string{"tcp:22"},
+	}}}
+	requestBytes := icmp4Packet(8, "10.0.0.2", "10.0.0.1")
+	var request packet.Parsed
+	request.Decode(requestBytes)
+	policy := mustCompile(t, cfg, netip.Addr{}, false, nil)
+	if got := policy.runIn(&request, 0); got != filter.Drop {
+		t.Fatalf("ICMP request through TCP-only grant = %v, want drop", got)
+	}
+
+	cfg.PacketFilter.Grants[0].IP = []string{"icmp:*"}
+	policy = mustCompile(t, cfg, netip.Addr{}, false, nil)
+	if got := policy.runIn(&request, 0); got != filter.Accept {
+		t.Fatalf("ICMP request through explicit grant = %v, want accept", got)
 	}
 }
 
@@ -128,11 +148,11 @@ func TestPolicyPreservesUpstreamTCPAndICMPSemantics(t *testing.T) {
 	policy := mustCompile(t, cfg, netip.Addr{}, false, nil)
 
 	tcpContinuation := parsedPacket(ipproto.TCP, "10.0.0.2", "10.0.0.1", 22, 40000, packet.TCPAck)
-	if got := policy.filter.RunIn(&tcpContinuation, 0); got != filter.Accept {
+	if got := policy.runIn(&tcpContinuation, 0); got != filter.Accept {
 		t.Fatalf("TCP continuation = %v, want accept", got)
 	}
 	tcpSYN := parsedPacket(ipproto.TCP, "10.0.0.2", "10.0.0.1", 22, 40000, packet.TCPSyn)
-	if got := policy.filter.RunIn(&tcpSYN, 0); got != filter.Drop {
+	if got := policy.runIn(&tcpSYN, 0); got != filter.Drop {
 		t.Fatalf("TCP SYN = %v, want drop", got)
 	}
 	icmpReply := parsedPacket(ipproto.ICMPv4, "10.0.0.2", "10.0.0.1", 0, 0, 0)
@@ -140,7 +160,7 @@ func TestPolicyPreservesUpstreamTCPAndICMPSemantics(t *testing.T) {
 	// ICMP echo reply type.
 	icmpReplyBytes := icmp4Packet(0, "10.0.0.2", "10.0.0.1")
 	icmpReply.Decode(icmpReplyBytes)
-	if got := policy.filter.RunIn(&icmpReply, 0); got != filter.Accept {
+	if got := policy.runIn(&icmpReply, 0); got != filter.Accept {
 		t.Fatalf("ICMP response = %v, want accept", got)
 	}
 }
