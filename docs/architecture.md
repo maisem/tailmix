@@ -317,12 +317,22 @@ selectors stay in desired state but are inactive until forwarding exists. The
 compiler publishes immutable match tables, keeping packet-path evaluation free
 of YAML parsing and peer-name lookup.
 
-Runtime creation starts with an outbound-only filter. Startup and live apply
-publish the new restrictive filter before exposing permissive runtime or
-persisted state; any later failure restores the previous device config and
-filter. Identity changes recompile the existing normalized policy. Persistent
-shields-up replaces the compiled grants with the same outbound-only baseline
-without mutating the manifest.
+Runtime creation starts with an outbound-only filter. Apply preflights endpoint
+resolution, secrets, device differences, and both restrictive and final packet
+policies, then makes desired configuration durable before live mutation. New
+and existing runtimes keep the restrictive transition installed through UAPI
+and aggregate reconciliation. The final grant policy is published only after
+that state is durable.
+
+Once live mutation begins, apply is forward-only. A UAPI, mapper, host-network,
+DNS, or persistence failure returns its original cause and leaves the affected
+profile on the outbound-only transition; it does not issue inverse UAPI or
+reconstruct the previous mapper, routes, or filter. Desired state remains the
+retry target and status records the possible desired/runtime divergence. An
+explicit reapply or restart retries device convergence, while normal
+reconciliation retries aggregate host state. Identity changes recompile the
+existing normalized policy. Persistent shields-up uses the same outbound-only
+baseline but retains its separately ordered persistence semantics.
 
 ## Reconciliation and live management
 

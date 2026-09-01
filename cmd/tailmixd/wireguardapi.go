@@ -18,6 +18,10 @@ import (
 	"github.com/maisem/tailmix/wireguardfilter"
 )
 
+func wireGuardApplyDegradedMessage(err error) string {
+	return fmt.Sprintf("WireGuard apply left the profile fail-closed; runtime may differ from saved desired state: %v; reapply or restart to retry", err)
+}
+
 func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Config, supplied wireguardcfg.Secrets) (controlapi.WireGuardProfile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -87,9 +91,9 @@ func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Co
 	if err != nil {
 		return controlapi.WireGuardProfile{}, fmt.Errorf("write WireGuard profile secrets: %w", err)
 	}
-	committed := false
+	desiredSaved := false
 	defer func() {
-		if !committed {
+		if !desiredSaved {
 			_ = removeWireGuardSecrets(profileStateDir, secretFile)
 		}
 	}()
@@ -119,50 +123,65 @@ func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Co
 		if err != nil {
 			return controlapi.WireGuardProfile{}, controlapi.NewError("apply_failed", "%v", err)
 		}
+	}
+
+	// Make the complete desired profile and its secrets durable before touching
+	// the live dataplane. Once mutation starts, failures are forward-only: the
+	// saved desired state is the retry target for reapply, restart, or normal
+	// reconciliation.
+	if err := s.store.Save(next); err != nil {
+		return controlapi.WireGuardProfile{}, err
+	}
+	s.st = next
+	desiredSaved = true
+	if oldSecretFile != "" && oldSecretFile != secretFile {
+		_ = removeWireGuardSecrets(profileStateDir, oldSecretFile)
+	}
+
+	if engineApply != nil {
 		if err := engineApply.Apply(); err != nil {
+			s.lastErrors[configured.ID] = wireGuardApplyDegradedMessage(err)
 			return controlapi.WireGuardProfile{}, controlapi.NewError("apply_failed", "%v", err)
 		}
 	}
 
-	s.st = next
 	start := !configured.Disabled && !wasRunning
+	var startedEngine *tailmixprofile.WireGuardEngine
 	if start {
-		if err := s.startProfileLocked(*configured, "", ""); err != nil {
-			s.st = before
+		if err := s.startProfileLockedWithWireGuardTransition(*configured, "", "", true); err != nil {
+			s.lastErrors[configured.ID] = wireGuardApplyDegradedMessage(err)
 			return controlapi.WireGuardProfile{}, controlapi.NewError("apply_failed", "start WireGuard profile: %v", err)
 		}
+		managed := s.runtimes[configured.ID]
+		engine, ok := managed.runtime.Engine.(*tailmixprofile.WireGuardEngine)
+		if !ok {
+			return controlapi.WireGuardProfile{}, controlapi.NewError("invalid_state", "WireGuard profile has an incompatible engine")
+		}
+		startedEngine = engine
 	}
-	if configured.Disabled {
-		if err := s.store.Save(s.st); err != nil {
-			s.st = before
-			return controlapi.WireGuardProfile{}, err
+	if !configured.Disabled {
+		if err := s.reconcileLocked(); err != nil {
+			// reconcileLocked can replace the in-memory state with a derived plan
+			// before its final save. Keep memory aligned with the already durable
+			// desired profile, but do not compensate mapper, routes, or host state.
+			s.st = next
+			s.lastErrors[configured.ID] = wireGuardApplyDegradedMessage(err)
+			return controlapi.WireGuardProfile{}, controlapi.NewError("reconcile_failed", "%v", err)
 		}
-	} else if err := s.reconcileLocked(); err != nil {
-		var rollbackErr error
-		if start {
-			_ = s.stopProfileLocked(configured.ID)
-		} else if engineApply != nil {
-			rollbackErr = engineApply.Rollback()
-			if rollbackErr != nil {
-				s.lastErrors[configured.ID] = fmt.Sprintf("rollback WireGuard configuration: %v", rollbackErr)
-			}
-		}
-		s.st = before
-		restoreErr := s.reconcileLocked()
-		return controlapi.WireGuardProfile{}, controlapi.NewError("reconcile_failed", "%v", errors.Join(err, rollbackErr, restoreErr))
 	}
 	if engineApply != nil {
 		if err := engineApply.Commit(); err != nil {
-			_ = engineApply.Rollback()
-			s.st = before
-			_ = s.reconcileLocked()
+			s.lastErrors[configured.ID] = wireGuardApplyDegradedMessage(err)
 			return controlapi.WireGuardProfile{}, controlapi.NewError("apply_failed", "publish WireGuard packet filter: %v", err)
 		}
 	}
-	committed = true
-	if oldSecretFile != "" && oldSecretFile != secretFile {
-		_ = removeWireGuardSecrets(profileStateDir, oldSecretFile)
+	if startedEngine != nil {
+		if err := startedEngine.CommitStartPolicy(); err != nil {
+			s.lastErrors[configured.ID] = wireGuardApplyDegradedMessage(err)
+			return controlapi.WireGuardProfile{}, controlapi.NewError("apply_failed", "publish WireGuard packet filter: %v", err)
+		}
 	}
+	delete(s.lastErrors, configured.ID)
 	return s.wireGuardProfileLocked(*configured)
 }
 

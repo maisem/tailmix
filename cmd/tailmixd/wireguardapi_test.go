@@ -2,17 +2,35 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/maisem/tailmix/hosttun"
 	tailmixprofile "github.com/maisem/tailmix/profile"
 	"github.com/maisem/tailmix/state"
 	"github.com/maisem/tailmix/tunmux"
 	"github.com/maisem/tailmix/wireguardcfg"
 	"github.com/tailscale/wireguard-go/conn/bindtest"
+	"github.com/tailscale/wireguard-go/tun"
 )
+
+type wireGuardApplyFailHost struct {
+	device *tunmux.ChanTUN
+	err    error
+	calls  int
+}
+
+func (h *wireGuardApplyFailHost) Device() tun.Device { return h.device }
+func (h *wireGuardApplyFailHost) Name() string       { return "wireguard-apply-host" }
+func (h *wireGuardApplyFailHost) Configure(hosttun.Config) error {
+	h.calls++
+	return h.err
+}
+func (h *wireGuardApplyFailHost) Close() error { return nil }
 
 func TestWireGuardProfileProjectsStableEffectiveAddresses(t *testing.T) {
 	canonical := netip.MustParseAddr("10.80.0.2")
@@ -119,6 +137,89 @@ func TestWireGuardApplyPreservesShieldsUpWhileDisabled(t *testing.T) {
 	}
 	if !got.ShieldsUp || !s.st.Profiles[0].WireGuardShieldsUp || s.st.Profiles[0].WireGuard.ListenPort != 51821 {
 		t.Fatalf("apply did not preserve shields-up: result = %+v, state = %+v", got, s.st.Profiles[0])
+	}
+}
+
+func TestWireGuardApplyReconcileFailureKeepsSavedDesiredStateAndDegradedRuntime(t *testing.T) {
+	configured := wireGuardFilterTestProfile(t)
+	private, err := wireguardcfg.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretFile, err := writeWireGuardSecrets(configured.StateDir, wireguardcfg.Secrets{PrivateKey: &private})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured.WireGuardSecretFile = secretFile
+	st := state.State{
+		SyntheticPool: "100.127.0.0/24", SyntheticPoolV6: "fd6d:6e65:7400::/56",
+		Profiles: []state.Profile{configured},
+	}
+	s := newLifecycleTestSupervisor(t, st)
+	s.cfg.Mode = "tun"
+
+	raw := tunmux.NewChanTUN("wireguard-apply-profile")
+	binds := bindtest.NewChannelBinds()
+	engine := tailmixprofile.NewWireGuardEngine(tailmixprofile.WireGuardEngineConfig{
+		ProfileID: configured.ID, Config: configured.WireGuard.Clone(),
+		Secrets: wireguardcfg.Secrets{PrivateKey: &private}, Tun: raw, Bind: binds[0],
+	})
+	if err := engine.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	status, err := engine.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.runtimes[configured.ID] = &managedProfile{
+		runtime: runtimeProfile{State: configured, Engine: engine, Tun: raw},
+		status:  status,
+	}
+	hostDevice := tunmux.NewChanTUN("wireguard-apply-host")
+	reconcileErr := errors.New("host configure failed")
+	host := &wireGuardApplyFailHost{device: hostDevice, err: reconcileErr}
+	s.host = host
+	s.mux = tunmux.NewMux(hostDevice, map[string]*tunmux.ChanTUN{configured.ID: raw}, nil, nil)
+
+	updated := configured.WireGuard.Clone()
+	updated.ListenPort = 51821
+	updated.PacketFilter.Grants[0].IP = []string{"tcp:23"}
+	_, err = s.ApplyWireGuard(context.Background(), updated, wireguardcfg.Secrets{})
+	if err == nil || !strings.Contains(err.Error(), reconcileErr.Error()) {
+		t.Fatalf("ApplyWireGuard error = %v, want original reconcile failure", err)
+	}
+	if host.calls != 1 {
+		t.Fatalf("host configure calls = %d, want no compensating configure", host.calls)
+	}
+	if s.st.Profiles[0].WireGuard.ListenPort != updated.ListenPort {
+		t.Fatalf("in-memory desired listen port = %d, want %d", s.st.Profiles[0].WireGuard.ListenPort, updated.ListenPort)
+	}
+	persisted, err := s.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Profiles[0].WireGuard.ListenPort != updated.ListenPort {
+		t.Fatalf("persisted desired listen port = %d, want %d", persisted.Profiles[0].WireGuard.ListenPort, updated.ListenPort)
+	}
+	persistedSecret := persisted.Profiles[0].WireGuardSecretFile
+	if persistedSecret == secretFile {
+		t.Fatal("failed apply did not advance the desired secret generation")
+	}
+	if _, err := os.Stat(filepath.Join(configured.StateDir, persistedSecret)); err != nil {
+		t.Fatalf("persisted desired secret file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(configured.StateDir, secretFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("superseded secret file still exists or removal failed: %v", err)
+	}
+	lastError := s.lastErrors[configured.ID]
+	if !strings.Contains(lastError, "fail-closed") || !strings.Contains(lastError, "saved desired state") || !strings.Contains(lastError, "reapply or restart") {
+		t.Fatalf("last error = %q, want observable degraded retry guidance", lastError)
+	}
+	_ = s.statusesLocked()
+	projected := s.projectProfileLocked(s.st.Profiles[0])
+	if projected.RuntimeState != "error" || projected.LastError != lastError {
+		t.Fatalf("projected degraded profile = %+v, want persistent error state", projected)
 	}
 }
 

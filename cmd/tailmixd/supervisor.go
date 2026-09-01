@@ -170,9 +170,13 @@ func (s *supervisor) Run(ctx context.Context) (retErr error) {
 			if update.err != nil {
 				s.lastErrors[update.profileID] = update.err.Error()
 				fmt.Fprintf(s.cfg.Stderr, "profile %s watcher: %v\n", s.nameForIDLocked(update.profileID), update.err)
-			} else if _, ok := s.runtimes[update.profileID]; ok {
+			} else if managed, ok := s.runtimes[update.profileID]; ok {
 				if err := s.reconcileLocked(); err != nil {
-					s.lastErrors[update.profileID] = err.Error()
+					if engineApplyDegraded(managed.runtime.Engine) {
+						s.lastErrors[update.profileID] = wireGuardApplyDegradedMessage(err)
+					} else {
+						s.lastErrors[update.profileID] = err.Error()
+					}
 					fmt.Fprintf(s.cfg.Stderr, "profile %s reconcile: %v\n", s.nameForIDLocked(update.profileID), err)
 				}
 			}
@@ -308,6 +312,10 @@ func (s *supervisor) startAggregateLocked() error {
 }
 
 func (s *supervisor) startProfileLocked(configured state.Profile, authKey, authKeyEnv string) error {
+	return s.startProfileLockedWithWireGuardTransition(configured, authKey, authKeyEnv, false)
+}
+
+func (s *supervisor) startProfileLockedWithWireGuardTransition(configured state.Profile, authKey, authKeyEnv string, wireGuardTransition bool) error {
 	if _, ok := s.runtimes[configured.ID]; ok {
 		return nil
 	}
@@ -342,12 +350,13 @@ func (s *supervisor) startProfileLocked(configured state.Profile, authKey, authK
 			return fmt.Errorf("read WireGuard profile secrets: %w", err)
 		}
 		rp.Engine = tailmixprofile.NewWireGuardEngine(tailmixprofile.WireGuardEngineConfig{
-			ProfileID: configured.ID,
-			Alias:     profileName(configured),
-			Config:    configured.WireGuard.Clone(),
-			Secrets:   secrets,
-			Tun:       rp.Tun,
-			ShieldsUp: configured.WireGuardShieldsUp,
+			ProfileID:       configured.ID,
+			Alias:           profileName(configured),
+			Config:          configured.WireGuard.Clone(),
+			Secrets:         secrets,
+			Tun:             rp.Tun,
+			ShieldsUp:       configured.WireGuardShieldsUp,
+			StartRestricted: wireGuardTransition,
 		})
 	default:
 		cancel()
@@ -550,6 +559,11 @@ func usableStatuses(statuses []tailmixprofile.Status) []tailmixprofile.Status {
 	return out
 }
 
+func engineApplyDegraded(engine tailmixprofile.Engine) bool {
+	reporter, ok := engine.(interface{ ApplyDegraded() bool })
+	return ok && reporter.ApplyDegraded()
+}
+
 func (s *supervisor) statusesLocked() []tailmixprofile.Status {
 	if s.st.Down {
 		return nil
@@ -569,7 +583,9 @@ func (s *supervisor) statusesLocked() []tailmixprofile.Status {
 			status = managed.status
 		} else {
 			managed.status = status
-			delete(s.lastErrors, configured.ID)
+			if !engineApplyDegraded(managed.runtime.Engine) {
+				delete(s.lastErrors, configured.ID)
+			}
 		}
 		if status.ProfileID != "" {
 			statuses = append(statuses, status)
@@ -835,7 +851,9 @@ func (s *supervisor) projectProfileLocked(configured state.Profile) controlapi.P
 		result.PeerCount = status.PeerCount
 		result.ShieldsUp = status.ShieldsUp
 		result.AuthURL = status.AuthURL
-		if status.BackendState == "Running" {
+		if engineApplyDegraded(managed.runtime.Engine) {
+			result.RuntimeState = "error"
+		} else if status.BackendState == "Running" {
 			result.RuntimeState = "running"
 		} else if status.AuthURL != "" || strings.Contains(strings.ToLower(status.BackendState), "needslogin") {
 			result.RuntimeState = "needs-login"

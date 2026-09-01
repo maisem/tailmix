@@ -2,6 +2,7 @@ package profile
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"net/netip"
 	"strings"
@@ -261,7 +262,26 @@ func TestWireGuardEngineLivePeerChurn(t *testing.T) {
 	}
 }
 
-func TestWireGuardEngineStagesPolicyUntilCommitAndRollsBack(t *testing.T) {
+func TestWireGuardEngineRestrictedStartWaitsForCommit(t *testing.T) {
+	e, raw, _ := newFilteredWireGuardEngineWithStart(t, []string{"udp:53"}, false, true)
+	inbound := packet.Generate(packet.UDP4Header{
+		IP4Header: packet.IP4Header{Src: netip.MustParseAddr("100.100.0.2"), Dst: netip.MustParseAddr("100.100.0.1")},
+		SrcPort:   40000, DstPort: 53,
+	}, nil)
+	assertFilteredWrite(t, e, raw, inbound, false)
+	if !e.ApplyDegraded() {
+		t.Fatal("restricted start did not retain transition state")
+	}
+	if err := e.CommitStartPolicy(); err != nil {
+		t.Fatal(err)
+	}
+	if e.ApplyDegraded() {
+		t.Fatal("start policy commit did not clear transition state")
+	}
+	assertFilteredWrite(t, e, raw, inbound, true)
+}
+
+func TestWireGuardEngineStagesPolicyUntilCommit(t *testing.T) {
 	e, raw, private := newFilteredWireGuardEngine(t, []string{"udp:53"}, false)
 	oldAllowed := packet.Generate(packet.UDP4Header{
 		IP4Header: packet.IP4Header{Src: netip.MustParseAddr("100.100.0.2"), Dst: netip.MustParseAddr("100.100.0.1")},
@@ -284,23 +304,56 @@ func TestWireGuardEngineStagesPolicyUntilCommitAndRollsBack(t *testing.T) {
 	}
 	assertFilteredWrite(t, e, raw, oldAllowed, false)
 	assertFilteredWrite(t, e, raw, newAllowed, false)
-	if err := apply.Rollback(); err != nil {
-		t.Fatal(err)
-	}
-	assertFilteredWrite(t, e, raw, oldAllowed, true)
-
-	apply, err = e.PrepareApply(t.Context(), cfg, wireguardcfg.Secrets{PrivateKey: &private})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := apply.Apply(); err != nil {
-		t.Fatal(err)
-	}
 	if err := apply.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	assertFilteredWrite(t, e, raw, oldAllowed, false)
 	assertFilteredWrite(t, e, raw, newAllowed, true)
+}
+
+func TestWireGuardEngineApplyFailureDoesNotIssueInverseUpdate(t *testing.T) {
+	e, raw, private := newFilteredWireGuardEngine(t, []string{"udp:53"}, false)
+	oldAllowed := packet.Generate(packet.UDP4Header{
+		IP4Header: packet.IP4Header{Src: netip.MustParseAddr("100.100.0.2"), Dst: netip.MustParseAddr("100.100.0.1")},
+		SrcPort:   40000, DstPort: 53,
+	}, nil)
+	assertFilteredWrite(t, e, raw, oldAllowed, true)
+
+	cfg := e.config.Clone()
+	cfg.ListenPort++
+	cfg.PacketFilter.Grants[0].IP = []string{"udp:54"}
+	applyErr := errors.New("uapi apply failed")
+	calls := 0
+	e.mu.Lock()
+	setConfig := e.setConfig
+	e.setConfig = func(string) error {
+		calls++
+		return applyErr
+	}
+	e.mu.Unlock()
+
+	err := e.Apply(t.Context(), cfg, wireguardcfg.Secrets{PrivateKey: &private})
+	if !errors.Is(err, applyErr) {
+		t.Fatalf("Apply error = %v, want %v", err, applyErr)
+	}
+	if calls != 1 {
+		t.Fatalf("UAPI calls = %d, want one forward apply and no inverse update", calls)
+	}
+	assertFilteredWrite(t, e, raw, oldAllowed, false)
+	degraded := e.ApplyDegraded()
+	e.mu.Lock()
+	e.setConfig = setConfig
+	e.mu.Unlock()
+	if !degraded {
+		t.Fatal("failed apply did not retain degraded transition state")
+	}
+
+	if err := e.Apply(t.Context(), cfg, wireguardcfg.Secrets{PrivateKey: &private}); err != nil {
+		t.Fatalf("explicit retry: %v", err)
+	}
+	if e.ApplyDegraded() {
+		t.Fatal("successful retry did not clear degraded transition state")
+	}
 }
 
 func TestWireGuardEngineShieldsUpPersistenceOrdering(t *testing.T) {
@@ -357,6 +410,10 @@ func TestWireGuardEngineShieldsUpPersistenceOrdering(t *testing.T) {
 }
 
 func newFilteredWireGuardEngine(t *testing.T, permissions []string, shieldsUp bool) (*WireGuardEngine, *tunmux.ChanTUN, wireguardcfg.Key) {
+	return newFilteredWireGuardEngineWithStart(t, permissions, shieldsUp, false)
+}
+
+func newFilteredWireGuardEngineWithStart(t *testing.T, permissions []string, shieldsUp, startRestricted bool) (*WireGuardEngine, *tunmux.ChanTUN, wireguardcfg.Key) {
 	t.Helper()
 	private, err := wireguardcfg.GeneratePrivateKey()
 	if err != nil {
@@ -378,7 +435,7 @@ func newFilteredWireGuardEngine(t *testing.T, permissions []string, shieldsUp bo
 	binds := bindtest.NewChannelBinds()
 	e := NewWireGuardEngine(WireGuardEngineConfig{
 		ProfileID: "wg-profile", Config: cfg, Secrets: wireguardcfg.Secrets{PrivateKey: &private},
-		Tun: raw, Bind: binds[0], ShieldsUp: shieldsUp,
+		Tun: raw, Bind: binds[0], ShieldsUp: shieldsUp, StartRestricted: startRestricted,
 	})
 	if err := e.Start(t.Context()); err != nil {
 		t.Fatal(err)

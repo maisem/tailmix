@@ -58,6 +58,17 @@ addresses, routes, and packet policy on the running WireGuard device without
 recreating its TUN. Removing `presharedKeyFile` from a peer clears that peer's
 preshared key.
 
+Apply validates and resolves the complete request, compiles its packet policy,
+and saves the new desired configuration and secrets before live mutation. The
+runtime then installs an outbound-only transition and applies changes forward.
+If WireGuard UAPI or aggregate host reconciliation fails after mutation starts,
+tailmix returns that failure and leaves the profile fail-closed; it does not
+issue inverse UAPI or reconstruct the previous mapper, routes, or filter. Status
+reports that runtime may differ from saved desired state. Reapply the manifest
+or restart the daemon to retry device convergence; normal reconciliation
+retries aggregate host networking. A newly started profile also remains on the
+restrictive transition until its first aggregate reconciliation succeeds.
+
 ## Packet-filter behavior
 
 Packet filters are unordered, additive allow grants for new inbound traffic.
