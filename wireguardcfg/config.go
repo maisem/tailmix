@@ -29,13 +29,14 @@ type ReadFile func(path string) ([]byte, error)
 
 // Manifest is the on-disk representation of a WireGuard profile.
 type Manifest struct {
-	Version        int            `yaml:"version"`
-	Name           string         `yaml:"name"`
-	DNSSuffix      string         `yaml:"dnsSuffix"`
-	Addresses      []string       `yaml:"addresses"`
-	PrivateKeyFile string         `yaml:"privateKeyFile,omitempty"`
-	ListenPort     *uint16        `yaml:"listenPort,omitempty"`
-	Peers          []PeerManifest `yaml:"peers"`
+	Version        int                   `yaml:"version"`
+	Name           string                `yaml:"name"`
+	DNSSuffix      string                `yaml:"dnsSuffix"`
+	Addresses      []string              `yaml:"addresses"`
+	PrivateKeyFile string                `yaml:"privateKeyFile,omitempty"`
+	ListenPort     *uint16               `yaml:"listenPort,omitempty"`
+	PacketFilter   *PacketFilterManifest `yaml:"packetFilter"`
+	Peers          []PeerManifest        `yaml:"peers"`
 }
 
 // PeerManifest is the on-disk representation of a peer.
@@ -87,12 +88,13 @@ func (d *Duration) UnmarshalYAML(unmarshal func(any) error) error {
 // Config is the validated, normalized form of a Manifest. It deliberately
 // contains no private or preshared key material, nor paths to such material.
 type Config struct {
-	Version    int          `json:"version"`
-	Name       string       `json:"name"`
-	DNSSuffix  string       `json:"dnsSuffix"`
-	Addresses  []netip.Addr `json:"addresses"`
-	ListenPort uint16       `json:"listenPort,omitempty"`
-	Peers      []Peer       `json:"peers"`
+	Version      int          `json:"version"`
+	Name         string       `json:"name"`
+	DNSSuffix    string       `json:"dnsSuffix"`
+	Addresses    []netip.Addr `json:"addresses"`
+	ListenPort   uint16       `json:"listenPort,omitempty"`
+	PacketFilter PacketFilter `json:"packetFilter"`
+	Peers        []Peer       `json:"peers"`
 }
 
 // Peer is a validated, normalized peer.
@@ -111,6 +113,7 @@ type Peer struct {
 func (c Config) Clone() Config {
 	clone := c
 	clone.Addresses = append([]netip.Addr(nil), c.Addresses...)
+	clone.PacketFilter = c.PacketFilter.Clone()
 	clone.Peers = make([]Peer, len(c.Peers))
 	for i, peer := range c.Peers {
 		clone.Peers[i] = peer
@@ -134,6 +137,11 @@ func NormalizeConfig(c Config) (Config, error) {
 			c.Peers[i].Routes[j] = c.Peers[i].Routes[j].Masked()
 		}
 	}
+	packetFilter, err := NormalizePacketFilter(c.PacketFilter, c.Peers)
+	if err != nil {
+		return Config{}, fmt.Errorf("packetFilter: %w", err)
+	}
+	c.PacketFilter = packetFilter
 	sortConfig(&c)
 	if err := Validate(c); err != nil {
 		return Config{}, err
@@ -176,6 +184,7 @@ func Validate(c Config) error {
 		addresses[address] = "profile " + c.Name
 	}
 	routes := make(map[netip.Prefix]string)
+	allowedPrefixes := make(map[netip.Prefix]string)
 	for i, peer := range c.Peers {
 		if err := validateDNSLabel(peer.Name); err != nil {
 			return fmt.Errorf("peers[%d].name: %w", i, err)
@@ -209,7 +218,12 @@ func Validate(c Config) error {
 			if owner, ok := addresses[address]; ok {
 				return fmt.Errorf("peers[%d].addresses[%d]: %s is also assigned to peer %q", i, j, address, owner)
 			}
+			prefix := netip.PrefixFrom(address, address.BitLen())
+			if owner, ok := allowedPrefixes[prefix]; ok && owner != peer.Name {
+				return fmt.Errorf("peers[%d].addresses[%d]: AllowedIP %s is also assigned to peer %q", i, j, prefix, owner)
+			}
 			addresses[address] = peer.Name
+			allowedPrefixes[prefix] = peer.Name
 		}
 		for j, route := range peer.Routes {
 			if !route.IsValid() || route.Bits() == 0 {
@@ -224,8 +238,19 @@ func Validate(c Config) error {
 			if owner, ok := routes[route]; ok {
 				return fmt.Errorf("peers[%d].routes[%d]: %s is also assigned to peer %q", i, j, route, owner)
 			}
+			if owner, ok := allowedPrefixes[route]; ok && owner != peer.Name {
+				return fmt.Errorf("peers[%d].routes[%d]: AllowedIP %s is also assigned to peer %q", i, j, route, owner)
+			}
 			routes[route] = peer.Name
+			allowedPrefixes[route] = peer.Name
 		}
+	}
+	normalizedFilter, err := NormalizePacketFilter(c.PacketFilter, c.Peers)
+	if err != nil {
+		return fmt.Errorf("packetFilter: %w", err)
+	}
+	if !packetFiltersEqual(c.PacketFilter, normalizedFilter) {
+		return errors.New("packetFilter: is not normalized")
 	}
 	return nil
 }
@@ -403,7 +428,15 @@ func Normalize(m Manifest, readFile ReadFile) (Config, Secrets, error) {
 		}
 		config.Peers = append(config.Peers, peer)
 	}
+	packetFilter, err := NormalizePacketFilterManifest(m.PacketFilter, config.Peers)
+	if err != nil {
+		return Config{}, secrets, fmt.Errorf("packetFilter: %w", err)
+	}
+	config.PacketFilter = packetFilter
 	sortConfig(&config)
+	if err := Validate(config); err != nil {
+		return Config{}, secrets, err
+	}
 	return config, secrets, nil
 }
 
