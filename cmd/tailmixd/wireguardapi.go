@@ -15,6 +15,7 @@ import (
 	tailmixprofile "github.com/maisem/tailmix/profile"
 	"github.com/maisem/tailmix/state"
 	"github.com/maisem/tailmix/wireguardcfg"
+	"github.com/maisem/tailmix/wireguardfilter"
 )
 
 func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Config, supplied wireguardcfg.Secrets) (controlapi.WireGuardProfile, error) {
@@ -40,7 +41,6 @@ func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Co
 	configured, findErr := profileByName(&next, config.Name)
 	create := findErr != nil
 	var oldSecrets wireguardcfg.Secrets
-	var oldConfig wireguardcfg.Config
 	var oldSecretFile string
 	wasRunning := false
 	if !create {
@@ -50,7 +50,6 @@ func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Co
 		if configured.WireGuard == nil {
 			return controlapi.WireGuardProfile{}, controlapi.NewError("invalid_state", "WireGuard profile has no configuration")
 		}
-		oldConfig = configured.WireGuard.Clone()
 		oldSecretFile = configured.WireGuardSecretFile
 		oldSecrets, err = readWireGuardSecrets(configured.StateDir, oldSecretFile)
 		if err != nil {
@@ -109,15 +108,18 @@ func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Co
 		return controlapi.WireGuardProfile{}, controlapi.NewError("invalid_state", "%v", err)
 	}
 
-	var engine *tailmixprofile.WireGuardEngine
+	var engineApply *tailmixprofile.WireGuardApply
 	if wasRunning {
 		managed := s.runtimes[configured.ID]
-		var ok bool
-		engine, ok = managed.runtime.Engine.(*tailmixprofile.WireGuardEngine)
+		engine, ok := managed.runtime.Engine.(*tailmixprofile.WireGuardEngine)
 		if !ok {
 			return controlapi.WireGuardProfile{}, controlapi.NewError("invalid_state", "WireGuard profile has an incompatible engine")
 		}
-		if err := engine.Apply(s.ctx, config, secrets); err != nil {
+		engineApply, err = engine.PrepareApply(s.ctx, config, secrets)
+		if err != nil {
+			return controlapi.WireGuardProfile{}, controlapi.NewError("apply_failed", "%v", err)
+		}
+		if err := engineApply.Apply(); err != nil {
 			return controlapi.WireGuardProfile{}, controlapi.NewError("apply_failed", "%v", err)
 		}
 	}
@@ -136,14 +138,26 @@ func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Co
 			return controlapi.WireGuardProfile{}, err
 		}
 	} else if err := s.reconcileLocked(); err != nil {
+		var rollbackErr error
 		if start {
 			_ = s.stopProfileLocked(configured.ID)
-		} else if engine != nil {
-			_ = engine.Apply(s.ctx, oldConfig, oldSecrets)
+		} else if engineApply != nil {
+			rollbackErr = engineApply.Rollback()
+			if rollbackErr != nil {
+				s.lastErrors[configured.ID] = fmt.Sprintf("rollback WireGuard configuration: %v", rollbackErr)
+			}
 		}
 		s.st = before
-		_ = s.reconcileLocked()
-		return controlapi.WireGuardProfile{}, controlapi.NewError("reconcile_failed", "%v", err)
+		restoreErr := s.reconcileLocked()
+		return controlapi.WireGuardProfile{}, controlapi.NewError("reconcile_failed", "%v", errors.Join(err, rollbackErr, restoreErr))
+	}
+	if engineApply != nil {
+		if err := engineApply.Commit(); err != nil {
+			_ = engineApply.Rollback()
+			s.st = before
+			_ = s.reconcileLocked()
+			return controlapi.WireGuardProfile{}, controlapi.NewError("apply_failed", "publish WireGuard packet filter: %v", err)
+		}
 	}
 	committed = true
 	if oldSecretFile != "" && oldSecretFile != secretFile {
@@ -165,16 +179,97 @@ func (s *supervisor) WireGuardProfile(_ context.Context, name string) (controlap
 	return s.wireGuardProfileLocked(*configured)
 }
 
+func (s *supervisor) SetWireGuardShieldsUp(_ context.Context, name string, enabled bool) (controlapi.WireGuardProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	configured, err := s.configuredByNameLocked(strings.TrimSpace(name))
+	if err != nil {
+		return controlapi.WireGuardProfile{}, err
+	}
+	if configured.Removed {
+		return controlapi.WireGuardProfile{}, controlapi.NewError("profile_not_found", "profile %q is removed", name)
+	}
+	if configured.Kind != state.ProfileKindWireGuard || configured.WireGuard == nil {
+		return controlapi.WireGuardProfile{}, controlapi.NewError("invalid_request", "profile %q is not a WireGuard profile", name)
+	}
+	if configured.WireGuardShieldsUp == enabled {
+		return s.wireGuardProfileLocked(*configured)
+	}
+
+	exitIP := netip.Addr{}
+	if s.st.ExitNode != nil && s.st.ExitNode.ProfileID == configured.ID {
+		exitIP = s.st.ExitNode.PeerIP
+	}
+	managed := s.runtimes[configured.ID]
+	var update *tailmixprofile.WireGuardShieldsUpdate
+	if managed != nil {
+		engine, ok := managed.runtime.Engine.(*tailmixprofile.WireGuardEngine)
+		if !ok {
+			return controlapi.WireGuardProfile{}, controlapi.NewError("invalid_state", "WireGuard profile has an incompatible engine")
+		}
+		update, err = engine.PrepareShieldsUp(enabled)
+	} else {
+		_, err = wireguardfilter.Compile(*configured.WireGuard, exitIP, enabled, nil)
+	}
+	if err != nil {
+		return controlapi.WireGuardProfile{}, controlapi.NewError("invalid_state", "compile WireGuard packet filter: %v", err)
+	}
+	if update != nil {
+		if err := update.ApplyBeforeSave(); err != nil {
+			return controlapi.WireGuardProfile{}, controlapi.NewError("apply_failed", "enable WireGuard shields-up: %v", err)
+		}
+	}
+
+	next := cloneState(s.st)
+	nextConfigured := profileByID(&next, configured.ID)
+	nextConfigured.WireGuardShieldsUp = enabled
+	if err := s.store.Save(next); err != nil {
+		if update != nil {
+			_ = update.Rollback()
+		}
+		return controlapi.WireGuardProfile{}, err
+	}
+	s.st = next
+	configured = profileByID(&s.st, configured.ID)
+	if update != nil {
+		if err := update.Commit(); err != nil {
+			s.lastErrors[configured.ID] = err.Error()
+			return controlapi.WireGuardProfile{}, controlapi.NewError("apply_failed", "publish WireGuard shields-up policy: %v", err)
+		}
+		if status, statusErr := managed.runtime.Engine.Status(s.ctx); statusErr == nil {
+			managed.status = status
+		}
+		delete(s.lastErrors, configured.ID)
+	}
+	return s.wireGuardProfileLocked(*configured)
+}
+
 func (s *supervisor) wireGuardProfileLocked(configured state.Profile) (controlapi.WireGuardProfile, error) {
 	config := configured.WireGuard
 	if config == nil {
 		return controlapi.WireGuardProfile{}, controlapi.NewError("invalid_state", "WireGuard profile has no configuration")
 	}
+	resolutions, err := wireguardfilter.DestinationResolutions(*config)
+	if err != nil {
+		return controlapi.WireGuardProfile{}, controlapi.NewError("invalid_state", "resolve WireGuard packet filter destinations: %v", err)
+	}
 	result := controlapi.WireGuardProfile{
-		Name:      profileName(configured),
-		Kind:      state.ProfileKindWireGuard,
-		Addresses: append([]netip.Addr(nil), config.Addresses...),
-		DNSSuffix: config.DNSSuffix,
+		Name:         profileName(configured),
+		Kind:         state.ProfileKindWireGuard,
+		Addresses:    append([]netip.Addr(nil), config.Addresses...),
+		DNSSuffix:    config.DNSSuffix,
+		PacketFilter: config.PacketFilter.Clone(),
+		ShieldsUp:    configured.WireGuardShieldsUp,
+		GrantCount:   len(config.PacketFilter.Grants),
+	}
+	for _, resolution := range resolutions {
+		result.DestinationResolutions = append(result.DestinationResolutions, controlapi.WireGuardDestinationResolution{
+			GrantIndex: resolution.GrantIndex,
+			Selector:   resolution.Selector,
+			State:      resolution.State,
+			Reason:     resolution.Reason,
+		})
 	}
 	status := tailmixprofile.Status{}
 	if managed := s.runtimes[configured.ID]; managed != nil {

@@ -137,6 +137,13 @@ func normalizeGrant(g Grant, peers []Peer) (Grant, error) {
 		if err != nil {
 			return Grant{}, fmt.Errorf("src[%d]: %w", i, err)
 		}
+		parsed, err := ParseSourceSelector(selector)
+		if err != nil {
+			return Grant{}, fmt.Errorf("src[%d]: %w", i, err)
+		}
+		if parsed.Kind == SelectorPrefix && !sourcePrefixHasPossibleOwner(parsed.Prefix, peers) {
+			return Grant{}, fmt.Errorf("src[%d]: selector has no configured or exit-eligible owner", i)
+		}
 		src[i] = selector
 	}
 	dst := make([]string, len(g.Dst))
@@ -216,6 +223,29 @@ func normalizeSelector(raw string, source bool, peers map[string]Peer) (string, 
 		return kind + ":" + name, nil
 	}
 	return "", errors.New("expected *, a supported alias, an IP address, or a CIDR")
+}
+
+func sourcePrefixHasPossibleOwner(prefix netip.Prefix, peers []Peer) bool {
+	for _, peer := range peers {
+		for _, addr := range peer.Addresses {
+			if prefix.Contains(addr) {
+				return true
+			}
+			if peer.ExitNode && addr.BitLen() == prefix.Addr().BitLen() {
+				return true
+			}
+		}
+		for _, route := range peer.Routes {
+			if prefixesOverlap(prefix, route) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func prefixesOverlap(a, b netip.Prefix) bool {
+	return a.Addr().BitLen() == b.Addr().BitLen() && (a.Contains(b.Addr()) || b.Contains(a.Addr()))
 }
 
 func normalizePermissions(raw []string) ([]string, error) {

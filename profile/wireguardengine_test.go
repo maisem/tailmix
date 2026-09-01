@@ -9,9 +9,11 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/maisem/tailmix/tunmux"
 	"github.com/maisem/tailmix/wireguardcfg"
 	"github.com/tailscale/wireguard-go/conn/bindtest"
 	"github.com/tailscale/wireguard-go/tun/tuntest"
+	"tailscale.com/net/packet"
 )
 
 func TestWireGuardEngineAppliesLiveChanges(t *testing.T) {
@@ -255,6 +257,149 @@ func TestWireGuardEngineLivePeerChurn(t *testing.T) {
 			if !got[key] {
 				t.Fatalf("step %d: expected peer missing", step)
 			}
+		}
+	}
+}
+
+func TestWireGuardEngineStagesPolicyUntilCommitAndRollsBack(t *testing.T) {
+	e, raw, private := newFilteredWireGuardEngine(t, []string{"udp:53"}, false)
+	oldAllowed := packet.Generate(packet.UDP4Header{
+		IP4Header: packet.IP4Header{Src: netip.MustParseAddr("100.100.0.2"), Dst: netip.MustParseAddr("100.100.0.1")},
+		SrcPort:   40000, DstPort: 53,
+	}, nil)
+	newAllowed := packet.Generate(packet.UDP4Header{
+		IP4Header: packet.IP4Header{Src: netip.MustParseAddr("100.100.0.2"), Dst: netip.MustParseAddr("100.100.0.1")},
+		SrcPort:   40000, DstPort: 54,
+	}, nil)
+	assertFilteredWrite(t, e, raw, oldAllowed, true)
+
+	cfg := e.config.Clone()
+	cfg.PacketFilter.Grants[0].IP = []string{"udp:54"}
+	apply, err := e.PrepareApply(t.Context(), cfg, wireguardcfg.Secrets{PrivateKey: &private})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apply.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	assertFilteredWrite(t, e, raw, oldAllowed, false)
+	assertFilteredWrite(t, e, raw, newAllowed, false)
+	if err := apply.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	assertFilteredWrite(t, e, raw, oldAllowed, true)
+
+	apply, err = e.PrepareApply(t.Context(), cfg, wireguardcfg.Secrets{PrivateKey: &private})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apply.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	if err := apply.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	assertFilteredWrite(t, e, raw, oldAllowed, false)
+	assertFilteredWrite(t, e, raw, newAllowed, true)
+}
+
+func TestWireGuardEngineShieldsUpPersistenceOrdering(t *testing.T) {
+	e, raw, _ := newFilteredWireGuardEngine(t, []string{"udp:53"}, false)
+	inbound := packet.Generate(packet.UDP4Header{
+		IP4Header: packet.IP4Header{Src: netip.MustParseAddr("100.100.0.2"), Dst: netip.MustParseAddr("100.100.0.1")},
+		SrcPort:   40000, DstPort: 53,
+	}, nil)
+	assertFilteredWrite(t, e, raw, inbound, true)
+
+	enable, err := e.PrepareShieldsUp(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enable.ApplyBeforeSave(); err != nil {
+		t.Fatal(err)
+	}
+	assertFilteredWrite(t, e, raw, inbound, false)
+	if err := enable.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	assertFilteredWrite(t, e, raw, inbound, true)
+
+	enable, err = e.PrepareShieldsUp(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enable.ApplyBeforeSave(); err != nil {
+		t.Fatal(err)
+	}
+	if err := enable.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := e.Status(t.Context()); err != nil || !status.ShieldsUp {
+		t.Fatalf("status after enable = %+v, %v", status, err)
+	}
+	assertFilteredWrite(t, e, raw, inbound, false)
+
+	disable, err := e.PrepareShieldsUp(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := disable.ApplyBeforeSave(); err != nil {
+		t.Fatal(err)
+	}
+	assertFilteredWrite(t, e, raw, inbound, false)
+	if err := disable.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := e.Status(t.Context()); err != nil || status.ShieldsUp {
+		t.Fatalf("status after disable = %+v, %v", status, err)
+	}
+	assertFilteredWrite(t, e, raw, inbound, true)
+}
+
+func newFilteredWireGuardEngine(t *testing.T, permissions []string, shieldsUp bool) (*WireGuardEngine, *tunmux.ChanTUN, wireguardcfg.Key) {
+	t.Helper()
+	private, err := wireguardcfg.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerPrivate, err := wireguardcfg.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerKey, err := peerPrivate.Public()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testWGConfig(peerKey)
+	cfg.PacketFilter = wireguardcfg.PacketFilter{Grants: []wireguardcfg.Grant{{
+		Src: []string{"peer:server"}, Dst: []string{"self"}, IP: permissions,
+	}}}
+	raw := tunmux.NewChanTUN("filter-test")
+	binds := bindtest.NewChannelBinds()
+	e := NewWireGuardEngine(WireGuardEngineConfig{
+		ProfileID: "wg-profile", Config: cfg, Secrets: wireguardcfg.Secrets{PrivateKey: &private},
+		Tun: raw, Bind: binds[0], ShieldsUp: shieldsUp,
+	})
+	if err := e.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	return e, raw, private
+}
+
+func assertFilteredWrite(t *testing.T, e *WireGuardEngine, raw *tunmux.ChanTUN, pkt []byte, want bool) {
+	t.Helper()
+	if n, err := e.filteredTun.Write([][]byte{pkt}, 0); err != nil || n != 1 {
+		t.Fatalf("filtered Write() = (%d, %v)", n, err)
+	}
+	select {
+	case got := <-raw.Inbound:
+		if !want {
+			t.Fatalf("packet unexpectedly accepted: %v", got)
+		}
+	default:
+		if want {
+			t.Fatal("packet unexpectedly dropped")
 		}
 	}
 }

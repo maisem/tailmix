@@ -161,7 +161,7 @@ func TestStoreRoundTripWireGuardExcludesSecrets(t *testing.T) {
 	}
 	want := State{Profiles: []Profile{{
 		ID: "p_lab", Name: "lab", Kind: ProfileKindWireGuard, StateDir: "profiles/p_lab",
-		WireGuard: &config, WireGuardSecretFile: "wireguard-secrets-random.json",
+		WireGuard: &config, WireGuardSecretFile: "wireguard-secrets-random.json", WireGuardShieldsUp: true,
 	}}}
 	if err := store.Save(want); err != nil {
 		t.Fatal(err)
@@ -178,7 +178,7 @@ func TestStoreRoundTripWireGuardExcludesSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	profile := got.Profiles[0]
-	if profile.Kind != ProfileKindWireGuard || profile.WireGuardSecretFile != want.Profiles[0].WireGuardSecretFile || profile.WireGuard == nil || profile.WireGuard.Peers[0].Name != "peer" {
+	if profile.Kind != ProfileKindWireGuard || profile.WireGuardSecretFile != want.Profiles[0].WireGuardSecretFile || !profile.WireGuardShieldsUp || profile.WireGuard == nil || profile.WireGuard.Peers[0].Name != "peer" {
 		t.Fatalf("WireGuard profile did not round trip: %+v", profile)
 	}
 }

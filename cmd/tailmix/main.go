@@ -41,6 +41,7 @@ type managementClient interface {
 	RemoveProfile(context.Context, string, bool) (controlapi.Profile, error)
 	ApplyWireGuard(context.Context, wireguardcfg.Config, wireguardcfg.Secrets) (controlapi.WireGuardProfile, error)
 	WireGuardProfile(context.Context, string) (controlapi.WireGuardProfile, error)
+	SetWireGuardShieldsUp(context.Context, string, bool) (controlapi.WireGuardProfile, error)
 	IPRoutes(context.Context, bool) (controlapi.IPRoutes, error)
 	PatchIPRoutes(context.Context, controlapi.PatchIPRoutesRequest) (controlapi.IPRoutes, error)
 	ExitNodes(context.Context) (controlapi.ExitNodes, error)
@@ -195,6 +196,33 @@ func runWireGuard(ctx context.Context, client managementClient, args []string, d
 			return err
 		}
 		result, err := client.WireGuardProfile(ctx, name)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(deps.stdout, result)
+		}
+		writeWireGuardProfile(deps.stdout, result)
+		return nil
+
+	case "shields-up":
+		rest := args[1:]
+		jsonOutput, err := takeBool(&rest, "--json")
+		if err != nil {
+			return err
+		}
+		if len(rest) != 2 {
+			return usageError{"usage: tailmix wireguard shields-up <profile> <on|off> [--json]"}
+		}
+		enabled := false
+		switch rest[1] {
+		case "on":
+			enabled = true
+		case "off":
+		default:
+			return usageError{"wireguard shields-up state must be on or off"}
+		}
+		result, err := client.SetWireGuardShieldsUp(ctx, rest[0], enabled)
 		if err != nil {
 			return err
 		}
@@ -1287,9 +1315,21 @@ func writeProfile(w io.Writer, profile controlapi.Profile) {
 
 func writeWireGuardProfile(w io.Writer, profile controlapi.WireGuardProfile) {
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(table, "PROFILE:\t%s\nKIND:\t%s\nPUBLIC KEY:\t%s\nLISTEN PORT:\t%d\nADDRESSES:\t%s\nDNS SUFFIX:\t%s\n",
+	fmt.Fprintf(table, "PROFILE:\t%s\nKIND:\t%s\nPUBLIC KEY:\t%s\nLISTEN PORT:\t%d\nADDRESSES:\t%s\nDNS SUFFIX:\t%s\nSHIELDS UP:\t%s\nCONFIGURED GRANTS:\t%d\n",
 		profile.Name, profile.Kind, profile.PublicKey, profile.ListenPort,
-		joinStrings(profile.Addresses), profile.DNSSuffix)
+		joinStrings(profile.Addresses), profile.DNSSuffix, yesNo(profile.ShieldsUp), profile.GrantCount)
+	if len(profile.PacketFilter.Grants) > 0 {
+		fmt.Fprintln(table, "\nGRANT\tSOURCES\tDESTINATIONS\tIP")
+		for i, grant := range profile.PacketFilter.Grants {
+			fmt.Fprintf(table, "%d\t%s\t%s\t%s\n", i, strings.Join(grant.Src, ","), strings.Join(grant.Dst, ","), strings.Join(grant.IP, ","))
+		}
+	}
+	if len(profile.DestinationResolutions) > 0 {
+		fmt.Fprintln(table, "\nGRANT\tDESTINATION\tSTATE\tREASON")
+		for _, resolution := range profile.DestinationResolutions {
+			fmt.Fprintf(table, "%d\t%s\t%s\t%s\n", resolution.GrantIndex, resolution.Selector, resolution.State, resolution.Reason)
+		}
+	}
 	if len(profile.Peers) > 0 {
 		fmt.Fprintln(table, "\nPEER\tPUBLIC KEY\tONLINE\tENDPOINT\tCANONICAL\tEFFECTIVE\tROUTES\tEXIT\tHANDSHAKE\tRX\tTX")
 	}
@@ -1552,11 +1592,13 @@ Environment:
 const wireGuardHelp = `Usage:
   tailmix wireguard apply --file <path|-> [--json]
   tailmix wireguard show <profile> [--json]
+  tailmix wireguard shields-up <profile> <on|off> [--json]
 
 Apply validates a declarative YAML profile and reconciles it live. Relative key
 paths are resolved from the manifest directory, or from the current directory
 when the manifest is read from standard input. Show never includes private or
-preshared key material.
+preshared key material. Shields-up persistently suppresses configured grants
+while preserving replies to locally initiated traffic.
 `
 
 const versionHelp = `Usage:

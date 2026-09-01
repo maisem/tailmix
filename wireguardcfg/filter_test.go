@@ -85,6 +85,21 @@ func TestPacketFilterRejectsNullGrantFields(t *testing.T) {
 	}
 }
 
+func TestPacketFilterRejectsSourceWithoutPossibleOwner(t *testing.T) {
+	manifest := strings.Replace(validManifest(), "    exitNode: true\n", "", 1)
+	manifest = strings.Replace(manifest, "peers:\n", `packetFilter:
+  grants:
+    - src: [203.0.113.7]
+      dst: [self]
+      ip: ["*"]
+peers:
+`, 1)
+	_, _, err := Parse([]byte(manifest), func(string) ([]byte, error) { return []byte(testKey(2)), nil })
+	if err == nil || !strings.Contains(err.Error(), "no configured or exit-eligible owner") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestPacketFilterValidation(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -25,6 +25,7 @@ type Backend interface {
 	RemoveProfile(context.Context, string, bool) (Profile, error)
 	ApplyWireGuard(context.Context, wireguardcfg.Config, wireguardcfg.Secrets) (WireGuardProfile, error)
 	WireGuardProfile(context.Context, string) (WireGuardProfile, error)
+	SetWireGuardShieldsUp(context.Context, string, bool) (WireGuardProfile, error)
 
 	IPRoutes(context.Context, bool) (IPRoutes, error)
 	PatchIPRoutes(context.Context, PatchIPRoutesRequest) (IPRoutes, error)
@@ -169,6 +170,19 @@ func Handler(backend Backend) http.Handler {
 			return
 		}
 		result, backendErr := backend.WireGuardProfile(r.Context(), name)
+		writeResult(w, result, backendErr)
+	})
+	mux.HandleFunc("POST /v1/wireguard/by-name/{name}/shields-up", func(w http.ResponseWriter, r *http.Request) {
+		name, err := url.PathUnescape(r.PathValue("name"))
+		if err != nil {
+			writeResult(w, nil, NewError("invalid_request", "invalid escaped profile name"))
+			return
+		}
+		var request WireGuardShieldsUpRequest
+		if !decodeRequest(w, r, &request) {
+			return
+		}
+		result, backendErr := backend.SetWireGuardShieldsUp(r.Context(), name, request.Enabled)
 		writeResult(w, result, backendErr)
 	})
 

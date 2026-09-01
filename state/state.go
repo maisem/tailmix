@@ -50,6 +50,7 @@ type Profile struct {
 	AcceptAllDNSRoutes  bool                 `json:"acceptAllDnsRoutes,omitempty"`
 	WireGuard           *wireguardcfg.Config `json:"wireguard,omitempty"`
 	WireGuardSecretFile string               `json:"wireguardSecretFile,omitempty"`
+	WireGuardShieldsUp  bool                 `json:"wireguardShieldsUp,omitempty"`
 }
 
 type IPRouteBinding struct {

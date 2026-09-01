@@ -19,6 +19,81 @@ import (
 	"tailscale.com/wgengine/filter"
 )
 
+// DestinationResolution describes how one normalized destination selector is
+// represented by the currently implemented local delivery path.
+type DestinationResolution struct {
+	GrantIndex int    `json:"grantIndex"`
+	Selector   string `json:"selector"`
+	State      string `json:"state"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+const forwardingUnavailable = "forwarding_unavailable"
+
+// DestinationResolutions returns one deterministic status entry per
+// destination selector in cfg.
+func DestinationResolutions(cfg wireguardcfg.Config) ([]DestinationResolution, error) {
+	local, err := selfSet(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var result []DestinationResolution
+	for grantIndex, grant := range cfg.PacketFilter.Grants {
+		for _, value := range grant.Dst {
+			selector, err := wireguardcfg.ParseDestinationSelector(value)
+			if err != nil {
+				return nil, fmt.Errorf("grants[%d]: destination %q: %w", grantIndex, value, err)
+			}
+			resolution := DestinationResolution{GrantIndex: grantIndex, Selector: value}
+			switch selector.Kind {
+			case wireguardcfg.SelectorSelf:
+				resolution.State = "active"
+			case wireguardcfg.SelectorAll:
+				resolution.State = "partial"
+				resolution.Reason = forwardingUnavailable
+			case wireguardcfg.SelectorPrefix:
+				state, err := prefixDestinationState(selector.Prefix, local)
+				if err != nil {
+					return nil, err
+				}
+				resolution.State = state
+				if state != "active" {
+					resolution.Reason = forwardingUnavailable
+				}
+			default:
+				resolution.State = "inactive"
+				resolution.Reason = forwardingUnavailable
+			}
+			result = append(result, resolution)
+		}
+	}
+	return result, nil
+}
+
+func prefixDestinationState(prefix netip.Prefix, local *netipx.IPSet) (string, error) {
+	var matching netipx.IPSetBuilder
+	matching.AddPrefix(prefix)
+	matching.Intersect(local)
+	active, err := matching.IPSet()
+	if err != nil {
+		return "", err
+	}
+	if len(active.Prefixes()) == 0 {
+		return "inactive", nil
+	}
+	var unavailable netipx.IPSetBuilder
+	unavailable.AddPrefix(prefix)
+	unavailable.RemoveSet(local)
+	remainder, err := unavailable.IPSet()
+	if err != nil {
+		return "", err
+	}
+	if len(remainder.Prefixes()) == 0 {
+		return "active", nil
+	}
+	return "partial", nil
+}
+
 // Policy is an immutable compiled packet filter. Policies can share their
 // outbound-flow state across ordinary policy replacements.
 type Policy struct {
@@ -305,9 +380,6 @@ func resolveSources(values []string, owned ownership) (*netipx.IPSet, error) {
 			intersection, err := explicit.IPSet()
 			if err != nil {
 				return nil, err
-			}
-			if len(intersection.Prefixes()) == 0 {
-				return nil, fmt.Errorf("src[%d]: selector has no configured or exit-eligible owner", i)
 			}
 			b.AddSet(intersection)
 		default:

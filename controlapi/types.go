@@ -73,13 +73,31 @@ type ApplyWireGuardRequest struct {
 
 // WireGuardProfile is the public runtime view of a WireGuard profile.
 type WireGuardProfile struct {
-	Name       string          `json:"name"`
-	Kind       string          `json:"kind"`
-	PublicKey  string          `json:"publicKey"`
-	ListenPort uint16          `json:"listenPort,omitempty"`
-	Addresses  []netip.Addr    `json:"addresses,omitempty"`
-	DNSSuffix  string          `json:"dnsSuffix"`
-	Peers      []WireGuardPeer `json:"peers,omitempty"`
+	Name                   string                           `json:"name"`
+	Kind                   string                           `json:"kind"`
+	PublicKey              string                           `json:"publicKey"`
+	ListenPort             uint16                           `json:"listenPort,omitempty"`
+	Addresses              []netip.Addr                     `json:"addresses,omitempty"`
+	DNSSuffix              string                           `json:"dnsSuffix"`
+	PacketFilter           wireguardcfg.PacketFilter        `json:"packetFilter"`
+	ShieldsUp              bool                             `json:"shieldsUp"`
+	GrantCount             int                              `json:"grantCount"`
+	DestinationResolutions []WireGuardDestinationResolution `json:"destinationResolutions,omitempty"`
+	Peers                  []WireGuardPeer                  `json:"peers,omitempty"`
+}
+
+// WireGuardDestinationResolution describes whether a configured destination
+// selector is enforceable by the current local delivery path.
+type WireGuardDestinationResolution struct {
+	GrantIndex int    `json:"grantIndex"`
+	Selector   string `json:"selector"`
+	State      string `json:"state"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// WireGuardShieldsUpRequest changes the persistent raw-profile override.
+type WireGuardShieldsUpRequest struct {
+	Enabled bool `json:"enabled"`
 }
 
 // WireGuardPeer is the public configured and effective view of one peer.

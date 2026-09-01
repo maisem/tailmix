@@ -14,6 +14,32 @@ import (
 	"tailscale.com/wgengine/filter"
 )
 
+func TestDestinationResolutions(t *testing.T) {
+	cfg := filterTestConfig()
+	cfg.Addresses = append(cfg.Addresses, netip.MustParseAddr("10.0.0.2"))
+	cfg.PacketFilter = wireguardcfg.PacketFilter{Grants: []wireguardcfg.Grant{{
+		Src: []string{"peer:*"},
+		Dst: []string{"*", "10.0.0.1", "10.0.0.0/30", "10.0.0.9", "internet", "peer:alpha", "self"},
+		IP:  []string{"*"},
+	}}}
+	got, err := DestinationResolutions(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []DestinationResolution{
+		{GrantIndex: 0, Selector: "*", State: "partial", Reason: forwardingUnavailable},
+		{GrantIndex: 0, Selector: "10.0.0.1", State: "active"},
+		{GrantIndex: 0, Selector: "10.0.0.0/30", State: "partial", Reason: forwardingUnavailable},
+		{GrantIndex: 0, Selector: "10.0.0.9", State: "inactive", Reason: forwardingUnavailable},
+		{GrantIndex: 0, Selector: "internet", State: "inactive", Reason: forwardingUnavailable},
+		{GrantIndex: 0, Selector: "peer:alpha", State: "inactive", Reason: forwardingUnavailable},
+		{GrantIndex: 0, Selector: "self", State: "active"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("DestinationResolutions() = %#v, want %#v", got, want)
+	}
+}
+
 func TestCompileEnforcesSelectorsAndLongestPrefixOwnership(t *testing.T) {
 	cfg := filterTestConfig()
 	cfg.PacketFilter = wireguardcfg.PacketFilter{Grants: []wireguardcfg.Grant{
@@ -56,8 +82,16 @@ func TestCompileInactiveDestinationsAndExplicitSourceValidation(t *testing.T) {
 
 	cfg.PacketFilter.Grants[0].Src = []string{"203.0.113.7"}
 	cfg.PacketFilter.Grants[0].Dst = []string{"self"}
-	if _, err := Compile(cfg, netip.Addr{}, false, nil); err == nil {
-		t.Fatal("Compile succeeded for source selector with no configured owner")
+	if _, err := wireguardcfg.NormalizePacketFilter(cfg.PacketFilter, cfg.Peers); err == nil {
+		t.Fatal("NormalizePacketFilter succeeded for source selector with no configured owner")
+	}
+
+	cfg.Peers[0].ExitNode = true
+	if _, err := wireguardcfg.NormalizePacketFilter(cfg.PacketFilter, cfg.Peers); err != nil {
+		t.Fatalf("NormalizePacketFilter rejected exit-eligible source: %v", err)
+	}
+	if _, err := Compile(cfg, netip.Addr{}, false, nil); err != nil {
+		t.Fatalf("Compile rejected currently inactive exit-eligible source: %v", err)
 	}
 }
 

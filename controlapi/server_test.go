@@ -26,6 +26,7 @@ type recordingBackend struct {
 	wireGuardSecrets wireguardcfg.Secrets
 	wireGuardProfile WireGuardProfile
 	wireGuardName    string
+	wireGuardShields bool
 }
 
 func (b *recordingBackend) UpdateStatus(context.Context) (UpdateStatus, error) { return b.update, nil }
@@ -90,6 +91,13 @@ func (b *recordingBackend) ApplyWireGuard(_ context.Context, config wireguardcfg
 
 func (b *recordingBackend) WireGuardProfile(_ context.Context, name string) (WireGuardProfile, error) {
 	b.wireGuardName = name
+	return b.wireGuardProfile, nil
+}
+
+func (b *recordingBackend) SetWireGuardShieldsUp(_ context.Context, name string, enabled bool) (WireGuardProfile, error) {
+	b.wireGuardName = name
+	b.wireGuardShields = enabled
+	b.wireGuardProfile.ShieldsUp = enabled
 	return b.wireGuardProfile, nil
 }
 
@@ -174,6 +182,12 @@ func TestHandlerAppliesAndShowsWireGuardProfile(t *testing.T) {
 	Handler(backend).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/wireguard/by-name/lab", nil))
 	if response.Code != http.StatusOK || backend.wireGuardName != "lab" || !strings.Contains(response.Body.String(), `"kind":"wireguard"`) {
 		t.Fatalf("status = %d, name = %q, body = %s", response.Code, backend.wireGuardName, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	Handler(backend).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/wireguard/by-name/lab/shields-up", strings.NewReader(`{"enabled":true}`)))
+	if response.Code != http.StatusOK || backend.wireGuardName != "lab" || !backend.wireGuardShields || !strings.Contains(response.Body.String(), `"shieldsUp":true`) {
+		t.Fatalf("status = %d, name = %q, enabled = %v, body = %s", response.Code, backend.wireGuardName, backend.wireGuardShields, response.Body.String())
 	}
 }
 

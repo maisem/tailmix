@@ -347,6 +347,7 @@ func (s *supervisor) startProfileLocked(configured state.Profile, authKey, authK
 			Config:    configured.WireGuard.Clone(),
 			Secrets:   secrets,
 			Tun:       rp.Tun,
+			ShieldsUp: configured.WireGuardShieldsUp,
 		})
 	default:
 		cancel()
@@ -810,6 +811,7 @@ func (s *supervisor) projectProfileLocked(configured state.Profile) controlapi.P
 		Removed:            configured.Removed,
 		AcceptAllRoutes:    configured.AcceptAllRoutes,
 		AcceptAllDNSRoutes: configured.AcceptAllDNSRoutes,
+		ShieldsUp:          configured.Kind == state.ProfileKindWireGuard && configured.WireGuardShieldsUp,
 		LastError:          s.lastErrors[configured.ID],
 	}
 	switch {
@@ -1146,6 +1148,7 @@ func (s *supervisor) RemoveProfile(_ context.Context, name string, purge bool) (
 	}
 	configured.Removed = true
 	configured.Disabled = true
+	configured.WireGuardShieldsUp = false
 	if s.st.ExitNode != nil && s.st.ExitNode.ProfileID == configured.ID {
 		s.st.ExitNode = nil
 	}

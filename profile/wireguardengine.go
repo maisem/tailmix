@@ -343,6 +343,104 @@ func (e *WireGuardEngine) Apply(ctx context.Context, cfg wireguardcfg.Config, su
 	return nil
 }
 
+// WireGuardShieldsUpdate is a staged shields-up policy replacement.
+type WireGuardShieldsUpdate struct {
+	engine  *WireGuardEngine
+	old     *wireguardfilter.Policy
+	target  *wireguardfilter.Policy
+	enabled bool
+	applied bool
+	noop    bool
+}
+
+// PrepareShieldsUp compiles a shields-up replacement without publishing it.
+func (e *WireGuardEngine) PrepareShieldsUp(enabled bool) (*WireGuardShieldsUpdate, error) {
+	e.mu.Lock()
+	if !e.started || e.dev == nil || e.filteredTun == nil || e.policy == nil {
+		e.mu.Unlock()
+		return nil, errors.New("wireguard engine is not started")
+	}
+	update := &WireGuardShieldsUpdate{engine: e, old: e.policy, enabled: enabled, noop: e.shieldsUp == enabled}
+	cfg := cloneWGConfig(e.config)
+	exitIP := e.exitIP
+	e.mu.Unlock()
+	if update.noop {
+		return update, nil
+	}
+	policy, err := wireguardfilter.Compile(cfg, exitIP, enabled, update.old)
+	if err != nil {
+		return nil, fmt.Errorf("compile wireguard packet filter: %w", err)
+	}
+	update.target = policy
+	return update, nil
+}
+
+// ApplyBeforeSave publishes an enabling shields-up policy before persistence.
+// Disabling remains restrictive until Commit is called after persistence.
+func (u *WireGuardShieldsUpdate) ApplyBeforeSave() error {
+	if u.noop || !u.enabled {
+		return nil
+	}
+	e := u.engine
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.policy != u.old {
+		return errors.New("wireguard packet filter changed while shields-up update was staged")
+	}
+	if err := e.filteredTun.Install(u.target); err != nil {
+		return err
+	}
+	e.policy = u.target
+	u.applied = true
+	return nil
+}
+
+// Commit publishes a disabling replacement after persistence and records the
+// new override state.
+func (u *WireGuardShieldsUpdate) Commit() error {
+	e := u.engine
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if u.noop {
+		return nil
+	}
+	if u.enabled {
+		if !u.applied || e.policy != u.target {
+			return errors.New("shields-up policy was not installed before commit")
+		}
+	} else {
+		if e.policy != u.old {
+			return errors.New("wireguard packet filter changed while shields-up update was staged")
+		}
+		if err := e.filteredTun.Install(u.target); err != nil {
+			return err
+		}
+		e.policy = u.target
+	}
+	e.shieldsUp = u.enabled
+	e.notifyLocked()
+	return nil
+}
+
+// Rollback restores the old policy after a failed persistence operation.
+func (u *WireGuardShieldsUpdate) Rollback() error {
+	if u.noop || !u.applied {
+		return nil
+	}
+	e := u.engine
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.policy != u.target {
+		return errors.New("wireguard packet filter changed during shields-up rollback")
+	}
+	if err := e.filteredTun.Install(u.old); err != nil {
+		return err
+	}
+	e.policy = u.old
+	u.applied = false
+	return nil
+}
+
 func (e *WireGuardEngine) SetExitNodeIP(ctx context.Context, ip netip.Addr) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -441,6 +539,7 @@ func (e *WireGuardEngine) Status(ctx context.Context) (Status, error) {
 		SelfNodeID:     e.config.Name,
 		SelfIPs:        slices.Clone(e.config.Addresses),
 		RouteAll:       true,
+		ShieldsUp:      e.shieldsUp,
 	}
 	if !e.started || e.dev == nil {
 		return st, nil

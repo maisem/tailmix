@@ -88,6 +88,12 @@ func (c *Client) WireGuardProfile(ctx context.Context, name string) (WireGuardPr
 	return out, err
 }
 
+func (c *Client) SetWireGuardShieldsUp(ctx context.Context, name string, enabled bool) (WireGuardProfile, error) {
+	var out WireGuardProfile
+	err := c.do(ctx, http.MethodPost, wireGuardProfilePath(name)+"/shields-up", WireGuardShieldsUpRequest{Enabled: enabled}, &out)
+	return out, err
+}
+
 func (c *Client) AddProfile(ctx context.Context, request AddProfileRequest) (Profile, error) {
 	var out Profile
 	err := c.do(ctx, http.MethodPost, "/v1/profiles", request, &out)

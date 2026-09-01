@@ -40,6 +40,7 @@ type fakeManagementClient struct {
 	wireGuardSecrets wireguardcfg.Secrets
 	wireGuardProfile controlapi.WireGuardProfile
 	wireGuardName    string
+	wireGuardShields bool
 }
 
 func (f *fakeManagementClient) Version(context.Context) (tailmixversion.Meta, error) {
@@ -126,6 +127,12 @@ func (f *fakeManagementClient) ApplyWireGuard(_ context.Context, config wireguar
 }
 func (f *fakeManagementClient) WireGuardProfile(_ context.Context, name string) (controlapi.WireGuardProfile, error) {
 	f.wireGuardName = name
+	return f.wireGuardProfile, nil
+}
+func (f *fakeManagementClient) SetWireGuardShieldsUp(_ context.Context, name string, enabled bool) (controlapi.WireGuardProfile, error) {
+	f.wireGuardName = name
+	f.wireGuardShields = enabled
+	f.wireGuardProfile.ShieldsUp = enabled
 	return f.wireGuardProfile, nil
 }
 
@@ -275,6 +282,29 @@ func TestWireGuardApplyReadsManifestFromStdin(t *testing.T) {
 	}
 	if client.wireGuardConfig.Name != "lab" {
 		t.Fatalf("config = %+v", client.wireGuardConfig)
+	}
+}
+
+func TestWireGuardShieldsUp(t *testing.T) {
+	client := &fakeManagementClient{wireGuardProfile: controlapi.WireGuardProfile{
+		Name: "lab", Kind: "wireguard", PacketFilter: wireguardcfg.PacketFilter{Grants: []wireguardcfg.Grant{}},
+	}}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"wireguard", "shields-up", "lab", "on"},
+		testDependencies(client, &stdout, &stderr, nil))
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if client.wireGuardName != "lab" || !client.wireGuardShields || !strings.Contains(stdout.String(), "SHIELDS UP:") || !strings.Contains(stdout.String(), "yes") {
+		t.Fatalf("name = %q, enabled = %v, stdout = %q", client.wireGuardName, client.wireGuardShields, stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runWithDependencies(context.Background(), []string{"wireguard", "shields-up", "lab", "invalid"},
+		testDependencies(client, &stdout, &stderr, nil))
+	if code != 2 || !strings.Contains(stderr.String(), "must be on or off") {
+		t.Fatalf("invalid state exit = %d, stderr = %q", code, stderr.String())
 	}
 }
 
@@ -553,7 +583,9 @@ func TestCompletionSuggestsCommandsFlagsAndValues(t *testing.T) {
 		{name: "root commands", words: []string{""}, want: []string{"up\t", "down\t", "profiles\t", "completion\t", "--socket-dir\t"}},
 		{name: "subcommands", words: []string{"profiles", ""}, want: []string{"list\t", "rename\t", "help\t"}},
 		{name: "update subcommands", words: []string{"update", ""}, want: []string{"status\t", "check\t", "apply\t"}},
-		{name: "wireguard subcommands", words: []string{"wireguard", ""}, want: []string{"apply\t", "show\t"}},
+		{name: "wireguard subcommands", words: []string{"wireguard", ""}, want: []string{"apply\t", "show\t", "shields-up\t"}},
+		{name: "wireguard shields profile", words: []string{"wireguard", "shields-up", "w"}, want: []string{"work\tdisabled"}},
+		{name: "wireguard shields state", words: []string{"wireguard", "shields-up", "work", ""}, want: []string{"off\t", "on\t"}},
 		{name: "long flag", words: []string{"routes", "bind", "--pro"}, want: []string{"--profile\t"}},
 		{name: "profile flag value", words: []string{"routes", "bind", "--profile", "w"}, want: []string{"work\tdisabled"}},
 		{name: "profile operand", words: []string{"profiles", "show", "h"}, want: []string{"home\trunning"}},

@@ -18,6 +18,7 @@ const (
 	completionFreeValue
 	completionProfile
 	completionBoolean
+	completionOnOff
 	completionFile
 	completionDirectory
 )
@@ -288,6 +289,14 @@ func completeValue(ctx context.Context, socketDir string, kind completionValueKi
 			}
 		}
 		return candidates, cobra.ShellCompDirectiveNoFileComp
+	case completionOnOff:
+		var candidates []completionCandidate
+		for _, value := range []string{"off", "on"} {
+			if strings.HasPrefix(value, prefix) {
+				candidates = append(candidates, completionCandidate{value, "shields-up state"})
+			}
+		}
+		return candidates, cobra.ShellCompDirectiveNoFileComp
 	case completionFile:
 		return nil, cobra.ShellCompDirectiveDefault
 	case completionDirectory:
@@ -407,6 +416,7 @@ func completionCommandTree() *completionCommand {
 		subcommands: []*completionCommand{
 			leaf("apply", "Apply a declarative WireGuard profile", []completionFlag{flag("Read the YAML manifest", completionFile, "--file"), jsonFlag()}),
 			leaf("show", "Show one WireGuard profile", []completionFlag{jsonFlag()}, completionProfile),
+			leaf("shields-up", "Set the persistent inbound override", []completionFlag{jsonFlag()}, completionProfile, completionOnOff),
 		},
 	}
 
