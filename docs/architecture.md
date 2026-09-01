@@ -1,6 +1,6 @@
 # tailmix architecture
 
-> Implementation snapshot: July 2026
+> Implementation snapshot: September 2026
 
 tailmix runs an independent network engine for every profile, then joins their
 packet paths behind one host TUN. An engine is either an embedded Tailscale node
@@ -91,7 +91,7 @@ remaining engine, LocalAPI, credential, and transport behavior.
 | LocalAPI | Profile selection and one socket per profile | `ipnserver`, peer credentials, operator permissions |
 | Transport | Injection into the selected profile TUN | WireGuard, endpoint discovery, direct links, DERP, encryption |
 | DNS | Aggregate host records, suffix policy, search domains, profile-scoped forwarding | Tailscale DNS manager, configurator, and resolver machinery |
-| Authorization | No new remote authorization namespace | ACLs, grants, device approval, Tailnet Lock, shields-up |
+| Authorization | Raw WireGuard packet policy and persistent shields-up override | Tailscale ACLs, grants, device approval, Tailnet Lock, shields-up |
 
 An effective address selects a route; it does not become a Tailscale identity.
 Remote policy sees the selected profile's canonical identity exactly as it
@@ -287,6 +287,43 @@ On Linux, it selects the available systemd-resolved, NetworkManager, resolvconf,
 or direct `resolv.conf` integration. DNS is registered at the IPv4 service
 address, but answers may contain effective IPv4 or IPv6 addresses.
 
+## Raw WireGuard packet filtering
+
+Each raw WireGuard runtime wraps its channel-backed device with a filtering TUN
+before giving it to the upstream userspace WireGuard engine:
+
+```mermaid
+flowchart LR
+    Mux["Aggregate mux"] --> Filter["Per-profile filtering TUN"]
+    Filter --> Engine["Userspace WireGuard engine"]
+    Engine --> Filter
+    Filter --> Mux
+    Policy["Normalized grants + shields-up"] -.-> Compiler["Policy compiler"]
+    Identity["Current local addresses"] -.-> Compiler
+    Compiler --> Filter
+```
+
+The wrapper uses upstream Tailscale packet parsing, fragment handling, flow
+tracking, and filter semantics. Packets delivered by WireGuard are checked as
+inbound before reaching the aggregate mux; host-originated packets are checked
+as outbound before encryption. Each profile owns independent filter state, so
+flows and fragments never cross profile boundaries.
+
+Manifest selectors compile against WireGuard AllowedIPs ownership. Source
+selectors are restricted to address ranges the engine can authenticate, using
+longest-prefix ownership and subtraction for overlaps. Destination selectors
+compile only against destinations the runtime can currently deliver; transit
+selectors stay in desired state but are inactive until forwarding exists. The
+compiler publishes immutable match tables, keeping packet-path evaluation free
+of YAML parsing and peer-name lookup.
+
+Runtime creation starts with an outbound-only filter. Startup and live apply
+publish the new restrictive filter before exposing permissive runtime or
+persisted state; any later failure restores the previous device config and
+filter. Identity changes recompile the existing normalized policy. Persistent
+shields-up replaces the compiled grants with the same outbound-only baseline
+without mutating the manifest.
+
 ## Reconciliation and live management
 
 The supervisor is the single owner of desired profile state and aggregate
@@ -352,6 +389,7 @@ Profiles share the host network but not identity or authentication material.
 
 - effective address pools and host NAT addresses;
 - profile definitions and lifecycle flags;
+- persistent raw WireGuard shields-up overrides;
 - explicit IP and DNS bindings;
 - per-profile accept-all settings;
 - the ordered search-domain list;
