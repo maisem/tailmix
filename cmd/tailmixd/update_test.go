@@ -134,9 +134,16 @@ func TestUpdateLoopAutomaticallyAppliesWhenEnabled(t *testing.T) {
 		UpdateDelay: func(bool) time.Duration { return time.Millisecond },
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	s.ctx = ctx
-	go s.runUpdateLoop(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.runUpdateLoop(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
 	select {
 	case restart := <-s.updateRestart:
 		if restart.oldTarget != "versions/v1.0.0" {
@@ -162,9 +169,16 @@ func TestUpdateLoopWaitsWhileDisabled(t *testing.T) {
 		UpdateDelay: func(bool) time.Duration { return time.Millisecond },
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	s.ctx = ctx
-	go s.runUpdateLoop(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.runUpdateLoop(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
 	select {
 	case <-applied:
 		t.Fatal("disabled updater applied an update")
