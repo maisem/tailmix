@@ -98,19 +98,6 @@ func prefixDestinationState(prefix netip.Prefix, local *netipx.IPSet) (string, e
 // outbound-flow state across ordinary policy replacements.
 type Policy struct {
 	filter *filter.Filter
-	icmp   *filter.Filter
-}
-
-func (p *Policy) runIn(parsed *packet.Parsed, rf filter.RunFlags) filter.Response {
-	// Upstream accepts ICMP requests when a source has any open port. Raw
-	// WireGuard grants make protocols exact, so require an ICMP-bearing grant
-	// first; upstream still recognizes response and error types in both filters.
-	if parsed.IPProto == ipproto.ICMPv4 || parsed.IPProto == ipproto.ICMPv6 {
-		if p.icmp.RunIn(parsed, rf) != filter.Accept {
-			return filter.Drop
-		}
-	}
-	return p.filter.RunIn(parsed, rf)
 }
 
 // Compile compiles cfg into an inbound allow policy. When restrictive is true,
@@ -126,9 +113,9 @@ func Compile(cfg wireguardcfg.Config, exitIP netip.Addr, restrictive bool, share
 		return nil, err
 	}
 
-	var matches, icmpMatches []filter.Match
+	var matches []filter.Match
 	if !restrictive {
-		matches, icmpMatches, err = compileMatches(cfg, ownership, localNets)
+		matches, err = compileMatches(cfg, ownership, localNets)
 		if err != nil {
 			return nil, err
 		}
@@ -137,10 +124,7 @@ func Compile(cfg wireguardcfg.Config, exitIP netip.Addr, restrictive bool, share
 	if shareStateWith != nil {
 		shared = shareStateWith.filter
 	}
-	return &Policy{
-		filter: filter.New(matches, nil, localNets, nil, shared, logger.Discard),
-		icmp:   filter.New(icmpMatches, nil, localNets, nil, nil, logger.Discard),
-	}, nil
+	return &Policy{filter: filter.New(matches, nil, localNets, nil, shared, logger.Discard)}, nil
 }
 
 // Device filters packets read from and written to an underlying TUN. Its
@@ -155,7 +139,7 @@ func NewDevice(underlying tun.Device, initial *Policy) (*Device, error) {
 	if underlying == nil {
 		return nil, fmt.Errorf("filtered TUN requires an underlying device")
 	}
-	if initial == nil || initial.filter == nil || initial.icmp == nil {
+	if initial == nil || initial.filter == nil {
 		return nil, fmt.Errorf("filtered TUN requires an initial policy")
 	}
 	d := &Device{underlying: underlying}
@@ -166,7 +150,7 @@ func NewDevice(underlying tun.Device, initial *Policy) (*Device, error) {
 // Install atomically replaces the current policy. A nil policy is rejected so
 // the device can never accidentally become allow-all.
 func (d *Device) Install(policy *Policy) error {
-	if policy == nil || policy.filter == nil || policy.icmp == nil {
+	if policy == nil || policy.filter == nil {
 		return fmt.Errorf("cannot install a nil packet filter")
 	}
 	d.policy.Store(policy)
@@ -215,7 +199,7 @@ func (d *Device) Write(bufs [][]byte, offset int) (int, error) {
 		policy := d.policy.Load()
 		var parsed packet.Parsed
 		parsed.Decode(buf[offset:])
-		if policy.runIn(&parsed, 0) == filter.Accept {
+		if policy.filter.RunIn(&parsed, 0) == filter.Accept {
 			accepted = append(accepted, buf)
 		}
 	}
@@ -334,16 +318,16 @@ func buildOwnership(cfg wireguardcfg.Config, exitIP netip.Addr) (ownership, erro
 	return result, nil
 }
 
-func compileMatches(cfg wireguardcfg.Config, owned ownership, local *netipx.IPSet) ([]filter.Match, []filter.Match, error) {
-	var matches, icmpMatches []filter.Match
+func compileMatches(cfg wireguardcfg.Config, owned ownership, local *netipx.IPSet) ([]filter.Match, error) {
+	var matches []filter.Match
 	for grantIndex, grant := range cfg.PacketFilter.Grants {
 		sources, err := resolveSources(grant.Src, owned)
 		if err != nil {
-			return nil, nil, fmt.Errorf("grants[%d]: %w", grantIndex, err)
+			return nil, fmt.Errorf("grants[%d]: %w", grantIndex, err)
 		}
 		destinations, err := resolveDestinations(grant.Dst, local)
 		if err != nil {
-			return nil, nil, fmt.Errorf("grants[%d]: %w", grantIndex, err)
+			return nil, fmt.Errorf("grants[%d]: %w", grantIndex, err)
 		}
 		if len(destinations.Prefixes()) == 0 {
 			continue
@@ -351,7 +335,7 @@ func compileMatches(cfg wireguardcfg.Config, owned ownership, local *netipx.IPSe
 		for _, permissionText := range grant.IP {
 			permission, err := wireguardcfg.ParsePermission(permissionText)
 			if err != nil {
-				return nil, nil, fmt.Errorf("grants[%d]: ip: %w", grantIndex, err)
+				return nil, fmt.Errorf("grants[%d]: ip: %w", grantIndex, err)
 			}
 			protocols := permissionProtocols(permission)
 			ports := filter.PortRange{First: 0, Last: 65535}
@@ -363,20 +347,9 @@ func compileMatches(cfg wireguardcfg.Config, owned ownership, local *netipx.IPSe
 				match.Dsts = append(match.Dsts, filter.NetPortRange{Net: prefix, Ports: ports})
 			}
 			matches = append(matches, match)
-			var icmpProtocols []ipproto.Proto
-			for _, protocol := range protocols {
-				if protocol == ipproto.ICMPv4 || protocol == ipproto.ICMPv6 {
-					icmpProtocols = append(icmpProtocols, protocol)
-				}
-			}
-			if len(icmpProtocols) > 0 {
-				icmpMatch := match
-				icmpMatch.IPProto = views.SliceOf(icmpProtocols)
-				icmpMatches = append(icmpMatches, icmpMatch)
-			}
 		}
 	}
-	return matches, icmpMatches, nil
+	return matches, nil
 }
 
 func resolveSources(values []string, owned ownership) (*netipx.IPSet, error) {

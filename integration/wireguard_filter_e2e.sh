@@ -358,6 +358,15 @@ expect_tcp_blocked() {
 	[[ $rc == 20 ]] || fail "blocked TCP flow failed for a reason other than packet timeout (status $rc)"
 }
 
+expect_ping_allowed() {
+	local source=$1 destination=$2 target ns
+	[[ $destination == a ]] && target=$effective_a || target=$effective_b
+	ns=$(namespace_for "$source")
+	if ! sudo ip netns exec "$ns" ping -n -c 2 -W 1 "$target" >/dev/null 2>&1; then
+		fail "ICMP flow covered by an upstream source/destination grant was blocked"
+	fi
+}
+
 expect_ping_blocked() {
 	local source=$1 destination=$2 target ns
 	[[ $destination == a ]] && target=$effective_a || target=$effective_b
@@ -392,20 +401,22 @@ effective_a=$(jq -er '.peers[0].effectiveAddresses[0]' "$work_dir/b-profile.json
 # with the roles reversed so each default policy is exercised.
 expect_tcp_allowed a b 18080 default-a-outbound
 expect_tcp_blocked b a 18081
+expect_ping_blocked b a
 apply_profile a tcp:18081
 apply_profile b default
 expect_tcp_allowed b a 18081 default-b-outbound
 expect_tcp_blocked a b 18080
 pass "default policy is outbound-and-replies only in both directions"
 
-# A single named-peer TCP grant admits its exact port and rejects both another
-# TCP port and a different protocol.
+# A single named-peer TCP grant admits its exact TCP port, rejects another TCP
+# port, and follows upstream behavior by admitting ICMP for the covered
+# source/destination pair.
 apply_profile a tcp:18082
 apply_profile b default
 expect_tcp_allowed b a 18082 exact-grant
 expect_tcp_blocked b a 18083
-expect_ping_blocked b a
-pass "named-peer TCP grant permits only its selected port and protocol"
+expect_ping_allowed b a
+pass "named-peer TCP grant limits TCP ports and admits upstream ICMP"
 
 # Keep a TCP connection open while removing the destination grant. Continuation
 # packets on that established flow must keep working through the policy swap.
@@ -436,6 +447,7 @@ apply_profile b tcp:18085
 expect_tcp_allowed a b 18085 before-shields
 set_shields b on
 expect_tcp_blocked a b 18085
+expect_ping_blocked a b
 apply_profile a tcp:18086
 expect_tcp_allowed b a 18086 shields-outbound
 set_shields b off

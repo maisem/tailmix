@@ -307,7 +307,10 @@ The wrapper uses upstream Tailscale packet parsing, fragment handling, flow
 tracking, and filter semantics. Packets delivered by WireGuard are checked as
 inbound before reaching the aggregate mux; host-originated packets are checked
 as outbound before encryption. Each profile owns independent filter state, so
-flows and fragments never cross profile boundaries.
+flows and fragments never cross profile boundaries. Upstream's ICMP rule admits
+echo requests whenever any match covers the source and destination IPs,
+ignoring that match's protocol and port range; empty and shields-up policies
+therefore still block new echo requests.
 
 Manifest selectors compile against WireGuard AllowedIPs ownership. Source
 selectors are restricted to address ranges the engine can authenticate, using

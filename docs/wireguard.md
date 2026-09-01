@@ -149,6 +149,13 @@ except Tailscale's reserved protocol 99; numeric TCP, UDP, and SCTP may carry
 ports. Ports are decimal 0 through 65535 and ranges must ascend. Names and
 keywords are lowercase.
 
+ICMP echo requests follow upstream Tailscale filter semantics: if any grant
+covers the source and destination pair, echo is accepted without considering
+that grant's protocol or port range. This applies to TCP, UDP, SCTP, and
+portless-protocol grants alike. An empty policy or shields-up has no such grant
+and blocks new echo requests. Explicit `icmp:*` and `ipv6-icmp:*` permissions
+remain supported. ICMP responses and errors remain allowed as reply traffic.
+
 ## Shields-up override
 
 Shields-up persistently suppresses all configured grants without changing the
