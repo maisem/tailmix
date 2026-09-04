@@ -14,13 +14,14 @@ import (
 	"github.com/maisem/tailmix/packetmap"
 	"github.com/maisem/tailmix/tunmux"
 	"github.com/maisem/tailmix/wireguardcfg"
+	"github.com/tailscale/wireguard-go/conn"
 	"tailscale.com/net/packet"
 )
 
 var wireGuardBenchmarkPacketSizes = [...]int{64, 512, 1280}
 
 const (
-	wireGuardBenchmarkWindow       = 256
+	wireGuardBenchmarkWindow       = 2 * conn.IdealBatchSize
 	wireGuardBenchmarkReceiveLimit = 5 * time.Second
 	wireGuardBenchmarkDrainQuiet   = 20 * time.Millisecond
 	wireGuardBenchmarkDrainLimit   = 2 * time.Second
@@ -112,12 +113,15 @@ func benchmarkWireGuardSteadyState(b *testing.B, fixture *wireGuardBenchmarkFixt
 	for completed := 0; completed < b.N; {
 		batchSize := min(wireGuardBenchmarkWindow, b.N-completed)
 		for i := range batchSize {
-			fixture.source.Outbound <- packets[i]
+			if err := fixture.source.InjectOutbound(packets[i]); err != nil {
+				b.Fatal(err)
+			}
 		}
 		resetWireGuardBenchmarkTimer(timer, wireGuardBenchmarkReceiveLimit)
 		for range batchSize {
 			select {
-			case <-fixture.destination.Inbound:
+			case packet := <-fixture.destination.Inbound():
+				packet.Release()
 			case err := <-fixture.muxError():
 				b.Fatalf("WireGuard benchmark mux stopped: %v", err)
 			case <-timer.C:
@@ -147,7 +151,8 @@ func benchmarkWireGuardOfferedLoad(b *testing.B, fixture *wireGuardBenchmarkFixt
 			select {
 			case <-stopDrain:
 				return
-			case <-fixture.destination.Inbound:
+			case packet := <-fixture.destination.Inbound():
+				packet.Release()
 				delivered.Add(1)
 			}
 		}
@@ -158,10 +163,9 @@ func benchmarkWireGuardOfferedLoad(b *testing.B, fixture *wireGuardBenchmarkFixt
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := range b.N {
-		select {
-		case fixture.source.Outbound <- packets[i%len(packets)]:
+		if fixture.source.TryInjectOutbound(packets[i%len(packets)]) {
 			accepted++
-		default:
+		} else {
 			backpressure++
 		}
 	}
@@ -369,19 +373,17 @@ func (f *wireGuardBenchmarkFixture) registerCleanup(tb testing.TB, hostTUNs []*t
 func (f *wireGuardBenchmarkFixture) establishSession(tb testing.TB, packetSize int) {
 	tb.Helper()
 	packet := wireGuardBenchmarkPacket(f.sourceIP, f.destinationIP, packetSize, 0)
-	select {
-	case f.source.Outbound <- packet:
-	case err := <-f.muxError():
-		tb.Fatalf("WireGuard benchmark mux stopped during warmup: %v", err)
-	case <-time.After(wireGuardBenchmarkReceiveLimit):
-		tb.Fatalf("timed out after %v injecting WireGuard warmup packet", wireGuardBenchmarkReceiveLimit)
+	if err := f.source.InjectOutbound(packet); err != nil {
+		tb.Fatalf("inject WireGuard warmup packet: %v", err)
 	}
 	select {
-	case got := <-f.destination.Inbound:
+	case got := <-f.destination.Inbound():
 		want := wireGuardBenchmarkPacket(f.expectedSourceIP, f.expectedDestination, packetSize, 0)
-		if !bytes.Equal(got, want) {
-			tb.Fatalf("WireGuard benchmark warmup packet changed in transit\n got: %x\nwant: %x", got, want)
+		if !bytes.Equal(got.Bytes(), want) {
+			got.Release()
+			tb.Fatalf("WireGuard benchmark warmup packet changed in transit")
 		}
+		got.Release()
 	case err := <-f.muxError():
 		tb.Fatalf("WireGuard benchmark mux stopped during warmup: %v", err)
 	case <-time.After(wireGuardBenchmarkReceiveLimit):
@@ -397,21 +399,20 @@ func (f *wireGuardBenchmarkFixture) verifyWindow(tb testing.TB, packetSize int) 
 	if err != nil {
 		tb.Fatal(err)
 	}
-	deadline := time.NewTimer(wireGuardBenchmarkReceiveLimit)
-	defer deadline.Stop()
 	for _, packet := range packets {
-		select {
-		case f.source.Outbound <- packet:
-		case err := <-f.muxError():
-			tb.Fatalf("WireGuard benchmark mux stopped during correctness preflight: %v", err)
-		case <-deadline.C:
-			tb.Fatalf("timed out after %v injecting correctness packet", wireGuardBenchmarkReceiveLimit)
+		if err := f.source.InjectOutbound(packet); err != nil {
+			tb.Fatalf("inject WireGuard correctness packet: %v", err)
 		}
 	}
+
+	deadline := time.NewTimer(wireGuardBenchmarkReceiveLimit)
+	defer deadline.Stop()
 	for !validator.complete() {
 		select {
-		case packet := <-f.destination.Inbound:
-			if err := validator.observe(packet); err != nil {
+		case packet := <-f.destination.Inbound():
+			err := validator.observe(packet.Bytes())
+			packet.Release()
+			if err != nil {
 				tb.Fatal(err)
 			}
 		case err := <-f.muxError():
@@ -424,8 +425,9 @@ func (f *wireGuardBenchmarkFixture) verifyWindow(tb testing.TB, packetSize int) 
 	quiet := time.NewTimer(wireGuardBenchmarkDrainQuiet)
 	defer quiet.Stop()
 	select {
-	case packet := <-f.destination.Inbound:
-		err := validator.observe(packet)
+	case packet := <-f.destination.Inbound():
+		err := validator.observe(packet.Bytes())
+		packet.Release()
 		if err == nil {
 			tb.Fatal("WireGuard benchmark accepted an excess correctness delivery")
 		}

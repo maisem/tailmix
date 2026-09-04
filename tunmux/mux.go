@@ -16,6 +16,7 @@ import (
 
 type Mux struct {
 	host   tun.Device
+	pool   *packetPool
 	mapper atomic.Pointer[packetmap.Mapper]
 	local  LocalPacketHandler
 	logf   logger.Logf
@@ -49,6 +50,7 @@ func NewMux(host tun.Device, profiles map[string]*ChanTUN, mapper *packetmap.Map
 	}
 	m := &Mux{
 		host:     host,
+		pool:     newPacketPool(device.MessageTransportHeaderSize, chanTUNMTU),
 		profiles: make(map[string]*ChanTUN, len(profiles)),
 		workers:  map[string]profileWorker{},
 		logf:     logf,
@@ -166,28 +168,33 @@ func (m *Mux) runHostToProfiles(ctx context.Context) error {
 	}
 	batchSize := max(1, m.host.BatchSize())
 	const offset = device.MessageTransportHeaderSize
+	packets := make([]Packet, batchSize)
 	bufs := make([][]byte, batchSize)
 	sizes := make([]int, batchSize)
-	for i := range bufs {
-		bufs[i] = make([]byte, offset+mtu)
-	}
 
 	for {
-		n, err := m.host.Read(bufs, sizes, offset)
-		if err != nil {
-			if ctx.Err() != nil || err == io.EOF {
-				return nil
-			}
-			return fmt.Errorf("read host TUN: %w", err)
+		for i := range packets {
+			packets[i] = m.pool.acquire(mtu)
+			bufs[i] = packets[i].readBuffer()
+		}
+		n, readErr := m.host.Read(bufs, sizes, offset)
+		for i := n; i < len(packets); i++ {
+			packets[i].Release()
+			packets[i] = Packet{}
 		}
 		for i := range n {
-			pkt := bufs[i][offset : offset+sizes[i]]
+			packet := packets[i]
+			packets[i] = Packet{}
+			packet.setSize(sizes[i])
+			pkt := packet.Bytes()
 			if m.local != nil && m.local.HandlePacket(pkt) {
+				packet.Release()
 				continue
 			}
-			translated, route, err := m.mapper.Load().Outbound(pkt)
+			_, route, err := m.mapper.Load().Outbound(pkt)
 			if err != nil {
 				m.logf("drop outbound packet: %v", err)
+				packet.Release()
 				continue
 			}
 			m.mu.RLock()
@@ -195,25 +202,37 @@ func (m *Mux) runHostToProfiles(ctx context.Context) error {
 			m.mu.RUnlock()
 			if profileTun == nil {
 				m.logf("drop outbound packet: missing profile TUN %q", route.ProfileID)
+				packet.Release()
 				continue
 			}
-			if err := profileTun.InjectOutbound(translated); err != nil {
+			if err := profileTun.injectOutboundPacket(packet); err != nil {
+				packet.Release()
 				if ctx.Err() != nil {
 					return nil
 				}
 				return fmt.Errorf("inject outbound packet into profile %q: %w", route.ProfileID, err)
 			}
 		}
+		if readErr != nil {
+			if ctx.Err() != nil || readErr == io.EOF {
+				return nil
+			}
+			return fmt.Errorf("read host TUN: %w", readErr)
+		}
 	}
 }
 
 func (m *Mux) runLocalToHost(ctx context.Context) error {
-	const offset = device.MessageTransportHeaderSize
+	batchSize := max(1, m.host.BatchSize())
+	packets := make([]Packet, 0, batchSize)
+	bufs := make([][]byte, 0, batchSize)
+	outbound := m.local.Outbound()
 	for {
+		packets = packets[:0]
 		select {
 		case <-ctx.Done():
 			return nil
-		case pkt, ok := <-m.local.Outbound():
+		case pkt, ok := <-outbound:
 			if !ok {
 				if ctx.Err() != nil {
 					return nil
@@ -223,44 +242,121 @@ func (m *Mux) runLocalToHost(ctx context.Context) error {
 				}
 				return fmt.Errorf("local packet handler stopped")
 			}
-			buf := make([]byte, offset+len(pkt))
-			copy(buf[offset:], pkt)
-			if _, err := m.host.Write([][]byte{buf}, offset); err != nil {
-				if ctx.Err() != nil {
-					return nil
+			packets = append(packets, m.pool.copy(pkt))
+		}
+
+		closed := false
+	drain:
+		for len(packets) < batchSize {
+			select {
+			case pkt, ok := <-outbound:
+				if !ok {
+					closed = true
+					break drain
 				}
-				return fmt.Errorf("write local service packet to host TUN: %w", err)
+				packets = append(packets, m.pool.copy(pkt))
+			default:
+				break drain
 			}
+		}
+
+		bufs = bufs[:0]
+		var offset int
+		for i := range packets {
+			var buf []byte
+			buf, offset = packets[i].writeBuffer()
+			bufs = append(bufs, buf)
+		}
+		_, err := m.host.Write(bufs, offset)
+		for i := range packets {
+			packets[i].Release()
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("write local service packet to host TUN: %w", err)
+		}
+		if closed {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if err := m.local.Err(); err != nil {
+				return fmt.Errorf("local packet handler: %w", err)
+			}
+			return fmt.Errorf("local packet handler stopped")
 		}
 	}
 }
 
 func (m *Mux) runProfileToHost(ctx context.Context, profileID string, profileTun *ChanTUN) error {
-	const offset = device.MessageTransportHeaderSize
+	batchSize := max(1, m.host.BatchSize())
+	packets := make([]Packet, 0, batchSize)
+	accepted := make([]Packet, 0, batchSize)
+	bufs := make([][]byte, 0, batchSize)
+	inbound := profileTun.Inbound()
 	for {
+		packets = packets[:0]
 		select {
 		case <-ctx.Done():
 			return nil
-		case pkt, ok := <-profileTun.Inbound:
+		case packet, ok := <-inbound:
 			if !ok {
 				if ctx.Err() != nil {
 					return nil
 				}
 				return fmt.Errorf("profile %q TUN inbound channel closed", profileID)
 			}
-			translated, err := m.mapper.Load().Inbound(profileID, pkt)
-			if err != nil {
+			packets = append(packets, packet)
+		}
+
+		closed := false
+	drain:
+		for len(packets) < batchSize {
+			select {
+			case packet, ok := <-inbound:
+				if !ok {
+					closed = true
+					break drain
+				}
+				packets = append(packets, packet)
+			default:
+				break drain
+			}
+		}
+
+		accepted = accepted[:0]
+		bufs = bufs[:0]
+		var offset int
+		for i := range packets {
+			packet := packets[i]
+			if _, err := m.mapper.Load().Inbound(profileID, packet.Bytes()); err != nil {
 				m.logf("drop inbound packet from profile %q: %v", profileID, err)
+				packet.Release()
 				continue
 			}
-			buf := make([]byte, offset+len(translated))
-			copy(buf[offset:], translated)
-			if _, err := m.host.Write([][]byte{buf}, offset); err != nil {
+			buf, packetOffset := packet.writeBuffer()
+			offset = packetOffset
+			accepted = append(accepted, packet)
+			bufs = append(bufs, buf)
+		}
+		if len(bufs) > 0 {
+			_, err := m.host.Write(bufs, offset)
+			for i := range accepted {
+				accepted[i].Release()
+			}
+			if err != nil {
 				if ctx.Err() != nil {
 					return nil
 				}
 				return fmt.Errorf("write inbound packet from profile %q to host TUN: %w", profileID, err)
 			}
+		}
+		if closed {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("profile %q TUN inbound channel closed", profileID)
 		}
 	}
 }

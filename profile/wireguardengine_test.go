@@ -450,10 +450,12 @@ func assertFilteredWrite(t *testing.T, e *WireGuardEngine, raw *tunmux.ChanTUN, 
 		t.Fatalf("filtered Write() = (%d, %v)", n, err)
 	}
 	select {
-	case got := <-raw.Inbound:
+	case got := <-raw.Inbound():
 		if !want {
-			t.Fatalf("packet unexpectedly accepted: %v", got)
+			got.Release()
+			t.Fatal("packet unexpectedly accepted")
 		}
+		got.Release()
 	default:
 		if want {
 			t.Fatal("packet unexpectedly dropped")

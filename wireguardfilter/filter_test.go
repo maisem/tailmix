@@ -222,6 +222,38 @@ func TestDeviceFiltersBatchesAndSwapsAtomically(t *testing.T) {
 	}
 }
 
+func TestDeviceWriteCompactsAcceptedBuffersInPlace(t *testing.T) {
+	cfg := filterTestConfig()
+	cfg.PacketFilter = wireguardcfg.PacketFilter{Grants: []wireguardcfg.Grant{}}
+	policy := mustCompile(t, cfg, netip.Addr{}, true, nil)
+	underlying := newTestTUN()
+	device, err := NewDevice(underlying, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outbound := udp4Packet("10.0.0.1", "10.0.0.2", 42000, 53)
+	underlying.outbound <- outbound
+	buf := make([]byte, 1500)
+	sizes := make([]int, 1)
+	if n, err := device.Read([][]byte{buf}, sizes, 0); err != nil || n != 1 {
+		t.Fatalf("prime Read = (%d, %v), want (1, nil)", n, err)
+	}
+
+	rejected := udp4Packet("10.0.0.2", "10.0.0.1", 53000, 53)
+	accepted := udp4Packet("10.0.0.2", "10.0.0.1", 53, 42000)
+	batch := [][]byte{rejected, accepted}
+	if n, err := device.Write(batch, 0); err != nil || n != len(batch) {
+		t.Fatalf("Write = (%d, %v), want (%d, nil)", n, err, len(batch))
+	}
+	if !slices.Equal(batch[0], accepted) {
+		t.Fatalf("compacted first buffer differs from accepted packet")
+	}
+	if len(underlying.inbound) != 1 || !slices.Equal(underlying.inbound[0], accepted) {
+		t.Fatalf("underlying inbound = %d packets, want accepted packet", len(underlying.inbound))
+	}
+}
+
 func filterTestConfig() wireguardcfg.Config {
 	return wireguardcfg.Config{
 		Version:   1,

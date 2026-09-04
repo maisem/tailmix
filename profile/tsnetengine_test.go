@@ -21,6 +21,12 @@ func TestTSNetEngineAcceptsProvidedTunBeforeStart(t *testing.T) {
 	if engine == nil {
 		t.Fatal("engine is nil")
 	}
+	if got := tun.BatchSize(); got != 128 {
+		t.Fatalf("provided TUN batch size = %d, want 128", got)
+	}
+	if got := engine.cfg.Tun.BatchSize(); got != tun.BatchSize() {
+		t.Fatalf("engine TUN batch size = %d, want %d", got, tun.BatchSize())
+	}
 }
 
 func TestExitNodePrefsUsesBackendResolutionPath(t *testing.T) {

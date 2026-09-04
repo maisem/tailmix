@@ -194,17 +194,18 @@ func (d *Device) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 }
 
 func (d *Device) Write(bufs [][]byte, offset int) (int, error) {
-	accepted := make([][]byte, 0, len(bufs))
+	accepted := 0
 	for _, buf := range bufs {
 		policy := d.policy.Load()
 		var parsed packet.Parsed
 		parsed.Decode(buf[offset:])
 		if policy.filter.RunIn(&parsed, 0) == filter.Accept {
-			accepted = append(accepted, buf)
+			bufs[accepted] = buf
+			accepted++
 		}
 	}
-	if len(accepted) > 0 {
-		if _, err := d.underlying.Write(accepted, offset); err != nil {
+	if accepted > 0 {
+		if _, err := d.underlying.Write(bufs[:accepted], offset); err != nil {
 			return 0, err
 		}
 	}
