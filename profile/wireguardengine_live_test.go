@@ -164,12 +164,65 @@ type wgTestDatagram struct {
 }
 
 type wgTestFabric struct {
-	mu    sync.RWMutex
-	binds map[uint16]*wgTestBind
+	mu        sync.RWMutex
+	binds     map[uint16]*wgTestBind
+	closing   chan struct{}
+	closeOnce sync.Once
+}
+
+func TestWGTestFabricCloseUnblocksSend(t *testing.T) {
+	fabric := newWGTestFabric()
+	source := fabric.newBind().(*wgTestBind)
+	target := fabric.newBind().(*wgTestBind)
+	if _, _, err := source.Open(12001); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { source.Close() })
+	if _, _, err := target.Open(12002); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { target.Close() })
+
+	packets := make([][]byte, cap(target.rx)+1)
+	for i := range packets {
+		packets[i] = []byte{byte(i)}
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- source.Send(packets, wgTestEndpoint{addr: netip.MustParseAddrPort("127.0.0.1:12002")}, 0)
+	}()
+
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for len(target.rx) < cap(target.rx) {
+		select {
+		case err := <-done:
+			t.Fatalf("Send returned before the receive queue filled: %v", err)
+		case <-deadline.C:
+			t.Fatal("timed out waiting for the receive queue to fill")
+		default:
+		}
+	}
+	fabric.close()
+	select {
+	case err := <-done:
+		if err != net.ErrClosed {
+			t.Fatalf("Send error = %v, want %v", err, net.ErrClosed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Send remained blocked after fabric close")
+	}
 }
 
 func newWGTestFabric() *wgTestFabric {
-	return &wgTestFabric{binds: map[uint16]*wgTestBind{}}
+	return &wgTestFabric{
+		binds:   map[uint16]*wgTestBind{},
+		closing: make(chan struct{}),
+	}
+}
+
+func (f *wgTestFabric) close() {
+	f.closeOnce.Do(func() { close(f.closing) })
 }
 
 func (f *wgTestFabric) newBind() conn.Bind {
@@ -257,6 +310,8 @@ func (b *wgTestBind) Send(bufs [][]byte, endpoint conn.Endpoint, offset int) err
 		rx, closed := target.rx, target.closed
 		target.mu.Unlock()
 		select {
+		case <-b.fabric.closing:
+			return net.ErrClosed
 		case <-closed:
 			return net.ErrClosed
 		case rx <- datagram:
