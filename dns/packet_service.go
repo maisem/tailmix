@@ -30,7 +30,6 @@ const (
 
 type dnsEndpoint struct {
 	ip  netip.Addr
-	tcp *gonet.TCPListener
 	udp *gonet.UDPConn
 }
 
@@ -39,13 +38,14 @@ type dnsEndpoint struct {
 // packets enter and leave through HandlePacket and Outbound, which are wired
 // to the shared host TUN by tunmux.
 type packetService struct {
-	manager    *tailscaledns.Manager
-	stack      *stack.Stack
-	linkEP     *channel.Endpoint
-	primaryIP  netip.Addr
-	serviceIPs map[netip.Addr]bool
-	endpoints  []dnsEndpoint
-	logf       logger.Logf
+	manager     *tailscaledns.Manager
+	stack       *stack.Stack
+	linkEP      *channel.Endpoint
+	primaryIP   netip.Addr
+	serviceIPs  map[netip.Addr]bool
+	endpoints   []dnsEndpoint
+	tcpListener *gonet.TCPListener
+	logf        logger.Logf
 
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -115,29 +115,28 @@ func newPacketService(manager *tailscaledns.Manager, resolverIP netip.Addr, logf
 			ipstack.Destroy()
 			return nil, fmt.Errorf("bind MagicDNS UDP endpoint on %v: %v", ip, tcpipErr)
 		}
-		udpConn := gonet.NewUDPConn(&udpWQ, udpEP)
-		tcpListener, err := gonet.ListenTCP(ipstack, localAddr, ipv4.ProtocolNumber)
-		if err != nil {
-			_ = udpConn.Close()
-			closeDNSEndpoints(endpoints)
-			ipstack.Destroy()
-			return nil, fmt.Errorf("listen on MagicDNS TCP endpoint %v: %w", ip, err)
-		}
-		endpoints = append(endpoints, dnsEndpoint{ip: ip, tcp: tcpListener, udp: udpConn})
+		endpoints = append(endpoints, dnsEndpoint{ip: ip, udp: gonet.NewUDPConn(&udpWQ, udpEP)})
+	}
+	tcpListener, err := gonet.ListenTCP(ipstack, tcpip.FullAddress{NIC: dnsNICID, Port: 53}, ipv4.ProtocolNumber)
+	if err != nil {
+		closeDNSEndpoints(endpoints)
+		ipstack.Destroy()
+		return nil, fmt.Errorf("listen on MagicDNS TCP endpoints: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &packetService{
-		manager:    manager,
-		stack:      ipstack,
-		linkEP:     linkEP,
-		primaryIP:  resolverIP,
-		serviceIPs: make(map[netip.Addr]bool, len(serviceIPs)),
-		endpoints:  endpoints,
-		logf:       logf,
-		ctx:        ctx,
-		cancel:     cancel,
-		outbound:   make(chan []byte, dnsQueueSize),
+		manager:     manager,
+		stack:       ipstack,
+		linkEP:      linkEP,
+		primaryIP:   resolverIP,
+		serviceIPs:  make(map[netip.Addr]bool, len(serviceIPs)),
+		endpoints:   endpoints,
+		tcpListener: tcpListener,
+		logf:        logf,
+		ctx:         ctx,
+		cancel:      cancel,
+		outbound:    make(chan []byte, dnsQueueSize),
 	}
 	for _, ip := range serviceIPs {
 		s.serviceIPs[ip] = true
@@ -146,14 +145,13 @@ func newPacketService(manager *tailscaledns.Manager, resolverIP netip.Addr, logf
 	for i := range s.endpoints {
 		endpoint := &s.endpoints[i]
 		s.start("UDP "+endpoint.ip.String(), func() error { return s.serveUDP(endpoint.udp) })
-		s.start("TCP "+endpoint.ip.String(), func() error { return s.serveTCP(endpoint.tcp) })
 	}
+	s.start("TCP", func() error { return s.serveTCP(s.tcpListener) })
 	return s, nil
 }
 
 func closeDNSEndpoints(endpoints []dnsEndpoint) {
 	for i := range endpoints {
-		_ = endpoints[i].tcp.Close()
 		_ = endpoints[i].udp.Close()
 	}
 }
@@ -266,6 +264,7 @@ func (s *packetService) serveTCP(listener *gonet.TCPListener) error {
 func (s *packetService) Close() error {
 	s.closeOnce.Do(func() {
 		s.cancel()
+		_ = s.tcpListener.Close()
 		closeDNSEndpoints(s.endpoints)
 		s.stack.Destroy()
 		s.wg.Wait()

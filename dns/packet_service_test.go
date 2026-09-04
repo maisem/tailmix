@@ -120,11 +120,15 @@ func TestPacketServiceAnswersUDPFromBothResolverAddresses(t *testing.T) {
 	const name = "db.work.ts.net"
 	wantIP := netip.MustParseAddr("100.127.0.7")
 	clientIP := netip.MustParseAddr("100.127.0.10")
-	for testName, resolverIP := range map[string]netip.Addr{
-		"synthetic": testResolverIP,
-		"quad-100":  ServiceIP(),
+	for _, test := range []struct {
+		name string
+		ip   netip.Addr
+	}{
+		{name: "synthetic", ip: testResolverIP},
+		{name: "quad-100", ip: ServiceIP()},
 	} {
-		t.Run(testName, func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
+			resolverIP := test.ip
 			service := newTestPacketService(t, name, wantIP)
 			query := packet.Generate(packet.UDP4Header{
 				IP4Header: packet.IP4Header{Src: clientIP, Dst: resolverIP},
@@ -181,9 +185,7 @@ func newPacketTestClient(t *testing.T, service *packetService, clientIP netip.Ad
 	ipstack.SetRouteTable([]tcpip.Route{{Destination: defaultSubnet, NIC: dnsNICID}})
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &packetTestClient{stack: ipstack, linkEP: linkEP, cancel: cancel}
-	c.wg.Add(2)
-	go func() {
-		defer c.wg.Done()
+	c.wg.Go(func() {
 		for {
 			packetBuffer := linkEP.ReadContext(ctx)
 			if packetBuffer == nil {
@@ -198,9 +200,8 @@ func newPacketTestClient(t *testing.T, service *packetService, clientIP netip.Ad
 				return
 			}
 		}
-	}()
-	go func() {
-		defer c.wg.Done()
+	})
+	c.wg.Go(func() {
 		for {
 			select {
 			case <-ctx.Done():
@@ -216,7 +217,7 @@ func newPacketTestClient(t *testing.T, service *packetService, clientIP netip.Ad
 				packetBuffer.DecRef()
 			}
 		}
-	}()
+	})
 	t.Cleanup(func() {
 		cancel()
 		ipstack.Destroy()
@@ -229,11 +230,15 @@ func TestPacketServiceAnswersTCPFromBothResolverAddresses(t *testing.T) {
 	const name = "db.work.ts.net"
 	wantIP := netip.MustParseAddr("100.127.0.7")
 	clientIP := netip.MustParseAddr("100.127.0.10")
-	for testName, resolverIP := range map[string]netip.Addr{
-		"synthetic": testResolverIP,
-		"quad-100":  ServiceIP(),
+	for _, test := range []struct {
+		name string
+		ip   netip.Addr
+	}{
+		{name: "synthetic", ip: testResolverIP},
+		{name: "quad-100", ip: ServiceIP()},
 	} {
-		t.Run(testName, func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
+			resolverIP := test.ip
 			service := newTestPacketService(t, name, wantIP)
 			client := newPacketTestClient(t, service, clientIP)
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -247,6 +252,9 @@ func TestPacketServiceAnswersTCPFromBothResolverAddresses(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer conn.Close()
+			if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
 			query := dnsAQuery(t, name)
 			framed := make([]byte, 2+len(query))
 			binary.BigEndian.PutUint16(framed, uint16(len(query)))
