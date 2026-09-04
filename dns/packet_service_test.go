@@ -30,6 +30,17 @@ import (
 
 var testResolverIP = netip.MustParseAddr("10.250.0.53")
 
+func TestNetstackClockDoesNotGoBackwards(t *testing.T) {
+	clock := newNetstackClock()
+	clock.start = time.Now().Add(-time.Second)
+	before := clock.NowMonotonic()
+	clock.start = time.Now().Add(time.Hour)
+	after := clock.NowMonotonic()
+	if after.Before(before) {
+		t.Fatalf("netstack clock moved backwards from %v to %v", before, after)
+	}
+}
+
 type packetTestOSConfigurator struct{}
 
 func (*packetTestOSConfigurator) SetDNS(tailscaledns.OSConfig) error { return nil }
@@ -167,6 +178,7 @@ func newPacketTestClient(t *testing.T, service *packetService, clientIP netip.Ad
 	ipstack := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
+		Clock:              newNetstackClock(),
 	})
 	linkEP := channel.New(dnsQueueSize, dnsMTU, "")
 	if err := ipstack.CreateNIC(dnsNICID, linkEP); err != nil {
@@ -220,10 +232,39 @@ func newPacketTestClient(t *testing.T, service *packetService, clientIP netip.Ad
 	})
 	t.Cleanup(func() {
 		cancel()
-		ipstack.Destroy()
 		c.wg.Wait()
+		ipstack.Destroy()
 	})
 	return c
+}
+
+func TestPacketServiceCloseWithOpenTCPConnection(t *testing.T) {
+	service := newTestPacketService(t, "db.work.ts.net", netip.MustParseAddr("100.127.0.7"))
+	client := newPacketTestClient(t, service, netip.MustParseAddr("100.127.0.10"))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := gonet.DialContextTCP(ctx, client.stack, tcpip.FullAddress{
+		NIC:  dnsNICID,
+		Addr: tcpip.AddrFrom4(testResolverIP.As4()),
+		Port: 53,
+	}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	closed := make(chan error, 1)
+	go func() {
+		closed <- service.Close()
+	}()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("packet service close blocked with an open TCP connection")
+	}
 }
 
 func TestPacketServiceAnswersTCPFromBothResolverAddresses(t *testing.T) {

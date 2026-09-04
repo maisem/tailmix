@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -28,9 +30,63 @@ const (
 	dnsMTU       uint32      = 1280
 )
 
+// netstackClock keeps gVisor's monotonic time nondecreasing on virtualized hosts.
+type netstackClock struct {
+	start  time.Time
+	latest atomic.Int64
+}
+
+func newNetstackClock() *netstackClock {
+	return &netstackClock{start: time.Now()}
+}
+
+func (*netstackClock) Now() time.Time { return time.Now() }
+
+func (c *netstackClock) NowMonotonic() tcpip.MonotonicTime {
+	elapsed := time.Since(c.start)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	for {
+		latest := c.latest.Load()
+		if int64(elapsed) <= latest {
+			return (tcpip.MonotonicTime{}).Add(time.Duration(latest))
+		}
+		if c.latest.CompareAndSwap(latest, int64(elapsed)) {
+			return (tcpip.MonotonicTime{}).Add(elapsed)
+		}
+	}
+}
+
+func (*netstackClock) AfterFunc(d time.Duration, f func()) tcpip.Timer {
+	return &netstackTimer{timer: time.AfterFunc(d, f)}
+}
+
+type netstackTimer struct {
+	timer *time.Timer
+}
+
+func (t *netstackTimer) Stop() bool { return t.timer.Stop() }
+func (t *netstackTimer) Reset(d time.Duration) {
+	t.timer.Reset(d)
+}
+
 type dnsEndpoint struct {
 	ip  netip.Addr
 	udp *gonet.UDPConn
+}
+
+type packetTCPConn struct {
+	net.Conn
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (c *packetTCPConn) Close() error {
+	c.closeOnce.Do(func() {
+		c.closeErr = c.Conn.Close()
+	})
+	return c.closeErr
 }
 
 // packetService terminates tailmix's synthetic resolver address and the
@@ -53,6 +109,9 @@ type packetService struct {
 	wg       sync.WaitGroup
 	sessions sync.WaitGroup
 
+	connectionsMu sync.Mutex
+	connections   map[*packetTCPConn]struct{}
+
 	errMu sync.Mutex
 	err   error
 
@@ -72,6 +131,7 @@ func newPacketService(manager *tailscaledns.Manager, resolverIP netip.Addr, logf
 	ipstack := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
+		Clock:              newNetstackClock(),
 	})
 	linkEP := channel.New(dnsQueueSize, dnsMTU, "")
 	if err := ipstack.CreateNIC(dnsNICID, linkEP); err != nil {
@@ -137,6 +197,7 @@ func newPacketService(manager *tailscaledns.Manager, resolverIP netip.Addr, logf
 		ctx:         ctx,
 		cancel:      cancel,
 		outbound:    make(chan []byte, dnsQueueSize),
+		connections: make(map[*packetTCPConn]struct{}),
 	}
 	for _, ip := range serviceIPs {
 		s.serviceIPs[ip] = true
@@ -255,9 +316,30 @@ func (s *packetService) serveTCP(listener *gonet.TCPListener) error {
 			_ = conn.Close()
 			return fmt.Errorf("unexpected TCP remote address %T", conn.RemoteAddr())
 		}
+		tracked := &packetTCPConn{Conn: conn}
+		s.connectionsMu.Lock()
+		s.connections[tracked] = struct{}{}
+		s.connectionsMu.Unlock()
 		s.sessions.Go(func() {
-			s.manager.HandleTCPConn(conn, remote.AddrPort())
+			defer func() {
+				s.connectionsMu.Lock()
+				delete(s.connections, tracked)
+				s.connectionsMu.Unlock()
+			}()
+			s.manager.HandleTCPConn(tracked, remote.AddrPort())
 		})
+	}
+}
+
+func (s *packetService) closeTCPConnections() {
+	s.connectionsMu.Lock()
+	connections := make([]*packetTCPConn, 0, len(s.connections))
+	for conn := range s.connections {
+		connections = append(connections, conn)
+	}
+	s.connectionsMu.Unlock()
+	for _, conn := range connections {
+		_ = conn.Close()
 	}
 }
 
@@ -266,9 +348,10 @@ func (s *packetService) Close() error {
 		s.cancel()
 		_ = s.tcpListener.Close()
 		closeDNSEndpoints(s.endpoints)
-		s.stack.Destroy()
 		s.wg.Wait()
+		s.closeTCPConnections()
 		s.sessions.Wait()
+		s.stack.Destroy()
 	})
 	return s.Err()
 }
