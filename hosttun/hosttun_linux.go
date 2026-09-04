@@ -441,7 +441,7 @@ func verifyLinuxRouteTable(name string, want []Route, got []linuxInstalledRoute)
 			continue
 		}
 		if !route.controlled || route.Source != desired.Source {
-			errs = append(errs, fmt.Errorf("Linux %s route %v has source %v or unexpected attributes; want source %v", name, route.Destination, route.Source, desired.Source))
+			errs = append(errs, fmt.Errorf("linux %s route %v has source %v or unexpected attributes; want source %v", name, route.Destination, route.Source, desired.Source))
 		}
 	}
 	for _, route := range want {

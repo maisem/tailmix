@@ -241,6 +241,24 @@ func (h *darwinHost) Configure(cfg Config) error {
 	return nil
 }
 
+func optionalRouteWarnings(wantRoutes, gotRoutes []Route) []Route {
+	got := make(map[netip.Prefix]Route, len(gotRoutes))
+	for _, route := range gotRoutes {
+		got[route.Destination] = route
+	}
+	var missing []Route
+	for _, route := range wantRoutes {
+		if !route.Optional {
+			continue
+		}
+		actual, ok := got[route.Destination]
+		if !ok || actual.Source != route.Source || actual.Exit != route.Exit {
+			missing = append(missing, route)
+		}
+	}
+	return missing
+}
+
 func (h *darwinHost) desiredScopedDefaults(routes []Route) ([]darwinScopedDefault, error) {
 	var haveExitRoute bool
 	for _, route := range routes {
