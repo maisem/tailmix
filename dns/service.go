@@ -35,6 +35,7 @@ type LiveConfig struct {
 
 type ServiceConfig struct {
 	TunName       string
+	ResolverIP    netip.Addr
 	Domains       []Domain
 	Records       []Record
 	Routes        []Route

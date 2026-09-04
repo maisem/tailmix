@@ -16,6 +16,7 @@ func TestStoreRoundTripPreservesEffectiveLeases(t *testing.T) {
 	want := State{
 		SyntheticPool: "100.127.0.0/24",
 		NATIP:         netip.MustParseAddr("100.127.0.2"),
+		DNSIP:         netip.MustParseAddr("100.127.0.53"),
 		Profiles:      []Profile{{ID: "work", Alias: "work", StateDir: "profiles/work"}},
 		Leases: []EffectiveLease{{
 			ProfileID:   "work",
@@ -42,6 +43,9 @@ func TestStoreRoundTripPreservesEffectiveLeases(t *testing.T) {
 	}
 	if got.NATIP != want.NATIP {
 		t.Fatalf("host NAT IP did not round trip: got %v want %v", got.NATIP, want.NATIP)
+	}
+	if got.DNSIP != want.DNSIP {
+		t.Fatalf("MagicDNS IP did not round trip: got %v want %v", got.DNSIP, want.DNSIP)
 	}
 	if got.ExitNode == nil || *got.ExitNode != *want.ExitNode {
 		t.Fatalf("exit node did not round trip: got %+v want %+v", got.ExitNode, want.ExitNode)

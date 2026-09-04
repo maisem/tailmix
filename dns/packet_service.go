@@ -28,16 +28,24 @@ const (
 	dnsMTU       uint32      = 1280
 )
 
-// packetService terminates the Tailscale service IP in a small gVisor stack.
-// It has no kernel listeners; packets enter and leave through HandlePacket and
-// Outbound, which are wired to the shared host TUN by tunmux.
+type dnsEndpoint struct {
+	ip  netip.Addr
+	tcp *gonet.TCPListener
+	udp *gonet.UDPConn
+}
+
+// packetService terminates tailmix's synthetic resolver address and the
+// Tailscale service IP in a small gVisor stack. It has no kernel listeners;
+// packets enter and leave through HandlePacket and Outbound, which are wired
+// to the shared host TUN by tunmux.
 type packetService struct {
-	manager *tailscaledns.Manager
-	stack   *stack.Stack
-	linkEP  *channel.Endpoint
-	tcp     *gonet.TCPListener
-	udp     *gonet.UDPConn
-	logf    logger.Logf
+	manager    *tailscaledns.Manager
+	stack      *stack.Stack
+	linkEP     *channel.Endpoint
+	primaryIP  netip.Addr
+	serviceIPs map[netip.Addr]bool
+	endpoints  []dnsEndpoint
+	logf       logger.Logf
 
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -51,9 +59,12 @@ type packetService struct {
 	closeOnce sync.Once
 }
 
-func newPacketService(manager *tailscaledns.Manager, logf logger.Logf) (*packetService, error) {
+func newPacketService(manager *tailscaledns.Manager, resolverIP netip.Addr, logf logger.Logf) (*packetService, error) {
 	if manager == nil {
 		return nil, errors.New("nil DNS manager")
+	}
+	if !resolverIP.Is4() {
+		return nil, fmt.Errorf("MagicDNS resolver IP must be IPv4: %v", resolverIP)
 	}
 	if logf == nil {
 		logf = logger.Discard
@@ -67,13 +78,19 @@ func newPacketService(manager *tailscaledns.Manager, logf logger.Logf) (*packetS
 		ipstack.Destroy()
 		return nil, fmt.Errorf("create MagicDNS netstack NIC: %v", err)
 	}
-	serviceAddr := tcpip.AddrFrom4(ServiceIP().As4())
-	if err := ipstack.AddProtocolAddress(dnsNICID, tcpip.ProtocolAddress{
-		Protocol:          ipv4.ProtocolNumber,
-		AddressWithPrefix: serviceAddr.WithPrefix(),
-	}, stack.AddressProperties{}); err != nil {
-		ipstack.Destroy()
-		return nil, fmt.Errorf("add MagicDNS netstack address: %v", err)
+	serviceIPs := []netip.Addr{resolverIP}
+	if resolverIP != ServiceIP() {
+		serviceIPs = append(serviceIPs, ServiceIP())
+	}
+	for _, ip := range serviceIPs {
+		serviceAddr := tcpip.AddrFrom4(ip.As4())
+		if err := ipstack.AddProtocolAddress(dnsNICID, tcpip.ProtocolAddress{
+			Protocol:          ipv4.ProtocolNumber,
+			AddressWithPrefix: serviceAddr.WithPrefix(),
+		}, stack.AddressProperties{}); err != nil {
+			ipstack.Destroy()
+			return nil, fmt.Errorf("add MagicDNS netstack address %v: %v", ip, err)
+		}
 	}
 	defaultSubnet, err := tcpip.NewSubnet(tcpip.AddrFrom4([4]byte{}), tcpip.MaskFromBytes([]byte{0, 0, 0, 0}))
 	if err != nil {
@@ -82,48 +99,67 @@ func newPacketService(manager *tailscaledns.Manager, logf logger.Logf) (*packetS
 	}
 	ipstack.SetRouteTable([]tcpip.Route{{Destination: defaultSubnet, NIC: dnsNICID}})
 
-	var udpWQ waiter.Queue
-	udpEP, tcpipErr := ipstack.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &udpWQ)
-	if tcpipErr != nil {
-		ipstack.Destroy()
-		return nil, fmt.Errorf("create MagicDNS UDP endpoint: %v", tcpipErr)
-	}
-	localAddr := tcpip.FullAddress{NIC: dnsNICID, Addr: serviceAddr, Port: 53}
-	if tcpipErr := udpEP.Bind(localAddr); tcpipErr != nil {
-		udpEP.Close()
-		ipstack.Destroy()
-		return nil, fmt.Errorf("bind MagicDNS UDP endpoint: %v", tcpipErr)
-	}
-	udpConn := gonet.NewUDPConn(&udpWQ, udpEP)
-	tcpListener, err := gonet.ListenTCP(ipstack, localAddr, ipv4.ProtocolNumber)
-	if err != nil {
-		_ = udpConn.Close()
-		ipstack.Destroy()
-		return nil, fmt.Errorf("listen on MagicDNS TCP endpoint: %w", err)
+	endpoints := make([]dnsEndpoint, 0, len(serviceIPs))
+	for _, ip := range serviceIPs {
+		var udpWQ waiter.Queue
+		udpEP, tcpipErr := ipstack.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &udpWQ)
+		if tcpipErr != nil {
+			closeDNSEndpoints(endpoints)
+			ipstack.Destroy()
+			return nil, fmt.Errorf("create MagicDNS UDP endpoint for %v: %v", ip, tcpipErr)
+		}
+		localAddr := tcpip.FullAddress{NIC: dnsNICID, Addr: tcpip.AddrFrom4(ip.As4()), Port: 53}
+		if tcpipErr := udpEP.Bind(localAddr); tcpipErr != nil {
+			udpEP.Close()
+			closeDNSEndpoints(endpoints)
+			ipstack.Destroy()
+			return nil, fmt.Errorf("bind MagicDNS UDP endpoint on %v: %v", ip, tcpipErr)
+		}
+		udpConn := gonet.NewUDPConn(&udpWQ, udpEP)
+		tcpListener, err := gonet.ListenTCP(ipstack, localAddr, ipv4.ProtocolNumber)
+		if err != nil {
+			_ = udpConn.Close()
+			closeDNSEndpoints(endpoints)
+			ipstack.Destroy()
+			return nil, fmt.Errorf("listen on MagicDNS TCP endpoint %v: %w", ip, err)
+		}
+		endpoints = append(endpoints, dnsEndpoint{ip: ip, tcp: tcpListener, udp: udpConn})
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &packetService{
-		manager:  manager,
-		stack:    ipstack,
-		linkEP:   linkEP,
-		tcp:      tcpListener,
-		udp:      udpConn,
-		logf:     logf,
-		ctx:      ctx,
-		cancel:   cancel,
-		outbound: make(chan []byte, dnsQueueSize),
+		manager:    manager,
+		stack:      ipstack,
+		linkEP:     linkEP,
+		primaryIP:  resolverIP,
+		serviceIPs: make(map[netip.Addr]bool, len(serviceIPs)),
+		endpoints:  endpoints,
+		logf:       logf,
+		ctx:        ctx,
+		cancel:     cancel,
+		outbound:   make(chan []byte, dnsQueueSize),
+	}
+	for _, ip := range serviceIPs {
+		s.serviceIPs[ip] = true
 	}
 	s.start("packet pump", s.pumpOutbound)
-	s.start("UDP", s.serveUDP)
-	s.start("TCP", s.serveTCP)
+	for i := range s.endpoints {
+		endpoint := &s.endpoints[i]
+		s.start("UDP "+endpoint.ip.String(), func() error { return s.serveUDP(endpoint.udp) })
+		s.start("TCP "+endpoint.ip.String(), func() error { return s.serveTCP(endpoint.tcp) })
+	}
 	return s, nil
 }
 
+func closeDNSEndpoints(endpoints []dnsEndpoint) {
+	for i := range endpoints {
+		_ = endpoints[i].tcp.Close()
+		_ = endpoints[i].udp.Close()
+	}
+}
+
 func (s *packetService) start(name string, f func() error) {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
+	s.wg.Go(func() {
 		if err := f(); err != nil && s.ctx.Err() == nil {
 			s.errMu.Lock()
 			if s.err == nil {
@@ -132,17 +168,17 @@ func (s *packetService) start(name string, f func() error) {
 			s.errMu.Unlock()
 			s.cancel()
 		}
-	}()
+	})
 }
 
 func (s *packetService) Addr() netip.AddrPort {
-	return netip.AddrPortFrom(ServiceIP(), 53)
+	return netip.AddrPortFrom(s.primaryIP, 53)
 }
 
 func (s *packetService) HandlePacket(pkt []byte) bool {
 	var parsed packet.Parsed
 	parsed.Decode(pkt)
-	if parsed.Dst.Addr() != ServiceIP() {
+	if !s.serviceIPs[parsed.Dst.Addr()] {
 		return false
 	}
 	if s.ctx.Err() != nil {
@@ -183,10 +219,10 @@ func (s *packetService) pumpOutbound() error {
 	}
 }
 
-func (s *packetService) serveUDP() error {
+func (s *packetService) serveUDP(conn *gonet.UDPConn) error {
 	buf := make([]byte, 64<<10)
 	for {
-		n, remote, err := s.udp.ReadFrom(buf)
+		n, remote, err := conn.ReadFrom(buf)
 		if err != nil {
 			return err
 		}
@@ -195,9 +231,7 @@ func (s *packetService) serveUDP() error {
 			return fmt.Errorf("unexpected UDP remote address %T", remote)
 		}
 		query := append([]byte(nil), buf[:n]...)
-		s.sessions.Add(1)
-		go func() {
-			defer s.sessions.Done()
+		s.sessions.Go(func() {
 			response, err := s.manager.Query(s.ctx, query, "udp", udpRemote.AddrPort())
 			if err != nil {
 				if s.ctx.Err() == nil {
@@ -205,16 +239,16 @@ func (s *packetService) serveUDP() error {
 				}
 				return
 			}
-			if _, err := s.udp.WriteTo(response, udpRemote); err != nil && s.ctx.Err() == nil {
+			if _, err := conn.WriteTo(response, udpRemote); err != nil && s.ctx.Err() == nil {
 				s.logf("MagicDNS UDP response to %v: %v", udpRemote, err)
 			}
-		}()
+		})
 	}
 }
 
-func (s *packetService) serveTCP() error {
+func (s *packetService) serveTCP(listener *gonet.TCPListener) error {
 	for {
-		conn, err := s.tcp.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			return err
 		}
@@ -223,19 +257,16 @@ func (s *packetService) serveTCP() error {
 			_ = conn.Close()
 			return fmt.Errorf("unexpected TCP remote address %T", conn.RemoteAddr())
 		}
-		s.sessions.Add(1)
-		go func() {
-			defer s.sessions.Done()
+		s.sessions.Go(func() {
 			s.manager.HandleTCPConn(conn, remote.AddrPort())
-		}()
+		})
 	}
 }
 
 func (s *packetService) Close() error {
 	s.closeOnce.Do(func() {
 		s.cancel()
-		_ = s.tcp.Close()
-		_ = s.udp.Close()
+		closeDNSEndpoints(s.endpoints)
 		s.stack.Destroy()
 		s.wg.Wait()
 		s.sessions.Wait()

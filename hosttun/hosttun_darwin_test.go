@@ -4,6 +4,7 @@ package hosttun
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"slices"
 	"strings"
@@ -245,5 +246,65 @@ func TestDarwinConfigureReconcilesAddressesAndRoutes(t *testing.T) {
 	}
 	if len(commands) != 0 {
 		t.Fatalf("no-op reconciliation ran commands: %q", commands)
+	}
+}
+
+func TestDarwinConfigureRejectsRouteCommandFalseSuccess(t *testing.T) {
+	source := netip.MustParseAddr("10.250.0.1")
+	local := netip.PrefixFrom(source, 32)
+	route := Route{Destination: netip.MustParsePrefix("10.250.0.53/32"), Source: source}
+	states := []darwinInstalledState{
+		{},
+		{localAddrs: []netip.Prefix{local}},
+	}
+	stateIndex := 0
+	h := &darwinHost{
+		name: "utun42",
+		run: func(string, ...string) ([]byte, error) {
+			return []byte("route: writing to routing socket: Network is unreachable\n"), nil
+		},
+		readState: func([]Route) (darwinInstalledState, error) {
+			state := states[stateIndex]
+			stateIndex++
+			return state, nil
+		},
+	}
+	err := h.Configure(Config{LocalAddrs: []netip.Prefix{local}, Routes: []Route{route}})
+	if err == nil || !strings.Contains(err.Error(), "missing TUN route") {
+		t.Fatalf("Configure error = %v, want missing route verification error", err)
+	}
+}
+
+func TestDarwinConfigureAllowsMissingOptionalRoute(t *testing.T) {
+	source := netip.MustParseAddr("10.250.0.1")
+	local := netip.PrefixFrom(source, 32)
+	route := Route{
+		Destination: netip.MustParsePrefix("100.100.100.100/32"),
+		Source:      source,
+		Optional:    true,
+	}
+	states := []darwinInstalledState{
+		{localAddrs: []netip.Prefix{local}},
+		{localAddrs: []netip.Prefix{local}},
+	}
+	stateIndex := 0
+	var logs []string
+	h := &darwinHost{
+		name: "utun42",
+		logf: func(format string, args ...any) {
+			logs = append(logs, fmt.Sprintf(format, args...))
+		},
+		run: func(string, ...string) ([]byte, error) { return nil, nil },
+		readState: func([]Route) (darwinInstalledState, error) {
+			state := states[stateIndex]
+			stateIndex++
+			return state, nil
+		},
+	}
+	if err := h.Configure(Config{LocalAddrs: []netip.Prefix{local}, Routes: []Route{route}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) == 0 || !strings.Contains(logs[len(logs)-1], "optional TUN route") {
+		t.Fatalf("logs = %q, want optional route warning", logs)
 	}
 }

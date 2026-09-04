@@ -27,6 +27,7 @@ type State struct {
 	SyntheticPoolV6  string            `json:"syntheticPoolV6,omitempty"`
 	NATIP            netip.Addr        `json:"natIp,omitempty"`
 	NATIPv6          netip.Addr        `json:"natIpV6,omitempty"`
+	DNSIP            netip.Addr        `json:"dnsIp,omitempty"`
 	Profiles         []Profile         `json:"profiles"`
 	Leases           []EffectiveLease  `json:"leases"`
 	IPRouteBindings  []IPRouteBinding  `json:"ipRouteBindings,omitempty"`

@@ -39,6 +39,7 @@ type darwinHost struct {
 	name            string
 	logf            logger.Logf
 	run             commandRunner
+	readState       func([]Route) (darwinInstalledState, error)
 	underlayDefault func(bool) (darwinUnderlayDefault, error)
 	mu              sync.Mutex
 	localAddrs      []netip.Prefix
@@ -73,6 +74,7 @@ func Open(cfg OpenConfig) (Host, error) {
 			return exec.Command(name, args...).CombinedOutput()
 		},
 	}
+	h.readState = h.readInstalledState
 	h.underlayDefault = systemUnderlayDefault
 	if err := h.command("/sbin/ifconfig", name, "up"); err != nil {
 		_ = dev.Close()
@@ -94,6 +96,13 @@ func (h *darwinHost) Configure(cfg Config) error {
 	if h.closed {
 		return errors.New("darwin host TUN is closed")
 	}
+	installed, err := h.installedState(routes)
+	if err != nil {
+		return err
+	}
+	h.localAddrs = installed.localAddrs
+	h.routes = installed.routes
+	h.scopedDefaults = installed.scopedDefaults
 	scopedDefaults, err := h.desiredScopedDefaults(routes)
 	if err != nil {
 		return err
@@ -132,6 +141,10 @@ func (h *darwinHost) Configure(cfg Config) error {
 			continue
 		}
 		if err := h.command(routeDeleteCommand(h.name, route)...); err != nil {
+			if route.Optional {
+				h.logf("optional TUN route %v could not be removed: %v", route.Destination, err)
+				continue
+			}
 			return err
 		}
 		h.routes = slices.DeleteFunc(h.routes, func(candidate Route) bool {
@@ -200,13 +213,30 @@ func (h *darwinHost) Configure(cfg Config) error {
 			h.logf("add aggregate exit route %v on %s", route.Destination, h.name)
 		}
 		if err := h.command(routeAddCommand(h.name, route)...); err != nil {
+			if route.Optional {
+				h.logf("optional TUN route %v could not be installed: %v", route.Destination, err)
+				continue
+			}
 			return err
 		}
 		h.routes = append(h.routes, route)
 	}
-	h.localAddrs = localAddrs
-	h.routes = routes
-	h.scopedDefaults = scopedDefaults
+	actual, err := h.installedState(routes)
+	if err != nil {
+		return err
+	}
+	h.localAddrs = actual.localAddrs
+	h.routes = actual.routes
+	h.scopedDefaults = actual.scopedDefaults
+	if err := errors.Join(
+		verifyHostConfig(localAddrs, routes, actual.localAddrs, actual.routes),
+		verifyDarwinScopedDefaults(scopedDefaults, actual.scopedDefaults),
+	); err != nil {
+		return fmt.Errorf("verify Darwin TUN %s configuration: %w", h.name, err)
+	}
+	for _, route := range optionalRouteWarnings(routes, actual.routes) {
+		h.logf("optional TUN route %v is not installed", route.Destination)
+	}
 	h.configured = true
 	return nil
 }

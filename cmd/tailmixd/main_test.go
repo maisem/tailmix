@@ -144,6 +144,7 @@ func TestConfigureSyntheticPoolsOverrideDiscardsChangedFamilyLeasesAndNAT(t *tes
 		SyntheticPoolV6: defaultSyntheticPoolV6,
 		NATIP:           netip.MustParseAddr("100.127.0.2"),
 		NATIPv6:         netip.MustParseAddr("fd6d:6e65:7400::2"),
+		DNSIP:           netip.MustParseAddr("100.127.0.53"),
 		Leases:          []state.EffectiveLease{canonicalV4, syntheticV4, syntheticV6},
 	}
 	if err := configureSyntheticPools(&st, "10.250.1.9/16", ""); err != nil {
@@ -155,8 +156,8 @@ func TestConfigureSyntheticPoolsOverrideDiscardsChangedFamilyLeasesAndNAT(t *tes
 	if len(st.Leases) != 1 || st.Leases[0] != syntheticV6 {
 		t.Fatalf("leases after IPv4 pool change = %+v, want only IPv6 lease", st.Leases)
 	}
-	if st.NATIP.IsValid() || st.NATIPv6 != netip.MustParseAddr("fd6d:6e65:7400::2") {
-		t.Fatalf("NAT addresses after IPv4 pool change = %v, %v", st.NATIP, st.NATIPv6)
+	if st.NATIP.IsValid() || st.DNSIP.IsValid() || st.NATIPv6 != netip.MustParseAddr("fd6d:6e65:7400::2") {
+		t.Fatalf("reserved addresses after IPv4 pool change = NAT %v DNS %v IPv6 NAT %v", st.NATIP, st.DNSIP, st.NATIPv6)
 	}
 }
 
@@ -200,7 +201,7 @@ func TestEnsureNATIPsSkipsAndMigratesPrefixBase(t *testing.T) {
 		}},
 	}
 
-	if err := ensureNATIPs(&st); err != nil {
+	if err := ensureHostIPs(&st); err != nil {
 		t.Fatal(err)
 	}
 	if want := netip.MustParseAddr("10.250.0.2"); st.NATIP != want {
@@ -208,6 +209,54 @@ func TestEnsureNATIPsSkipsAndMigratesPrefixBase(t *testing.T) {
 	}
 	if want := netip.MustParseAddr("fd6d:6e65:7400::2"); st.NATIPv6 != want {
 		t.Fatalf("migrated IPv6 NAT address = %v, want %v", st.NATIPv6, want)
+	}
+	if want := netip.MustParseAddr("10.250.0.3"); st.DNSIP != want {
+		t.Fatalf("MagicDNS address = %v, want first free %v", st.DNSIP, want)
+	}
+}
+
+func TestEnsureHostIPsPrefersAndPersistsPoolOffset53(t *testing.T) {
+	st := state.State{
+		SyntheticPool:   "10.250.0.0/24",
+		SyntheticPoolV6: "fd6d:6e65:7400::/120",
+	}
+	if err := ensureHostIPs(&st); err != nil {
+		t.Fatal(err)
+	}
+	if want := netip.MustParseAddr("10.250.0.53"); st.DNSIP != want {
+		t.Fatalf("MagicDNS address = %v, want preferred %v", st.DNSIP, want)
+	}
+	persisted := st.DNSIP
+	st.Leases = append(st.Leases, state.EffectiveLease{
+		ProfileID:   "work",
+		NodeID:      "peer",
+		CanonicalIP: netip.MustParseAddr("100.64.0.2"),
+		EffectiveIP: netip.MustParseAddr("10.250.0.2"),
+	})
+	if err := ensureHostIPs(&st); err != nil {
+		t.Fatal(err)
+	}
+	if st.DNSIP != persisted {
+		t.Fatalf("persisted MagicDNS address changed from %v to %v", persisted, st.DNSIP)
+	}
+}
+
+func TestEnsureHostIPsFallsBackWhenPoolOffset53IsLeased(t *testing.T) {
+	st := state.State{
+		SyntheticPool:   "10.250.0.0/24",
+		SyntheticPoolV6: "fd6d:6e65:7400::/120",
+		Leases: []state.EffectiveLease{{
+			ProfileID:   "work",
+			NodeID:      "peer",
+			CanonicalIP: netip.MustParseAddr("100.64.0.2"),
+			EffectiveIP: netip.MustParseAddr("10.250.0.53"),
+		}},
+	}
+	if err := ensureHostIPs(&st); err != nil {
+		t.Fatal(err)
+	}
+	if want := netip.MustParseAddr("10.250.0.2"); st.DNSIP != want {
+		t.Fatalf("MagicDNS address = %v, want first free %v", st.DNSIP, want)
 	}
 }
 
@@ -348,7 +397,7 @@ func TestTunConfigUsesSharedNATRouteSource(t *testing.T) {
 		SyntheticPool:   "100.127.0.0/24",
 		SyntheticPoolV6: "fd6d:6e65:7400::/120",
 	}
-	if err := ensureNATIPs(&st); err != nil {
+	if err := ensureHostIPs(&st); err != nil {
 		t.Fatal(err)
 	}
 	leases, _, err := assignEffectiveIPs(st, statuses)
@@ -359,20 +408,24 @@ func TestTunConfigUsesSharedNATRouteSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(table.Sources) != 2 || table.Destinations.Size() != 2 || len(hostCfg.LocalAddrs) != 1 || len(hostCfg.Routes) != 3 {
+	if len(table.Sources) != 2 || table.Destinations.Size() != 2 || len(hostCfg.LocalAddrs) != 1 || len(hostCfg.Routes) != 4 {
 		t.Fatalf("TUN config sizes: sources=%d destinations=%d local=%d routes=%d", len(table.Sources), table.Destinations.Size(), len(hostCfg.LocalAddrs), len(hostCfg.Routes))
 	}
 	if hostCfg.LocalAddrs[0].Addr() != st.NATIP {
 		t.Fatalf("local TUN addresses = %v, want only NAT IP %v", hostCfg.LocalAddrs, st.NATIP)
 	}
-	foundDNSRoute := false
+	foundSyntheticDNSRoute := false
+	foundQuad100Route := false
 	for _, route := range hostCfg.Routes {
-		if route.Destination.Addr() == tailmixdns.ServiceIP() {
-			foundDNSRoute = true
+		switch route.Destination.Addr() {
+		case st.DNSIP:
+			foundSyntheticDNSRoute = !route.Optional
+		case tailmixdns.ServiceIP():
+			foundQuad100Route = route.Optional
 		}
 	}
-	if !foundDNSRoute {
-		t.Fatalf("host routes %v do not route MagicDNS through the TUN", hostCfg.Routes)
+	if !foundSyntheticDNSRoute || !foundQuad100Route {
+		t.Fatalf("host routes %v do not include required synthetic DNS and optional quad-100 routes", hostCfg.Routes)
 	}
 	for _, route := range hostCfg.Routes {
 		if route.Source != st.NATIP {
@@ -416,7 +469,7 @@ func TestTunDNSConfigUsesEffectiveAddresses(t *testing.T) {
 		SyntheticPool:   "100.127.0.0/24",
 		SyntheticPoolV6: "fd6d:6e65:7400::/120",
 	}
-	if err := ensureNATIPs(&st); err != nil {
+	if err := ensureHostIPs(&st); err != nil {
 		t.Fatal(err)
 	}
 	leases, _, err := assignEffectiveIPs(st, statuses)
@@ -637,8 +690,8 @@ func TestTUNPlanTracksPeerAddAndRemoveAcrossNetmapUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if initial.Table.Destinations.Size() != 0 || len(initial.HostConfig.Routes) != 1 {
-		t.Fatalf("initial config = destinations %v routes %v, want only MagicDNS route", initial.Table.Destinations, initial.HostConfig.Routes)
+	if initial.Table.Destinations.Size() != 0 || len(initial.HostConfig.Routes) != 2 {
+		t.Fatalf("initial config = destinations %v routes %v, want only MagicDNS routes", initial.Table.Destinations, initial.HostConfig.Routes)
 	}
 
 	withPeer := baseStatus
@@ -654,8 +707,8 @@ func TestTUNPlanTracksPeerAddAndRemoveAcrossNetmapUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added.Table.Destinations.Size() != 2 || len(added.HostConfig.Routes) != 3 {
-		t.Fatalf("config after add = destinations %v routes %v, want peer plus MagicDNS", added.Table.Destinations, added.HostConfig.Routes)
+	if added.Table.Destinations.Size() != 2 || len(added.HostConfig.Routes) != 4 {
+		t.Fatalf("config after add = destinations %v routes %v, want peer plus MagicDNS routes", added.Table.Destinations, added.HostConfig.Routes)
 	}
 	effectiveByCanonical := map[netip.Addr]netip.Addr{}
 	for prefix, destination := range added.Table.Destinations.All() {
@@ -681,7 +734,7 @@ func TestTUNPlanTracksPeerAddAndRemoveAcrossNetmapUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed.Table.Destinations.Size() != 0 || len(removed.HostConfig.Routes) != 1 || hasDNSRecord(removed.Records, "peer.home.example", peerV4) || hasDNSRecord(removed.Records, "peer.home.example", peerV6) {
+	if removed.Table.Destinations.Size() != 0 || len(removed.HostConfig.Routes) != 2 || hasDNSRecord(removed.Records, "peer.home.example", peerV4) || hasDNSRecord(removed.Records, "peer.home.example", peerV6) {
 		t.Fatalf("peer remained active after removal: routes=%v records=%v", removed.HostConfig.Routes, removed.Records)
 	}
 	foundDormantLeases := 0

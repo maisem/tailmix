@@ -5,6 +5,7 @@ package dns
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"sync"
 
 	"tailscale.com/control/controlknobs"
@@ -14,6 +15,20 @@ import (
 	"tailscale.com/net/tsdial"
 	"tailscale.com/util/eventbus"
 )
+
+type resolverIPConfigurator struct {
+	tailscaledns.OSConfigurator
+	resolverIP netip.Addr
+}
+
+func (c resolverIPConfigurator) SetDNS(cfg tailscaledns.OSConfig) error {
+	for i, nameserver := range cfg.Nameservers {
+		if nameserver == ServiceIP() {
+			cfg.Nameservers[i] = c.resolverIP
+		}
+	}
+	return c.OSConfigurator.SetDNS(cfg)
+}
 
 type osService struct {
 	*packetService
@@ -26,6 +41,9 @@ type osService struct {
 }
 
 func StartService(cfg ServiceConfig) (Service, error) {
+	if !cfg.ResolverIP.Is4() {
+		return nil, fmt.Errorf("MagicDNS resolver IP must be IPv4: %v", cfg.ResolverIP)
+	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
@@ -48,7 +66,10 @@ func StartService(cfg ServiceConfig) (Service, error) {
 		bus.Close()
 		return nil, fmt.Errorf("create %s DNS configurator: %w", platformGOOS, err)
 	}
-	manager := tailscaledns.NewManager(cfg.Logf, platformOSConfigurator(osConfigurator), healthTracker, dialer, nil, knobs, platformGOOS, bus)
+	manager := tailscaledns.NewManager(cfg.Logf, resolverIPConfigurator{
+		OSConfigurator: platformOSConfigurator(osConfigurator),
+		resolverIP:     cfg.ResolverIP,
+	}, healthTracker, dialer, nil, knobs, platformGOOS, bus)
 	if manager == nil {
 		_ = osConfigurator.Close()
 		_ = dialer.Close()
@@ -63,7 +84,7 @@ func StartService(cfg ServiceConfig) (Service, error) {
 		bus.Close()
 		return nil, fmt.Errorf("configure MagicDNS: %w", err)
 	}
-	packetService, err := newPacketService(manager, cfg.Logf)
+	packetService, err := newPacketService(manager, cfg.ResolverIP, cfg.Logf)
 	if err != nil {
 		_ = manager.Down()
 		_ = dialer.Close()

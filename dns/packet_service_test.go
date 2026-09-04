@@ -28,6 +28,8 @@ import (
 	"tailscale.com/util/eventbus"
 )
 
+var testResolverIP = netip.MustParseAddr("10.250.0.53")
+
 type packetTestOSConfigurator struct{}
 
 func (*packetTestOSConfigurator) SetDNS(tailscaledns.OSConfig) error { return nil }
@@ -57,7 +59,7 @@ func newTestPacketService(t *testing.T, name string, wantIP netip.Addr) *packetS
 	if err := manager.Set(dnsCfg); err != nil {
 		t.Fatal(err)
 	}
-	service, err := newPacketService(manager, logger.Discard)
+	service, err := newPacketService(manager, testResolverIP, logger.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,31 +116,38 @@ func dnsAResponse(t *testing.T, response []byte) netip.Addr {
 	return netip.AddrFrom4(answer.A)
 }
 
-func TestPacketServiceAnswersUDPFromTUN(t *testing.T) {
+func TestPacketServiceAnswersUDPFromBothResolverAddresses(t *testing.T) {
 	const name = "db.work.ts.net"
 	wantIP := netip.MustParseAddr("100.127.0.7")
 	clientIP := netip.MustParseAddr("100.127.0.10")
-	service := newTestPacketService(t, name, wantIP)
-	query := packet.Generate(packet.UDP4Header{
-		IP4Header: packet.IP4Header{Src: clientIP, Dst: ServiceIP()},
-		SrcPort:   54321,
-		DstPort:   53,
-	}, dnsAQuery(t, name))
-	if !service.HandlePacket(query) {
-		t.Fatal("quad-100 UDP packet was not consumed")
-	}
-	select {
-	case raw := <-service.Outbound():
-		var parsed packet.Parsed
-		parsed.Decode(raw)
-		if parsed.Src != netip.AddrPortFrom(ServiceIP(), 53) || parsed.Dst != netip.AddrPortFrom(clientIP, 54321) {
-			t.Fatalf("UDP response flow = %v > %v", parsed.Src, parsed.Dst)
-		}
-		if got := dnsAResponse(t, parsed.Payload()); got != wantIP {
-			t.Fatalf("UDP MagicDNS answer = %v, want %v", got, wantIP)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for UDP MagicDNS response")
+	for testName, resolverIP := range map[string]netip.Addr{
+		"synthetic": testResolverIP,
+		"quad-100":  ServiceIP(),
+	} {
+		t.Run(testName, func(t *testing.T) {
+			service := newTestPacketService(t, name, wantIP)
+			query := packet.Generate(packet.UDP4Header{
+				IP4Header: packet.IP4Header{Src: clientIP, Dst: resolverIP},
+				SrcPort:   54321,
+				DstPort:   53,
+			}, dnsAQuery(t, name))
+			if !service.HandlePacket(query) {
+				t.Fatalf("UDP packet to %v was not consumed", resolverIP)
+			}
+			select {
+			case raw := <-service.Outbound():
+				var parsed packet.Parsed
+				parsed.Decode(raw)
+				if parsed.Src != netip.AddrPortFrom(resolverIP, 53) || parsed.Dst != netip.AddrPortFrom(clientIP, 54321) {
+					t.Fatalf("UDP response flow = %v > %v", parsed.Src, parsed.Dst)
+				}
+				if got := dnsAResponse(t, parsed.Payload()); got != wantIP {
+					t.Fatalf("UDP MagicDNS answer = %v, want %v", got, wantIP)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for UDP MagicDNS response")
+			}
+		})
 	}
 }
 
@@ -216,39 +225,46 @@ func newPacketTestClient(t *testing.T, service *packetService, clientIP netip.Ad
 	return c
 }
 
-func TestPacketServiceAnswersTCPFromTUN(t *testing.T) {
+func TestPacketServiceAnswersTCPFromBothResolverAddresses(t *testing.T) {
 	const name = "db.work.ts.net"
 	wantIP := netip.MustParseAddr("100.127.0.7")
 	clientIP := netip.MustParseAddr("100.127.0.10")
-	service := newTestPacketService(t, name, wantIP)
-	client := newPacketTestClient(t, service, clientIP)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	conn, err := gonet.DialContextTCP(ctx, client.stack, tcpip.FullAddress{
-		NIC:  dnsNICID,
-		Addr: tcpip.AddrFrom4(ServiceIP().As4()),
-		Port: 53,
-	}, ipv4.ProtocolNumber)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	query := dnsAQuery(t, name)
-	framed := make([]byte, 2+len(query))
-	binary.BigEndian.PutUint16(framed, uint16(len(query)))
-	copy(framed[2:], query)
-	if _, err := conn.Write(framed); err != nil {
-		t.Fatal(err)
-	}
-	var length [2]byte
-	if _, err := io.ReadFull(conn, length[:]); err != nil {
-		t.Fatal(err)
-	}
-	response := make([]byte, binary.BigEndian.Uint16(length[:]))
-	if _, err := io.ReadFull(conn, response); err != nil {
-		t.Fatal(err)
-	}
-	if got := dnsAResponse(t, response); got != wantIP {
-		t.Fatalf("TCP MagicDNS answer = %v, want %v", got, wantIP)
+	for testName, resolverIP := range map[string]netip.Addr{
+		"synthetic": testResolverIP,
+		"quad-100":  ServiceIP(),
+	} {
+		t.Run(testName, func(t *testing.T) {
+			service := newTestPacketService(t, name, wantIP)
+			client := newPacketTestClient(t, service, clientIP)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			conn, err := gonet.DialContextTCP(ctx, client.stack, tcpip.FullAddress{
+				NIC:  dnsNICID,
+				Addr: tcpip.AddrFrom4(resolverIP.As4()),
+				Port: 53,
+			}, ipv4.ProtocolNumber)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			query := dnsAQuery(t, name)
+			framed := make([]byte, 2+len(query))
+			binary.BigEndian.PutUint16(framed, uint16(len(query)))
+			copy(framed[2:], query)
+			if _, err := conn.Write(framed); err != nil {
+				t.Fatal(err)
+			}
+			var length [2]byte
+			if _, err := io.ReadFull(conn, length[:]); err != nil {
+				t.Fatal(err)
+			}
+			response := make([]byte, binary.BigEndian.Uint16(length[:]))
+			if _, err := io.ReadFull(conn, response); err != nil {
+				t.Fatal(err)
+			}
+			if got := dnsAResponse(t, response); got != wantIP {
+				t.Fatalf("TCP MagicDNS answer = %v, want %v", got, wantIP)
+			}
+		})
 	}
 }

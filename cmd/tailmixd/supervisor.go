@@ -271,8 +271,9 @@ func (s *supervisor) startAggregateLocked() error {
 		}
 		s.host = host
 		dnsService, err := tailmixdns.StartService(tailmixdns.ServiceConfig{
-			TunName: host.Name(),
-			Logf:    prefixedLogf(s.cfg.Stderr, "dns"),
+			TunName:    host.Name(),
+			ResolverIP: s.st.DNSIP,
+			Logf:       prefixedLogf(s.cfg.Stderr, "dns"),
 		})
 		if err != nil {
 			_ = host.Close()
@@ -472,7 +473,7 @@ func (s *supervisor) reconcileLocked() (err error) {
 	} else {
 		next := cloneState(s.st)
 		updateProfileMetadata(&next, statuses)
-		if err := ensureNATIPs(&next); err != nil {
+		if err := ensureHostIPs(&next); err != nil {
 			return err
 		}
 		active, all, err := assignEffectiveIPs(next, statuses)

@@ -152,6 +152,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	st.Profiles = stateProfiles(runtimeProfiles)
+	if err := ensureHostIPs(&st); err != nil {
+		return err
+	}
 	if err := store.Save(st); err != nil {
 		return err
 	}
@@ -251,6 +254,9 @@ func configureSyntheticPools(st *state.State, ipv4Override, ipv6Override string)
 		if strings.TrimSpace(family.override) != "" && oldNormalized != normalized {
 			st.Leases = discardSyntheticLeases(st.Leases, family.ipv6)
 			*family.nat = netip.Addr{}
+			if !family.ipv6 {
+				st.DNSIP = netip.Addr{}
+			}
 		}
 		*family.current = normalized
 	}
@@ -286,8 +292,8 @@ func discardSyntheticLeases(leases []state.EffectiveLease, ipv6 bool) []state.Ef
 	return out
 }
 
-func ensureNATIPs(st *state.State) error {
-	used := make(map[netip.Addr]bool, len(st.Leases)+2)
+func ensureHostIPs(st *state.State) error {
+	used := make(map[netip.Addr]bool, len(st.Leases)+3)
 	for _, lease := range st.Leases {
 		if lease.EffectiveIP.IsValid() {
 			used[lease.EffectiveIP] = true
@@ -307,31 +313,66 @@ func ensureNATIPs(st *state.State) error {
 			return fmt.Errorf("parse effective %s pool %q: %w", family.name, family.poolRaw, err)
 		}
 		pool = pool.Masked()
-		// Keep the prefix base unassigned. In particular, using the IPv4
-		// network address as the aggregate TUN's point-to-point identity can
-		// make Darwin route packets DNATed to that address back out the TUN
-		// instead of delivering them locally.
-		if current := *family.current; current.IsValid() && current != pool.Addr() && current.Is6() == family.ipv6 && pool.Contains(current) && !used[current] {
-			used[current] = true
+		if validReservedIP(*family.current, pool, family.ipv6, used) {
+			used[*family.current] = true
 			continue
 		}
-		*family.current = netip.Addr{}
-		for ip := pool.Addr().Next(); pool.Contains(ip); ip = ip.Next() {
-			if !ip.IsValid() {
-				break
-			}
-			if used[ip] || ip == tailmixdns.ServiceIP() {
-				continue
-			}
-			*family.current = ip
-			used[ip] = true
-			break
-		}
+		*family.current = firstFreePoolIP(pool, used)
 		if !family.current.IsValid() {
 			return fmt.Errorf("effective %s pool %v has no free address for the host NAT", family.name, pool)
 		}
+		used[*family.current] = true
+	}
+
+	pool, err := netip.ParsePrefix(st.SyntheticPool)
+	if err != nil {
+		return fmt.Errorf("parse effective IPv4 pool %q: %w", st.SyntheticPool, err)
+	}
+	pool = pool.Masked()
+	if validReservedIP(st.DNSIP, pool, false, used) {
+		return nil
+	}
+	st.DNSIP = netip.Addr{}
+	preferred := poolIPAtOffset(pool, 53)
+	if preferred.IsValid() && !used[preferred] {
+		st.DNSIP = preferred
+	} else {
+		st.DNSIP = firstFreePoolIP(pool, used)
+	}
+	if !st.DNSIP.IsValid() {
+		return fmt.Errorf("effective IPv4 pool %v has no free address for MagicDNS", pool)
 	}
 	return nil
+}
+
+func validReservedIP(ip netip.Addr, pool netip.Prefix, ipv6 bool, used map[netip.Addr]bool) bool {
+	return ip.IsValid() && ip != pool.Addr() && ip.Is6() == ipv6 && pool.Contains(ip) && !used[ip]
+}
+
+func firstFreePoolIP(pool netip.Prefix, used map[netip.Addr]bool) netip.Addr {
+	for ip := pool.Addr().Next(); pool.Contains(ip); ip = ip.Next() {
+		if !ip.IsValid() {
+			break
+		}
+		if !used[ip] && ip != tailmixdns.ServiceIP() {
+			return ip
+		}
+	}
+	return netip.Addr{}
+}
+
+func poolIPAtOffset(pool netip.Prefix, offset int) netip.Addr {
+	ip := pool.Addr()
+	for range offset {
+		ip = ip.Next()
+		if !ip.IsValid() {
+			return netip.Addr{}
+		}
+	}
+	if !pool.Contains(ip) {
+		return netip.Addr{}
+	}
+	return ip
 }
 
 func parseProfileSpec(raw string) (profileSpec, error) {
@@ -605,11 +646,13 @@ func assignEffectiveIPs(st state.State, statuses []tailmixprofile.Status) (activ
 				familyExisting = append(familyExisting, lease)
 			}
 		}
-		reserved := st.NATIP
+		reserved := []netip.Addr{st.NATIP}
 		if family.ipv6 {
-			reserved = st.NATIPv6
+			reserved = []netip.Addr{st.NATIPv6}
+		} else {
+			reserved = append(reserved, st.DNSIP)
 		}
-		plan, assignErr := effectiveip.NewAllocator(pool, familyExisting, reserved).Assign(familyNodes)
+		plan, assignErr := effectiveip.NewAllocator(pool, familyExisting, reserved...).Assign(familyNodes)
 		if assignErr != nil {
 			return nil, nil, fmt.Errorf("assign effective %s addresses: %w", family.name, assignErr)
 		}
@@ -661,7 +704,7 @@ func buildTUNPlan(st state.State, statuses []tailmixprofile.Status) (tunPlan, er
 	st.Profiles = slices.Clone(st.Profiles)
 	st.Leases = slices.Clone(st.Leases)
 	updateProfileMetadata(&st, statuses)
-	if err := ensureNATIPs(&st); err != nil {
+	if err := ensureHostIPs(&st); err != nil {
 		return tunPlan{}, err
 	}
 	activeLeases, allLeases, err := assignEffectiveIPs(st, statuses)
@@ -984,14 +1027,19 @@ func tunConfigWithPolicy(st state.State, statuses []tailmixprofile.Status, lease
 			}
 		}
 	}
-	serviceIP := tailmixdns.ServiceIP()
-	for key, source := range table.Sources {
-		if source.HostIP == serviceIP {
-			return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q host NAT IP conflicts with MagicDNS service IP %v", key.ProfileID, serviceIP)
+	serviceIPs := []netip.Addr{st.DNSIP, tailmixdns.ServiceIP()}
+	for _, serviceIP := range serviceIPs {
+		if !serviceIP.IsValid() {
+			return packetmap.Table{}, hosttun.Config{}, errors.New("MagicDNS service address is unavailable")
 		}
-	}
-	if destination, ok := table.Destinations.Lookup(serviceIP); ok {
-		return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q effective target IP conflicts with MagicDNS service IP %v", destination.ProfileID, serviceIP)
+		for key, source := range table.Sources {
+			if source.HostIP == serviceIP {
+				return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q host NAT IP conflicts with MagicDNS service IP %v", key.ProfileID, serviceIP)
+			}
+		}
+		if destination, ok := table.Destinations.Lookup(serviceIP); ok {
+			return packetmap.Table{}, hosttun.Config{}, fmt.Errorf("profile %q effective target IP conflicts with MagicDNS service IP %v", destination.ProfileID, serviceIP)
+		}
 	}
 	if !st.NATIP.IsValid() {
 		return packetmap.Table{}, hosttun.Config{}, errors.New("host IPv4 NAT address is unavailable")
@@ -1003,10 +1051,17 @@ func tunConfigWithPolicy(st state.State, statuses []tailmixprofile.Status, lease
 			break
 		}
 	}
-	hostCfg.Routes = append(hostCfg.Routes, hosttun.Route{
-		Destination: netip.PrefixFrom(serviceIP, serviceIP.BitLen()),
-		Source:      st.NATIP,
-	})
+	hostCfg.Routes = append(hostCfg.Routes,
+		hosttun.Route{
+			Destination: netip.PrefixFrom(st.DNSIP, st.DNSIP.BitLen()),
+			Source:      st.NATIP,
+		},
+		hosttun.Route{
+			Destination: netip.PrefixFrom(tailmixdns.ServiceIP(), tailmixdns.ServiceIP().BitLen()),
+			Source:      st.NATIP,
+			Optional:    true,
+		},
+	)
 	return table, hostCfg, nil
 }
 
@@ -1054,7 +1109,7 @@ func routeOverlapsReserved(st state.State, prefix netip.Prefix) bool {
 			return true
 		}
 	}
-	for _, addr := range []netip.Addr{st.NATIP, st.NATIPv6, tailmixdns.ServiceIP()} {
+	for _, addr := range []netip.Addr{st.NATIP, st.NATIPv6, st.DNSIP, tailmixdns.ServiceIP()} {
 		if addr.IsValid() && prefix.Addr().Is6() == addr.Is6() && prefix.Contains(addr) {
 			return true
 		}
