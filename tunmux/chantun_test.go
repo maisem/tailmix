@@ -5,6 +5,8 @@ import (
 	"io"
 	"testing"
 	"time"
+
+	wgtun "github.com/tailscale/wireguard-go/tun"
 )
 
 func TestPacketReleaseInvalidatesAllHandles(t *testing.T) {
@@ -23,11 +25,11 @@ func TestChanTUNReadReleasesTransferredPacket(t *testing.T) {
 	if err := tun.injectOutboundPacket(packet); err != nil {
 		t.Fatal(err)
 	}
-	buf := make([]byte, 64)
-	sizes := make([]int, 1)
-	n, err := tun.Read([][]byte{buf}, sizes, 4)
-	if err != nil || n != 1 || !bytes.Equal(buf[4:4+sizes[0]], []byte("outbound")) {
-		t.Fatalf("Read = (%d, %v, %q)", n, err, buf[4:4+sizes[0]])
+	buf := make([]byte, 256)
+	packets := make([]wgtun.ReadPacket, 1)
+	n, err := tun.Read(buf, packets)
+	if err != nil || n != 1 || !bytes.Equal(buf[packets[0].Offset:packets[0].Offset+packets[0].Size], []byte("outbound")) {
+		t.Fatalf("Read = (%d, %v, %q)", n, err, buf[packets[0].Offset:packets[0].Offset+packets[0].Size])
 	}
 	assertPanics(t, func() { stale.Bytes() })
 }
@@ -47,16 +49,13 @@ func TestChanTUNReadDrainsQueuedBatchInFIFOOrder(t *testing.T) {
 		}
 	}
 
-	bufs := make([][]byte, 4)
-	for i := range bufs {
-		bufs[i] = make([]byte, 64)
-	}
-	sizes := make([]int, len(bufs))
+	slab := make([]byte, 512)
+	packets := make([]wgtun.ReadPacket, 4)
 	done := make(chan struct{})
 	var n int
 	var err error
 	go func() {
-		n, err = tun.Read(bufs, sizes, 4)
+		n, err = tun.Read(slab, packets)
 		close(done)
 	}()
 	select {
@@ -68,7 +67,7 @@ func TestChanTUNReadDrainsQueuedBatchInFIFOOrder(t *testing.T) {
 		t.Fatalf("Read = (%d, %v), want (3, nil)", n, err)
 	}
 	for i, want := range []string{"first", "second", "third"} {
-		if got := string(bufs[i][4 : 4+sizes[i]]); got != want {
+		if got := string(slab[packets[i].Offset : packets[i].Offset+packets[i].Size]); got != want {
 			t.Fatalf("packet %d = %q, want %q", i, got, want)
 		}
 		packet := stale[i]
@@ -84,17 +83,52 @@ func TestChanTUNReadRespectsCallerBatchCapacity(t *testing.T) {
 		}
 	}
 
-	bufs := [][]byte{make([]byte, 64), make([]byte, 64)}
-	sizes := make([]int, len(bufs))
-	if n, err := tun.Read(bufs, sizes, 0); err != nil || n != 2 {
+	slab := make([]byte, 512)
+	packets := make([]wgtun.ReadPacket, 2)
+	if n, err := tun.Read(slab, packets); err != nil || n != 2 {
 		t.Fatalf("first Read = (%d, %v), want (2, nil)", n, err)
 	}
-	if got := []string{string(bufs[0][:sizes[0]]), string(bufs[1][:sizes[1]])}; got[0] != "first" || got[1] != "second" {
+	if got := []string{string(slab[packets[0].Offset : packets[0].Offset+packets[0].Size]), string(slab[packets[1].Offset : packets[1].Offset+packets[1].Size])}; got[0] != "first" || got[1] != "second" {
 		t.Fatalf("first Read packets = %q", got)
 	}
-	if n, err := tun.Read(bufs, sizes, 0); err != nil || n != 1 || string(bufs[0][:sizes[0]]) != "third" {
-		t.Fatalf("second Read = (%d, %v, %q), want third", n, err, bufs[0][:sizes[0]])
+	if n, err := tun.Read(slab, packets); err != nil || n != 1 || string(slab[packets[0].Offset:packets[0].Offset+packets[0].Size]) != "third" {
+		t.Fatalf("second Read = (%d, %v, %q), want third", n, err, slab[packets[0].Offset:packets[0].Offset+packets[0].Size])
 	}
+}
+
+func TestChanTUNReadReportsSlabOverflowWithoutTruncating(t *testing.T) {
+	tun := NewChanTUN("test")
+	t.Cleanup(func() { tun.Close() })
+	stale := make([]Packet, 3)
+	for i, payload := range []string{"first", "too large", "last"} {
+		packet := tun.pool.copy([]byte(payload))
+		stale[i] = packet
+		if err := tun.injectOutboundPacket(packet); err != nil {
+			t.Fatal(err)
+		}
+	}
+	slab := bytes.Repeat([]byte{0xff}, 2*wgtun.ReadPacketSpacing+len("first"))
+	packets := make([]wgtun.ReadPacket, tun.BatchSize())
+	n, err := tun.Read(slab, packets)
+	if n != 1 || err != wgtun.ErrTooManySegments {
+		t.Fatalf("Read = (%d, %v), want (1, ErrTooManySegments)", n, err)
+	}
+	pkt := packets[0]
+	if pkt.Offset != wgtun.ReadPacketSpacing || string(slab[pkt.Offset:pkt.Offset+pkt.Size]) != "first" {
+		t.Fatalf("Read packet = %+v, slab = %v", pkt, slab)
+	}
+	if !bytes.Equal(slab[:pkt.Offset], bytes.Repeat([]byte{0xff}, wgtun.ReadPacketSpacing)) ||
+		!bytes.Equal(slab[pkt.Offset+pkt.Size:], bytes.Repeat([]byte{0xff}, wgtun.ReadPacketSpacing)) {
+		t.Fatal("Read overwrote packet spacing")
+	}
+	assertPanics(t, func() { stale[0].Bytes() })
+	assertPanics(t, func() { stale[1].Bytes() })
+	n, err = tun.Read(slab, packets)
+	pkt = packets[0]
+	if n != 1 || err != nil || string(slab[pkt.Offset:pkt.Offset+pkt.Size]) != "last" {
+		t.Fatalf("Read after overflow = (%d, %v), want last", n, err)
+	}
+	assertPanics(t, func() { stale[2].Bytes() })
 }
 
 func TestChanTUNWriteCopiesBorrowedBatchInFIFOOrder(t *testing.T) {
@@ -170,7 +204,7 @@ func TestChanTUNCloseReleasesQueuesAndUnblocksRead(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := tun.Read([][]byte{make([]byte, 64)}, make([]int, 1), 0)
+		_, err := tun.Read(make([]byte, 256), make([]wgtun.ReadPacket, 1))
 		done <- err
 	}()
 	select {

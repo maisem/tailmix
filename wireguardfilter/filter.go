@@ -171,19 +171,20 @@ func (d *Device) Events() <-chan tun.Event {
 }
 func (d *Device) BatchSize() int { return d.underlying.BatchSize() }
 
-func (d *Device) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (d *Device) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
 	for {
-		n, err := d.underlying.Read(bufs, sizes, offset)
+		n, err := d.underlying.Read(slab, packets)
 		accepted := 0
 		for i := range n {
 			policy := d.policy.Load()
 			var parsed packet.Parsed
-			parsed.Decode(bufs[i][offset : offset+sizes[i]])
+			pkt := packets[i]
+			parsed.Decode(slab[pkt.Offset : pkt.Offset+pkt.Size])
 			if response, _ := policy.filter.RunOut(&parsed, 0); response != filter.Accept {
 				continue
 			}
 			if accepted != i {
-				sizes[accepted] = copy(bufs[accepted][offset:], bufs[i][offset:offset+sizes[i]])
+				packets[accepted] = pkt
 			}
 			accepted++
 		}

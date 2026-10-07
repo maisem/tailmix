@@ -108,20 +108,7 @@ func (p *Packet) validate() {
 	}
 }
 
-func (p *Packet) readBuffer() []byte {
-	p.validate()
-	return p.buffer.data
-}
-
 func (p *Packet) writeBuffer() ([]byte, int) {
 	p.validate()
 	return p.buffer.data[:p.offset+p.size], p.offset
-}
-
-func (p *Packet) setSize(size int) {
-	p.validate()
-	if size < 0 || p.offset+size > len(p.buffer.data) {
-		panic(fmt.Sprintf("invalid packet size %d for capacity %d", size, len(p.buffer.data)-p.offset))
-	}
-	p.size = size
 }

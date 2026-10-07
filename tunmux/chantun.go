@@ -66,8 +66,8 @@ func (t *ChanTUN) Close() error {
 	return nil
 }
 
-func (t *ChanTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
-	batchSize := min(len(bufs), len(sizes), conn.IdealBatchSize)
+func (t *ChanTUN) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
+	batchSize := min(len(packets), conn.IdealBatchSize)
 	if batchSize == 0 {
 		return 0, nil
 	}
@@ -75,25 +75,31 @@ func (t *ChanTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	if !ok {
 		return 0, io.EOF
 	}
-	copyPacket := func(i int, packet Packet) {
-		sizes[i] = copy(bufs[i][offset:], packet.Bytes())
+	offset := tun.ReadPacketSpacing
+	n := 0
+	for {
+		data := packet.Bytes()
+		if len(data) > len(slab)-offset-tun.ReadPacketSpacing {
+			packet.Release()
+			return n, tun.ErrTooManySegments
+		}
+		copy(slab[offset:], data)
+		packets[n] = tun.ReadPacket{Offset: offset, Size: len(data)}
+		offset += len(data) + tun.ReadPacketSpacing
 		packet.Release()
-	}
-	copyPacket(0, packet)
-	n := 1
-	for n < batchSize {
+		n++
+		if n == batchSize {
+			return n, nil
+		}
 		select {
 		case packet, ok = <-t.outbound:
 			if !ok {
 				return n, nil
 			}
-			copyPacket(n, packet)
-			n++
 		default:
 			return n, nil
 		}
 	}
-	return n, nil
 }
 
 func (t *ChanTUN) Write(bufs [][]byte, offset int) (int, error) {

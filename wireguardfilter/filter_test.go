@@ -196,9 +196,9 @@ func TestDeviceFiltersBatchesAndSwapsAtomically(t *testing.T) {
 	underlying.outbound <- []byte{1, 2, 3}
 	underlying.outbound <- outbound
 	buf := make([]byte, 1500)
-	sizes := make([]int, 1)
-	if n, err := device.Read([][]byte{buf}, sizes, 0); err != nil || n != 1 || !slices.Equal(buf[:sizes[0]], outbound) {
-		t.Fatalf("Read() = (%d, %v), packet %v", n, err, buf[:sizes[0]])
+	packets := make([]tun.ReadPacket, 1)
+	if n, err := device.Read(buf, packets); err != nil || n != 1 || !slices.Equal(buf[packets[0].Offset:packets[0].Offset+packets[0].Size], outbound) {
+		t.Fatalf("Read() = (%d, %v), packet %v", n, err, buf[packets[0].Offset:packets[0].Offset+packets[0].Size])
 	}
 
 	if n, err := device.Write([][]byte{allowedReply, newInbound}, 0); err != nil || n != 2 {
@@ -222,6 +222,48 @@ func TestDeviceFiltersBatchesAndSwapsAtomically(t *testing.T) {
 	}
 }
 
+func TestDeviceReadCompactsPacketDescriptorsWithReadError(t *testing.T) {
+	cfg := filterTestConfig()
+	policy := mustCompile(t, cfg, netip.Addr{}, true, nil)
+	accepted := udp4Packet("10.0.0.1", "10.0.0.2", 42000, 53)
+	underlying := &batchReadTUN{testTUN: newTestTUN(), batch: [][]byte{{1, 2, 3}, accepted, accepted}}
+	device, err := NewDevice(underlying, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slab := make([]byte, 512)
+	packets := make([]tun.ReadPacket, underlying.BatchSize())
+	n, err := device.Read(slab, packets)
+	if n != 2 || err != io.EOF {
+		t.Fatalf("Read = (%d, %v), want (2, EOF)", n, err)
+	}
+	for i, pkt := range packets[:n] {
+		wantOffset := (i+2)*tun.ReadPacketSpacing + 3 + i*len(accepted)
+		if pkt.Offset != wantOffset || !slices.Equal(slab[pkt.Offset:pkt.Offset+pkt.Size], accepted) {
+			t.Fatalf("packet %d = %+v, want accepted at offset %d", i, pkt, wantOffset)
+		}
+	}
+	if !slices.Equal(slab[tun.ReadPacketSpacing:tun.ReadPacketSpacing+3], []byte{1, 2, 3}) {
+		t.Fatal("filter moved packet bytes instead of compacting descriptors")
+	}
+}
+
+type batchReadTUN struct {
+	*testTUN
+	batch [][]byte
+}
+
+func (t *batchReadTUN) BatchSize() int { return len(t.batch) }
+func (t *batchReadTUN) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
+	offset := tun.ReadPacketSpacing
+	for i, pkt := range t.batch {
+		copy(slab[offset:], pkt)
+		packets[i] = tun.ReadPacket{Offset: offset, Size: len(pkt)}
+		offset += len(pkt) + tun.ReadPacketSpacing
+	}
+	return len(t.batch), io.EOF
+}
+
 func TestDeviceWriteCompactsAcceptedBuffersInPlace(t *testing.T) {
 	cfg := filterTestConfig()
 	cfg.PacketFilter = wireguardcfg.PacketFilter{Grants: []wireguardcfg.Grant{}}
@@ -235,8 +277,8 @@ func TestDeviceWriteCompactsAcceptedBuffersInPlace(t *testing.T) {
 	outbound := udp4Packet("10.0.0.1", "10.0.0.2", 42000, 53)
 	underlying.outbound <- outbound
 	buf := make([]byte, 1500)
-	sizes := make([]int, 1)
-	if n, err := device.Read([][]byte{buf}, sizes, 0); err != nil || n != 1 {
+	packets := make([]tun.ReadPacket, 1)
+	if n, err := device.Read(buf, packets); err != nil || n != 1 {
 		t.Fatalf("prime Read = (%d, %v), want (1, nil)", n, err)
 	}
 
@@ -318,12 +360,13 @@ func newTestTUN() *testTUN {
 }
 
 func (t *testTUN) File() *os.File { return nil }
-func (t *testTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (t *testTUN) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
 	pkt, ok := <-t.outbound
 	if !ok {
 		return 0, io.EOF
 	}
-	sizes[0] = copy(bufs[0][offset:], pkt)
+	copy(slab[tun.ReadPacketSpacing:], pkt)
+	packets[0] = tun.ReadPacket{Offset: tun.ReadPacketSpacing, Size: len(pkt)}
 	return 1, nil
 }
 func (t *testTUN) Write(bufs [][]byte, offset int) (int, error) {

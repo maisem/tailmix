@@ -254,13 +254,13 @@ func (b *wgTestBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	rx, closed := b.rx, b.closed
 	b.mu.Unlock()
 	b.fabric.binds[port] = b
-	receive := func(packets [][]byte, sizes []int, endpoints []conn.Endpoint) (int, error) {
+	receive := func(slab []byte, packets []conn.ReceivedPacket) (int, error) {
 		select {
 		case <-closed:
 			return 0, net.ErrClosed
 		case datagram := <-rx:
-			sizes[0] = copy(packets[0], datagram.payload)
-			endpoints[0] = datagram.source
+			size := copy(slab, datagram.payload)
+			packets[0] = conn.ReceivedPacket{Size: size, Endpoint: datagram.source}
 			return 1, nil
 		}
 	}

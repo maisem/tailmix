@@ -283,31 +283,40 @@ func TestMuxBatchesHostPacketsAcrossProfiles(t *testing.T) {
 }
 
 func TestMuxProcessesHostPacketsReturnedWithReadError(t *testing.T) {
-	hostNAT := netip.MustParseAddr("10.250.0.10")
-	effectivePeer := netip.MustParseAddr("100.127.0.1")
-	canonicalSelf := netip.MustParseAddr("100.65.0.10")
-	canonicalPeer := netip.MustParseAddr("100.64.0.1")
-	host := newBatchTestTUN(2)
-	host.reads <- [][]byte{testUDP(hostNAT, effectivePeer), testUDP(hostNAT, effectivePeer)}
-	host.readErr = errBatchTestStop
-	work := NewChanTUN("work")
-	table := packetmap.Table{
-		Destinations: new(bart.Table[packetmap.Destination]),
-		Sources: map[packetmap.SourceKey]packetmap.Source{
-			{ProfileID: "work"}: {HostIP: hostNAT, CanonicalIP: canonicalSelf},
-		},
-	}
-	table.Destinations.Insert(netip.PrefixFrom(effectivePeer, 32), packetmap.Destination{ProfileID: "work", CanonicalIP: canonicalPeer})
-	mux := NewMux(host, map[string]*ChanTUN{"work": work}, packetmap.New(table), nil)
-	if err := mux.runHostToProfiles(context.Background()); !errors.Is(err, errBatchTestStop) {
-		t.Fatalf("runHostToProfiles error = %v, want %v", err, errBatchTestStop)
-	}
-	if got := len(work.outbound); got != 2 {
-		t.Fatalf("profile outbound queue length = %d, want 2", got)
-	}
-	for range 2 {
-		owned := <-work.outbound
-		owned.Release()
+	for _, readErr := range []error{errBatchTestStop, tun.ErrTooManySegments} {
+		t.Run(readErr.Error(), func(t *testing.T) {
+			wantErr := readErr
+			if readErr == tun.ErrTooManySegments {
+				wantErr = nil
+			}
+			hostNAT := netip.MustParseAddr("10.250.0.10")
+			effectivePeer := netip.MustParseAddr("100.127.0.1")
+			canonicalSelf := netip.MustParseAddr("100.65.0.10")
+			canonicalPeer := netip.MustParseAddr("100.64.0.1")
+			host := newBatchTestTUN(2)
+			host.reads <- [][]byte{testUDP(hostNAT, effectivePeer), testUDP(hostNAT, effectivePeer)}
+			host.readErr = readErr
+			close(host.reads)
+			work := NewChanTUN("work")
+			table := packetmap.Table{
+				Destinations: new(bart.Table[packetmap.Destination]),
+				Sources: map[packetmap.SourceKey]packetmap.Source{
+					{ProfileID: "work"}: {HostIP: hostNAT, CanonicalIP: canonicalSelf},
+				},
+			}
+			table.Destinations.Insert(netip.PrefixFrom(effectivePeer, 32), packetmap.Destination{ProfileID: "work", CanonicalIP: canonicalPeer})
+			mux := NewMux(host, map[string]*ChanTUN{"work": work}, packetmap.New(table), nil)
+			if err := mux.runHostToProfiles(context.Background()); !errors.Is(err, wantErr) {
+				t.Fatalf("runHostToProfiles error = %v, want %v", err, wantErr)
+			}
+			if got := len(work.outbound); got != 2 {
+				t.Fatalf("profile outbound queue length = %d, want 2", got)
+			}
+			for range 2 {
+				owned := <-work.outbound
+				owned.Release()
+			}
+		})
 	}
 }
 
@@ -438,13 +447,16 @@ func (t *batchTestTUN) Events() <-chan tun.Event {
 	return t.events
 }
 func (t *batchTestTUN) BatchSize() int { return t.batchSize }
-func (t *batchTestTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (t *batchTestTUN) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
 	batch, ok := <-t.reads
 	if !ok {
 		return 0, io.EOF
 	}
+	offset := tun.ReadPacketSpacing
 	for i, pkt := range batch {
-		sizes[i] = copy(bufs[i][offset:], pkt)
+		copy(slab[offset:], pkt)
+		packets[i] = tun.ReadPacket{Offset: offset, Size: len(pkt)}
+		offset += len(pkt) + tun.ReadPacketSpacing
 	}
 	return len(batch), t.readErr
 }

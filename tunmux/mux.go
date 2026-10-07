@@ -2,6 +2,7 @@ package tunmux
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -167,25 +168,13 @@ func (m *Mux) runHostToProfiles(ctx context.Context) error {
 		return fmt.Errorf("read host TUN MTU: %w", err)
 	}
 	batchSize := max(1, m.host.BatchSize())
-	const offset = device.MessageTransportHeaderSize
-	packets := make([]Packet, batchSize)
-	bufs := make([][]byte, batchSize)
-	sizes := make([]int, batchSize)
+	slab := make([]byte, batchSize*(mtu+tun.ReadPacketSpacing)+tun.ReadPacketSpacing)
+	packets := make([]tun.ReadPacket, batchSize)
 
 	for {
-		for i := range packets {
-			packets[i] = m.pool.acquire(mtu)
-			bufs[i] = packets[i].readBuffer()
-		}
-		n, readErr := m.host.Read(bufs, sizes, offset)
-		for i := n; i < len(packets); i++ {
-			packets[i].Release()
-			packets[i] = Packet{}
-		}
-		for i := range n {
-			packet := packets[i]
-			packets[i] = Packet{}
-			packet.setSize(sizes[i])
+		n, readErr := m.host.Read(slab, packets)
+		for _, readPacket := range packets[:n] {
+			packet := m.pool.copy(slab[readPacket.Offset : readPacket.Offset+readPacket.Size])
 			pkt := packet.Bytes()
 			if m.local != nil && m.local.HandlePacket(pkt) {
 				packet.Release()
@@ -213,7 +202,7 @@ func (m *Mux) runHostToProfiles(ctx context.Context) error {
 				return fmt.Errorf("inject outbound packet into profile %q: %w", route.ProfileID, err)
 			}
 		}
-		if readErr != nil {
+		if readErr != nil && !errors.Is(readErr, tun.ErrTooManySegments) {
 			if ctx.Err() != nil || readErr == io.EOF {
 				return nil
 			}
