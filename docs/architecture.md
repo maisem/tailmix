@@ -144,7 +144,7 @@ the grace period. Incoming traffic and idle open connections do not extend it.
 The default pools are:
 
 ```text
-IPv4  100.127.0.0/24
+IPv4  100.127.0.0/16
 IPv6  fd6d:6e65:7400::/56
 ```
 

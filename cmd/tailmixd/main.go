@@ -32,7 +32,7 @@ import (
 )
 
 const (
-	defaultSyntheticPool   = "100.127.0.0/24"
+	defaultSyntheticPool   = "100.127.0.0/16"
 	defaultSyntheticPoolV6 = "fd6d:6e65:7400::/56"
 )
 

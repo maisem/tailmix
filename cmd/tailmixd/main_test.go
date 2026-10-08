@@ -110,15 +110,25 @@ func TestResolveProfilesMergesFlagsWithPersistentState(t *testing.T) {
 }
 
 func TestConfigureSyntheticPoolsUsesPersistedValuesAndDefaults(t *testing.T) {
-	st := state.State{SyntheticPool: "10.42.1.7/16"}
-	if err := configureSyntheticPools(&st, "", ""); err != nil {
-		t.Fatal(err)
-	}
-	if st.SyntheticPool != "10.42.0.0/16" {
-		t.Fatalf("IPv4 pool = %q, want normalized persisted pool", st.SyntheticPool)
-	}
-	if st.SyntheticPoolV6 != defaultSyntheticPoolV6 {
-		t.Fatalf("IPv6 pool = %q, want default %q", st.SyntheticPoolV6, defaultSyntheticPoolV6)
+	for _, test := range []struct {
+		name, persisted, want string
+	}{
+		{"new state", "", "100.127.0.0/16"},
+		{"existing default", "100.127.0.0/24", "100.127.0.0/24"},
+		{"custom pool", "10.42.1.7/16", "10.42.0.0/16"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			st := state.State{SyntheticPool: test.persisted}
+			if err := configureSyntheticPools(&st, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			if st.SyntheticPool != test.want {
+				t.Fatalf("IPv4 pool = %q, want %q", st.SyntheticPool, test.want)
+			}
+			if st.SyntheticPoolV6 != defaultSyntheticPoolV6 {
+				t.Fatalf("IPv6 pool = %q, want default %q", st.SyntheticPoolV6, defaultSyntheticPoolV6)
+			}
+		})
 	}
 }
 
