@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/maisem/tailmix/effectiveip"
 )
@@ -210,5 +211,40 @@ func TestExplicitRoutesOverrideExitNodeFallback(t *testing.T) {
 		if got.ProfileID != "work" {
 			t.Fatalf("Resolve(%q) profile = %q, want work", target, got.ProfileID)
 		}
+	}
+}
+
+func TestDynamicRouterObservesLiteralEffectiveTargets(t *testing.T) {
+	lease := effectiveip.Lease{
+		NodeKey:     effectiveip.NodeKey{ProfileID: "work", NodeID: "gone", CanonicalIP: netip.MustParseAddr("100.64.0.2")},
+		EffectiveIP: netip.MustParseAddr("100.127.0.3"),
+	}
+	observable := map[string]bool{"work": true}
+	tracker := new(effectiveip.ActivityTracker)
+	tracker.SetLeases([]effectiveip.Lease{lease})
+	absentSince := time.Now()
+	tracker.Retain([]effectiveip.Lease{lease}, nil, observable, absentSince)
+
+	// The dormant target is no longer routable, so the dial fails, but the
+	// attempt still extends its lease. Successful dials return the dialer's
+	// connection unwrapped.
+	dialer := &recordingDialer{}
+	router, err := NewRouter([]Profile{{ID: "work", Dialer: dialer}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynamic := NewDynamicRouter(router)
+	dynamic.SetActivityTracker(tracker)
+	if _, err := dynamic.Dial(context.Background(), "tcp", "[::ffff:100.127.0.3]:22"); err == nil {
+		t.Fatal("expected dormant target dial to fail")
+	}
+	if dialer.addr != "" {
+		t.Fatalf("dormant target was dialed: %q", dialer.addr)
+	}
+	if got := tracker.Retain([]effectiveip.Lease{lease}, nil, observable, absentSince.Add(effectiveip.LeaseRetention)); len(got) != 1 {
+		t.Fatal("failed dial attempt did not extend the dormant lease")
+	}
+	if _, err := dynamic.Dial(context.Background(), "tcp", "host.example.ts.net:22"); err == nil {
+		t.Fatal("expected unrouted name dial to fail")
 	}
 }

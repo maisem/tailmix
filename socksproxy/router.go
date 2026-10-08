@@ -61,7 +61,8 @@ type DomainRoute struct {
 }
 
 type DynamicRouter struct {
-	current atomic.Pointer[Router]
+	current  atomic.Pointer[Router]
+	activity *effectiveip.ActivityTracker
 }
 
 func NewDynamicRouter(router *Router) *DynamicRouter {
@@ -77,12 +78,33 @@ func (d *DynamicRouter) Set(router *Router) {
 	d.current.Store(router)
 }
 
+// SetActivityTracker records literal effective IP dial targets, so a dormant
+// lease that clients still address keeps its reservation. Call it before
+// serving. Connections are returned unwrapped.
+func (d *DynamicRouter) SetActivityTracker(activity *effectiveip.ActivityTracker) {
+	d.activity = activity
+}
+
 func (d *DynamicRouter) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	if d.activity != nil {
+		if ip := literalTarget(addr); ip.IsValid() {
+			d.activity.ObserveOutbound(ip)
+		}
+	}
 	router := d.current.Load()
 	if router == nil {
 		return nil, fmt.Errorf("SOCKS router is not configured")
 	}
 	return router.Dial(ctx, network, addr)
+}
+
+func literalTarget(addr string) netip.Addr {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return netip.Addr{}
+	}
+	ip, _ := netip.ParseAddr(host)
+	return ip.Unmap()
 }
 
 func NewRouter(profiles []Profile, leases []effectiveip.Lease) (*Router, error) {

@@ -10,9 +10,11 @@ import (
 
 	tailmixdns "github.com/maisem/tailmix/dns"
 	"github.com/maisem/tailmix/effectiveip"
+	"github.com/maisem/tailmix/packetmap"
 	tailmixprofile "github.com/maisem/tailmix/profile"
 	"github.com/maisem/tailmix/state"
 	tailmixversion "github.com/maisem/tailmix/version"
+	"tailscale.com/net/packet"
 	"tailscale.com/types/dnstype"
 )
 
@@ -734,7 +736,7 @@ func TestTUNPlanTracksPeerAddAndRemoveAcrossNetmapUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed.Table.Destinations.Size() != 0 || len(removed.HostConfig.Routes) != 2 || hasDNSRecord(removed.Records, "peer.home.example", peerV4) || hasDNSRecord(removed.Records, "peer.home.example", peerV6) {
+	if removed.Table.Destinations.Size() != 0 || len(removed.HostConfig.Routes) != 4 || hasDNSRecord(removed.Records, "peer.home.example", peerV4) || hasDNSRecord(removed.Records, "peer.home.example", peerV6) {
 		t.Fatalf("peer remained active after removal: routes=%v records=%v", removed.HostConfig.Routes, removed.Records)
 	}
 	foundDormantLeases := 0
@@ -745,6 +747,58 @@ func TestTUNPlanTracksPeerAddAndRemoveAcrossNetmapUpdates(t *testing.T) {
 	}
 	if foundDormantLeases != 2 {
 		t.Fatalf("peer lease was not preserved for stable reuse: %v", removed.State.Leases)
+	}
+}
+
+func TestTUNPlanRoutesDormantLeasesToDropEvenWithExitFallback(t *testing.T) {
+	st := state.State{
+		SyntheticPool: "100.127.0.0/24", SyntheticPoolV6: "fd6d:6e65:7400::/56",
+		Leases: []state.EffectiveLease{{
+			ProfileID: "gone", NodeID: "peer",
+			CanonicalIP: netip.MustParseAddr("100.64.0.2"),
+			EffectiveIP: netip.MustParseAddr("100.127.0.3"),
+		}, {
+			ProfileID: "gone", NodeID: "peer",
+			CanonicalIP: netip.MustParseAddr("fd7a:115c:a1e0::2"),
+			EffectiveIP: netip.MustParseAddr("fd6d:6e65:7400::3"),
+		}},
+	}
+	// No usable profile, including no IPv6 self: dormant host routes still
+	// need a local source so packet attempts reach the mux.
+	plan, err := buildTUNPlan(st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.HostConfig.LocalAddrs) != 2 {
+		t.Fatal("dormant IPv6 routes lost their local NAT source")
+	}
+	for _, lease := range st.Leases {
+		ip := lease.EffectiveIP
+		found := false
+		for _, route := range plan.HostConfig.Routes {
+			if route.Destination == netip.PrefixFrom(ip, ip.BitLen()) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("no host route to observe dormant %v", ip)
+		}
+		src := natIPFor(plan.State, ip)
+		var pkt []byte
+		if ip.Is6() {
+			plan.Table.ExitRoutes.Insert(netip.MustParsePrefix("::/0"), packetmap.SubnetRoute{ProfileID: "exit", Active: true})
+			pkt = packet.Generate(packet.UDP6Header{
+				IP6Header: packet.IP6Header{Src: src, Dst: ip}, SrcPort: 1234, DstPort: 80,
+			}, nil)
+		} else {
+			plan.Table.ExitRoutes.Insert(netip.MustParsePrefix("0.0.0.0/0"), packetmap.SubnetRoute{ProfileID: "exit", Active: true})
+			pkt = packet.Generate(packet.UDP4Header{
+				IP4Header: packet.IP4Header{Src: src, Dst: ip}, SrcPort: 1234, DstPort: 80,
+			}, nil)
+		}
+		if _, _, err := packetmap.New(plan.Table).Outbound(pkt); err == nil {
+			t.Fatalf("dormant %v escaped through exit fallback", ip)
+		}
 	}
 }
 

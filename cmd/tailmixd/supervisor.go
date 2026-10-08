@@ -18,6 +18,7 @@ import (
 
 	"github.com/maisem/tailmix/controlapi"
 	tailmixdns "github.com/maisem/tailmix/dns"
+	"github.com/maisem/tailmix/effectiveip"
 	"github.com/maisem/tailmix/hosttun"
 	"github.com/maisem/tailmix/packetmap"
 	tailmixprofile "github.com/maisem/tailmix/profile"
@@ -46,9 +47,10 @@ type daemonConfig struct {
 }
 
 type managedProfile struct {
-	runtime runtimeProfile
-	cancel  context.CancelFunc
-	status  tailmixprofile.Status
+	runtime     runtimeProfile
+	cancel      context.CancelFunc
+	status      tailmixprofile.Status
+	statusFresh bool
 }
 
 type runtimeUpdate struct {
@@ -86,6 +88,8 @@ type supervisor struct {
 	updateMu      sync.Mutex
 	updateWake    chan struct{}
 	updateRestart chan updateRestart
+
+	leaseActivity effectiveip.ActivityTracker
 }
 
 func newSupervisor(store *state.JSONStore, st state.State, initial []runtimeProfile, cfg daemonConfig) *supervisor {
@@ -96,7 +100,7 @@ func newSupervisor(store *state.JSONStore, st state.State, initial []runtimeProf
 	for _, rp := range initial {
 		initialByID[rp.State.ID] = rp
 	}
-	return &supervisor{
+	s := &supervisor{
 		store:         store,
 		cfg:           cfg,
 		st:            cloneState(st),
@@ -108,6 +112,8 @@ func newSupervisor(store *state.JSONStore, st state.State, initial []runtimeProf
 		updateWake:    make(chan struct{}, 1),
 		updateRestart: make(chan updateRestart, 1),
 	}
+	s.leaseActivity.SetLeases(leasesFromState(st.Leases))
+	return s
 }
 
 func (s *supervisor) Run(ctx context.Context) (retErr error) {
@@ -129,8 +135,13 @@ func (s *supervisor) Run(ctx context.Context) (retErr error) {
 		}
 	}
 	if err := s.reconcileLocked(); err != nil {
-		s.mu.Unlock()
-		return errors.Join(err, s.close())
+		if !errors.Is(err, effectiveip.ErrPoolExhausted) {
+			s.mu.Unlock()
+			return errors.Join(err, s.close())
+		}
+		// Keep control running so a later profile update or API request can
+		// retry after absent leases finish their grace period.
+		fmt.Fprintln(s.cfg.Stderr, "effective IP pool exhausted; waiting for a reconciliation retry")
 	}
 	control, err := startControlServer(s.ctx, s.cfg.SocketDir, s)
 	if err != nil {
@@ -282,6 +293,7 @@ func (s *supervisor) startAggregateLocked() error {
 		}
 		s.dnsService = dnsService
 		s.mux = tunmux.NewMux(host.Device(), nil, packetmap.New(packetmap.Table{}), prefixedLogf(s.cfg.Stderr, "tun"))
+		s.mux.SetActivityTracker(&s.leaseActivity)
 		s.mux.SetLocalPacketHandler(dnsService)
 		go func() {
 			if err := s.mux.Run(s.ctx); err != nil && s.ctx.Err() == nil {
@@ -295,6 +307,7 @@ func (s *supervisor) startAggregateLocked() error {
 			return err
 		}
 		s.socksRouter = socksproxy.NewDynamicRouter(router)
+		s.socksRouter.SetActivityTracker(&s.leaseActivity)
 		listener, err := net.Listen("tcp", s.cfg.SOCKSAddr)
 		if err != nil {
 			return err
@@ -451,12 +464,16 @@ func (s *supervisor) reconcileLocked() (err error) {
 	// published until the selected engine reports the requested stable
 	// exit-node ID.
 	statuses := usableStatuses(s.statusesLocked())
+	if err := s.refreshLeasesLocked(statuses, time.Now()); err != nil {
+		return fmt.Errorf("save effective lease observations: %w", err)
+	}
 
 	if s.cfg.Mode == "tun" {
 		plan, err := buildTUNPlan(s.st, statuses)
 		if err != nil {
 			return fmt.Errorf("build aggregate TUN plan: %w", err)
 		}
+		s.leaseActivity.SetLeases(leasesFromState(plan.State.Leases))
 		// Publish the fail-closed packet policy before changing host routes.
 		// Removed routes can only be dropped, and newly installed host routes
 		// immediately see their final profile selection.
@@ -541,9 +558,11 @@ func (s *supervisor) reconcileLocked() (err error) {
 		if err != nil {
 			return err
 		}
+		s.leaseActivity.SetLeases(leasesFromState(next.Leases))
 		s.socksRouter.Set(router)
 		s.st = next
 	}
+	s.leaseActivity.SetLeases(leasesFromState(s.st.Leases))
 	if err := s.store.Save(s.st); err != nil {
 		return fmt.Errorf("save reconciled state: %w", err)
 	}
@@ -579,6 +598,7 @@ func (s *supervisor) statusesLocked() []tailmixprofile.Status {
 			continue
 		}
 		status, err := managed.runtime.Engine.Status(s.ctx)
+		managed.statusFresh = err == nil
 		if err != nil {
 			s.lastErrors[configured.ID] = err.Error()
 			status = managed.status

@@ -1,10 +1,14 @@
 package effectiveip
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"sort"
 )
+
+// ErrPoolExhausted indicates that no unreserved address remains in the pool.
+var ErrPoolExhausted = errors.New("effective IP pool exhausted")
 
 type Node struct {
 	ProfileID   string
@@ -113,7 +117,7 @@ func (a *Allocator) nextSynthetic(key NodeKey) (netip.Addr, error) {
 			return ip, nil
 		}
 	}
-	return netip.Addr{}, fmt.Errorf("effective IP pool %v exhausted for profile=%q node=%q canonical=%v", a.pool, key.ProfileID, key.NodeID, key.CanonicalIP)
+	return netip.Addr{}, fmt.Errorf("effective IP pool %v exhausted for profile=%q node=%q canonical=%v: %w", a.pool, key.ProfileID, key.NodeID, key.CanonicalIP, ErrPoolExhausted)
 }
 
 func (p *Plan) add(key NodeKey, effective netip.Addr) {

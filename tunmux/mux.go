@@ -11,16 +11,19 @@ import (
 	"github.com/tailscale/wireguard-go/device"
 	"github.com/tailscale/wireguard-go/tun"
 
+	"github.com/maisem/tailmix/effectiveip"
 	"github.com/maisem/tailmix/packetmap"
+	tspacket "tailscale.com/net/packet"
 	"tailscale.com/types/logger"
 )
 
 type Mux struct {
-	host   tun.Device
-	pool   *packetPool
-	mapper atomic.Pointer[packetmap.Mapper]
-	local  LocalPacketHandler
-	logf   logger.Logf
+	host     tun.Device
+	pool     *packetPool
+	mapper   atomic.Pointer[packetmap.Mapper]
+	local    LocalPacketHandler
+	logf     logger.Logf
+	activity *effectiveip.ActivityTracker
 
 	mu       sync.RWMutex
 	profiles map[string]*ChanTUN
@@ -75,6 +78,24 @@ func (m *Mux) SetMapper(mapper *packetmap.Mapper) {
 // SetLocalPacketHandler installs h. It must be called before Run.
 func (m *Mux) SetLocalPacketHandler(h LocalPacketHandler) {
 	m.local = h
+}
+
+// SetActivityTracker records host packets that the mapper refuses, so a
+// dormant target that is still being addressed keeps its lease. It must be
+// called before Run. Ordinary mapped traffic is never parsed twice.
+func (m *Mux) SetActivityTracker(activity *effectiveip.ActivityTracker) {
+	m.activity = activity
+}
+
+func (m *Mux) observeDroppedOutbound(pkt []byte) {
+	if m.activity == nil {
+		return
+	}
+	var parsed tspacket.Parsed
+	parsed.Decode(pkt)
+	if parsed.IPVersion != 0 {
+		m.activity.ObserveOutbound(parsed.Dst.Addr())
+	}
 }
 
 func (m *Mux) AddProfile(profileID string, profileTun *ChanTUN) error {
@@ -182,6 +203,7 @@ func (m *Mux) runHostToProfiles(ctx context.Context) error {
 			}
 			_, route, err := m.mapper.Load().Outbound(pkt)
 			if err != nil {
+				m.observeDroppedOutbound(pkt)
 				m.logf("drop outbound packet: %v", err)
 				packet.Release()
 				continue

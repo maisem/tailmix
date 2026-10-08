@@ -106,7 +106,7 @@ or a Tailscale Service.
 
 | Address | Visible where | Purpose | Lifetime |
 | --- | --- | --- | --- |
-| Effective target IP | Host DNS, routes, sockets, shared TUN | Collision-free node or Service dial target and profile lookup key | Persisted and retained when a target disappears |
+| Effective target IP | Host DNS, routes, sockets, shared TUN | Collision-free node or Service dial target and profile lookup key | Persisted; retained for a grace period after a target disappears |
 | Host NAT IP | Host interface and packet translation | Stable local source/destination per address family | Persisted with the selected pool |
 | Canonical Tailscale IP | One profile engine and its tailnet | Real Tailscale self, peer, or Service addressing and ACL-visible traffic | Assigned by that tailnet |
 | `100.100.100.100` | Host DNS configuration and shared TUN | Tailscale-defined MagicDNS service address | Fixed and never allocated from an effective pool |
@@ -122,6 +122,24 @@ The lease key is:
 Including the profile ID distinguishes identical canonical addresses in two
 tailnets. Node stable IDs and `svc:` names identify their respective targets.
 Including the canonical IP gives IPv4 and IPv6 independent leases.
+
+A present target always keeps its lease. After a target disappears, the lease
+is reclaimed once it has been absent for one hour without an outbound packet
+or SOCKS dial attempting to use its effective address. Unknown or unavailable
+profile netmaps do not authorize reclamation. Returning targets retain their
+addresses within the grace period; after reclamation they may receive a new one.
+
+Activity timing is process-local and uses monotonic time, not persisted wall
+clock timestamps. Restarting grants a fresh one-hour grace period. There is no
+heartbeat, periodic cleanup, or profile polling: leases are pruned before
+allocation during existing reconciliations. Long process pauses may count
+toward retention; there is no special sleep or clock-reset policy.
+
+Retained synthetic addresses keep their host routes so local packet attempts
+still reach the TUN mux. Departed targets have no DNS record or peer mapping;
+their packets are observed and dropped, never forwarded through a fallback
+exit node. SOCKS dial attempts to retained effective IP literals also extend
+the grace period. Incoming traffic and idle open connections do not extend it.
 
 The default pools are:
 

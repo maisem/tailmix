@@ -11,17 +11,71 @@ import (
 	"time"
 
 	"github.com/gaissmai/bart"
+	"github.com/maisem/tailmix/effectiveip"
 	"github.com/maisem/tailmix/packetmap"
 	"github.com/tailscale/wireguard-go/tun"
 	"tailscale.com/net/packet"
 )
 
 func testUDP(src, dst netip.Addr) []byte {
+	if src.Is6() {
+		return packet.Generate(packet.UDP6Header{
+			IP6Header: packet.IP6Header{Src: src, Dst: dst},
+			SrcPort:   1000, DstPort: 2000,
+		}, []byte("mux"))
+	}
 	return packet.Generate(packet.UDP4Header{
 		IP4Header: packet.IP4Header{Src: src, Dst: dst},
 		SrcPort:   1000,
 		DstPort:   2000,
 	}, []byte("mux"))
+}
+
+func TestMuxDroppedOutboundPacketsExtendDormantLeases(t *testing.T) {
+	for _, family := range []struct {
+		name, host, canonical, effective string
+	}{
+		{"IPv4", "10.250.0.10", "100.64.0.1", "100.127.0.1"},
+		{"IPv6", "fd00::10", "fd7a:115c:a1e0::1", "fd00::1"},
+	} {
+		t.Run(family.name, func(t *testing.T) {
+			hostIP := netip.MustParseAddr(family.host)
+			effective := netip.MustParseAddr(family.effective)
+			lease := effectiveip.Lease{
+				NodeKey:     effectiveip.NodeKey{ProfileID: "work", NodeID: "gone", CanonicalIP: netip.MustParseAddr(family.canonical)},
+				EffectiveIP: effective,
+			}
+			observable := map[string]bool{"work": true}
+			tracker := new(effectiveip.ActivityTracker)
+			tracker.SetLeases([]effectiveip.Lease{lease})
+			absentSince := time.Now()
+			tracker.Retain([]effectiveip.Lease{lease}, nil, observable, absentSince)
+
+			// A dormant target has no destination mapping, and may carry a
+			// fail-closed exact route that keeps it away from exit routing.
+			table := packetmap.Table{
+				Destinations: new(bart.Table[packetmap.Destination]),
+				ExactRoutes:  new(bart.Table[packetmap.SubnetRoute]),
+			}
+			table.ExactRoutes.Insert(netip.PrefixFrom(effective, effective.BitLen()), packetmap.SubnetRoute{})
+			host := newBatchTestTUN(1)
+			host.reads <- [][]byte{testUDP(hostIP, effective)}
+			close(host.reads)
+			work := NewChanTUN("work")
+			mux := NewMux(host, map[string]*ChanTUN{"work": work}, packetmap.New(table), nil)
+			mux.SetActivityTracker(tracker)
+			if err := mux.runHostToProfiles(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if len(work.outbound) != 0 {
+				t.Fatal("dormant target was routed")
+			}
+			got := tracker.Retain([]effectiveip.Lease{lease}, nil, observable, absentSince.Add(effectiveip.LeaseRetention))
+			if len(got) != 1 {
+				t.Fatal("dropped outbound packet did not extend the dormant lease")
+			}
+		})
+	}
 }
 
 func injectTestOutbound(t *testing.T, tun *ChanTUN, pkt []byte) {
