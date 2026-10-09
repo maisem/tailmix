@@ -1,6 +1,6 @@
 module github.com/maisem/tailmix
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/gaissmai/bart v0.29.0
@@ -10,7 +10,7 @@ require (
 	go.yaml.in/yaml/v2 v2.4.4
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb
 	golang.org/x/mod v0.41.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sys v0.48.0
 	golang.zx2c4.com/wireguard/windows v1.0.1
 	gvisor.dev/gvisor v0.0.0-20260915211658-a6f909f08a72
