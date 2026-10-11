@@ -4,11 +4,14 @@ package hosttun
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"strings"
 	"testing"
 
 	"github.com/tailscale/netlink"
+	"go4.org/netipx"
+	"golang.org/x/sys/unix"
 )
 
 func noOpLinuxOps() linuxNetlinkOps {
@@ -134,5 +137,53 @@ func TestLinuxConfigureRemovesObservedStaleRoute(t *testing.T) {
 	}
 	if len(deleted) != 1 || deleted[0].Dst.String() != stale.Destination.String() {
 		t.Fatalf("deleted routes = %v, want %v", deleted, stale.Destination)
+	}
+}
+
+// TestLinuxConfigureAcceptsKernelInstalledState builds the state that the Linux
+// kernel reports for a device that tailmix already configured: IPv6 routes carry
+// the kernel's default IPv6 metric, and the kernel adds a route of its own for
+// each address on the device. Configure must accept that state and leave the
+// kernel's own route alone.
+func TestLinuxConfigureAcceptsKernelInstalledState(t *testing.T) {
+	source := netip.MustParseAddr("fd6d:6e65:7400::1")
+	local := netip.PrefixFrom(source, 128)
+	route := Route{Destination: netip.MustParsePrefix("fd6d:6e65:7400::2/128"), Source: source}
+	wantByDestination := map[netip.Prefix]Route{route.Destination: route}
+	localAddrs := map[netip.Addr]bool{source: true}
+	mainRoutes := appendLinuxRoutes(nil, []netlink.Route{
+		{
+			LinkIndex: 42,
+			Dst:       netipx.PrefixIPNet(local),
+			Protocol:  unix.RTPROT_KERNEL,
+			Type:      unix.RTN_UNICAST,
+			Scope:     netlink.SCOPE_UNIVERSE,
+			Priority:  256,
+		},
+		{
+			LinkIndex: 42,
+			Dst:       netipx.PrefixIPNet(route.Destination),
+			Src:       net.IP(source.AsSlice()),
+			Protocol:  unix.RTPROT_BOOT,
+			Type:      unix.RTN_UNICAST,
+			Scope:     netlink.SCOPE_UNIVERSE,
+			Priority:  linuxIPv6RouteMetric,
+		},
+	}, netlink.FAMILY_V6, wantByDestination, localAddrs)
+	installed := linuxInstalledState{localAddrs: []netip.Prefix{local}, mainRoutes: mainRoutes}
+	h := testLinuxHost(installed, installed)
+	var deleted []string
+	h.ops.routeDel = func(route *netlink.Route) error {
+		deleted = append(deleted, route.Dst.String())
+		return nil
+	}
+	cfg := Config{LocalAddrs: []netip.Prefix{local}, Routes: []Route{route}}
+	if err := h.Configure(cfg); err != nil {
+		t.Fatalf("Configure error = %v, want nil", err)
+	}
+	for _, deletedRoute := range deleted {
+		if deletedRoute == local.String() {
+			t.Fatalf("Configure deleted the kernel's own route for %v", local)
+		}
 	}
 }

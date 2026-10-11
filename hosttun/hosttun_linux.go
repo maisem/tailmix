@@ -23,7 +23,29 @@ import (
 const (
 	tailmixExitRouteTable = 527
 	tailmixExitRulePref   = 5300
+
+	// linuxIPv6RouteMetric is the metric the Linux kernel records for an IPv6
+	// route added without an explicit metric (IP6_RT_PRIO_USER). Tailmix sets it
+	// explicitly, so a route read back from the kernel has the metric tailmix
+	// expects. IPv4 routes use metric 0.
+	linuxIPv6RouteMetric = 1024
 )
+
+// linuxRouteMetric returns the metric tailmix assigns to its routes of the given
+// address family.
+func linuxRouteMetric(family int) int {
+	if family == netlink.FAMILY_V6 {
+		return linuxIPv6RouteMetric
+	}
+	return 0
+}
+
+func linuxRouteFamily(destination netip.Prefix) int {
+	if destination.Addr().Is6() {
+		return netlink.FAMILY_V6
+	}
+	return netlink.FAMILY_V4
+}
 
 type linuxNetlinkOps struct {
 	addrReplace  func(netlink.Link, *netlink.Addr) error
@@ -193,6 +215,13 @@ func (h *linuxHost) readInstalledState(wantRoutes []Route) (linuxInstalledState,
 			state.localAddrs = append(state.localAddrs, prefix)
 		}
 	}
+	// The kernel installs a route of its own for each address on the device.
+	// Tailmix manages only the routes it plans, and a plan never targets a local
+	// address, so these kernel routes must not count as stale or unexpected.
+	localAddrs := make(map[netip.Addr]bool, len(state.localAddrs))
+	for _, prefix := range state.localAddrs {
+		localAddrs[prefix.Addr()] = true
+	}
 	wantByDestination := make(map[netip.Prefix]Route, len(wantRoutes))
 	for _, route := range wantRoutes {
 		wantByDestination[route.Destination] = route
@@ -202,7 +231,7 @@ func (h *linuxHost) readInstalledState(wantRoutes []Route) (linuxInstalledState,
 		if err != nil {
 			return linuxInstalledState{}, fmt.Errorf("list Linux TUN %s routes: %w", h.name, err)
 		}
-		state.mainRoutes = appendLinuxRoutes(state.mainRoutes, mainRoutes, family, wantByDestination)
+		state.mainRoutes = appendLinuxRoutes(state.mainRoutes, mainRoutes, family, wantByDestination, localAddrs)
 
 		tableRoutes, err := netlink.RouteListFiltered(family, &netlink.Route{
 			LinkIndex: h.link.Attrs().Index,
@@ -211,7 +240,7 @@ func (h *linuxHost) readInstalledState(wantRoutes []Route) (linuxInstalledState,
 		if err != nil {
 			return linuxInstalledState{}, fmt.Errorf("list Linux TUN %s routes in table %d: %w", h.name, tailmixExitRouteTable, err)
 		}
-		state.tableRoutes = appendLinuxRoutes(state.tableRoutes, tableRoutes, family, wantByDestination)
+		state.tableRoutes = appendLinuxRoutes(state.tableRoutes, tableRoutes, family, wantByDestination, localAddrs)
 
 		rules, err := netlink.RuleList(family)
 		if err != nil {
@@ -229,16 +258,16 @@ func (h *linuxHost) readInstalledState(wantRoutes []Route) (linuxInstalledState,
 	return state, nil
 }
 
-func appendLinuxRoutes(dst []linuxInstalledRoute, routes []netlink.Route, family int, want map[netip.Prefix]Route) []linuxInstalledRoute {
+func appendLinuxRoutes(dst []linuxInstalledRoute, routes []netlink.Route, family int, want map[netip.Prefix]Route, localAddrs map[netip.Addr]bool) []linuxInstalledRoute {
 	for _, route := range routes {
-		if installed, ok := linuxRouteFromNetlink(route, family, want); ok {
+		if installed, ok := linuxRouteFromNetlink(route, family, want, localAddrs); ok {
 			dst = append(dst, installed)
 		}
 	}
 	return dst
 }
 
-func linuxRouteFromNetlink(route netlink.Route, family int, want map[netip.Prefix]Route) (linuxInstalledRoute, bool) {
+func linuxRouteFromNetlink(route netlink.Route, family int, want map[netip.Prefix]Route, localAddrs map[netip.Addr]bool) (linuxInstalledRoute, bool) {
 	var destination netip.Prefix
 	if route.Dst == nil {
 		if family == netlink.FAMILY_V6 {
@@ -253,13 +282,17 @@ func linuxRouteFromNetlink(route netlink.Route, family int, want map[netip.Prefi
 			return linuxInstalledRoute{}, false
 		}
 	}
+	destination = destination.Masked()
+	if localAddrs[destination.Addr()] {
+		return linuxInstalledRoute{}, false
+	}
 	source, _ := netip.AddrFromSlice(route.Src)
 	source = source.Unmap()
 	installed := linuxInstalledRoute{
-		Route: Route{Destination: destination.Masked(), Source: source},
+		Route: Route{Destination: destination, Source: source},
 		controlled: len(route.Gw) == 0 && len(route.MultiPath) == 0 && route.Via == nil && route.Encap == nil &&
 			(route.Type == 0 || route.Type == unix.RTN_UNICAST) && route.Scope == netlink.SCOPE_UNIVERSE &&
-			route.Priority == 0 && route.Tos == 0,
+			route.Priority == linuxRouteMetric(family) && route.Tos == 0,
 	}
 	if desired, ok := want[installed.Destination]; ok {
 		installed.Exit = desired.Exit
@@ -483,6 +516,7 @@ func (h *linuxHost) replaceRouteInTable(route Route, table int) error {
 		Dst:       netipx.PrefixIPNet(route.Destination),
 		Src:       net.IP(route.Source.AsSlice()),
 		Table:     table,
+		Priority:  linuxRouteMetric(linuxRouteFamily(route.Destination)),
 	}); err != nil {
 		return fmt.Errorf("route %v through Linux TUN %s: %w", route.Destination, h.name, err)
 	}
