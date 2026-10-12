@@ -24,6 +24,7 @@ import (
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/packet"
 	"tailscale.com/net/tsdial"
+	"tailscale.com/types/dnstype"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/eventbus"
 )
@@ -59,6 +60,11 @@ func newTestPacketService(t *testing.T, name string, wantIP netip.Addr) *packetS
 	if err != nil {
 		t.Fatal(err)
 	}
+	return newPacketServiceWithConfig(t, dnsCfg)
+}
+
+func newPacketServiceWithConfig(t *testing.T, dnsCfg tailscaledns.Config) *packetService {
+	t.Helper()
 	bus := eventbus.NewWithOptions(eventbus.BusOptions{Logf: logger.Discard})
 	netMon := netmon.NewStatic()
 	dialer := tsdial.NewDialer(netMon)
@@ -315,5 +321,57 @@ func TestPacketServiceAnswersTCPFromBothResolverAddresses(t *testing.T) {
 				t.Fatalf("TCP MagicDNS answer = %v, want %v", got, wantIP)
 			}
 		})
+	}
+}
+
+// TestPacketServiceAnswersSERVFAILWhenForwarderFails covers the case a host
+// resolver hits when a profile cannot answer: the query must produce a
+// response, so the host resolver can fail over instead of waiting out its own
+// timeout.
+func TestPacketServiceAnswersSERVFAILWhenForwarderFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	forwarder, err := StartProfileDNSForwarder(ctx, failingDNSQueryer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer forwarder.Close()
+
+	dnsCfg, err := configForService(ServiceConfig{
+		Routes: []Route{{
+			Suffix:     "corp.internal.",
+			ProfileID:  "work",
+			ProfileDNS: true,
+			Resolvers:  []*dnstype.Resolver{forwarder.Resolver()},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := newPacketServiceWithConfig(t, dnsCfg)
+
+	clientIP := netip.MustParseAddr("100.127.0.10")
+	query := packet.Generate(packet.UDP4Header{
+		IP4Header: packet.IP4Header{Src: clientIP, Dst: testResolverIP},
+		SrcPort:   54321,
+		DstPort:   53,
+	}, dnsAQuery(t, "db.corp.internal"))
+	if !service.HandlePacket(query) {
+		t.Fatalf("UDP packet to %v was not consumed", testResolverIP)
+	}
+	select {
+	case raw := <-service.Outbound():
+		var parsed packet.Parsed
+		parsed.Decode(raw)
+		var parser dnsmessage.Parser
+		header, err := parser.Start(parsed.Payload())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header.ID != 1 || !header.Response || header.RCode != dnsmessage.RCodeServerFailure {
+			t.Fatalf("response header = %+v, want SERVFAIL", header)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for a response from an unavailable profile resolver")
 	}
 }
