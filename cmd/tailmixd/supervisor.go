@@ -526,7 +526,8 @@ func (s *supervisor) reconcileLocked() (err error) {
 			})
 		}
 		if exitProfileID := activeExitProfile(s.st, statuses); exitProfileID != "" {
-			subnetRoutes = append(subnetRoutes,
+			subnetRoutes = append(
+				subnetRoutes,
 				socksproxy.SubnetRoute{
 					Prefix:    netip.PrefixFrom(netip.IPv4Unspecified(), 0),
 					ProfileID: exitProfileID, Active: true,
