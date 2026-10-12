@@ -398,8 +398,12 @@ func activeDNSExitProfile(st state.State, statuses []profile.Status) string {
 		return ""
 	}
 	for _, status := range statuses {
+		// A profile without a DNS service of its own, such as a raw WireGuard
+		// profile, cannot answer for the exit node. The host keeps resolving
+		// with its own resolvers, which the exit node already routes.
 		if status.ProfileID == st.ExitNode.ProfileID &&
 			profileAvailable(status) &&
+			status.ProfileDNS &&
 			status.ExitNodeID == st.ExitNode.NodeID {
 			return status.ProfileID
 		}

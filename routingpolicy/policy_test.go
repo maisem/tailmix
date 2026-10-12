@@ -117,7 +117,7 @@ func TestExplicitDNSDefaultOverridesAndSurvivesExitNodeDefault(t *testing.T) {
 		},
 	}
 	statuses := []profile.Status{
-		{ProfileID: "work-id", BackendState: "Running", ExitNodeID: "exit-node"},
+		{ProfileID: "work-id", BackendState: "Running", ExitNodeID: "exit-node", ProfileDNS: true},
 		{ProfileID: "dns-id", BackendState: "Running", DNSRoutes: []profile.DNSRouteStatus{{
 			Domain: ".", Source: "default", Resolvers: []*dnstype.Resolver{{Addr: "9.9.9.9"}},
 		}}},
@@ -194,7 +194,7 @@ func TestExitNodeAddsAutomaticEffectiveProfileDNSDefault(t *testing.T) {
 		},
 	}
 	status := profile.Status{
-		ProfileID: "work-id", BackendState: "Running", ExitNodeID: "exit-node",
+		ProfileID: "work-id", BackendState: "Running", ExitNodeID: "exit-node", ProfileDNS: true,
 	}
 	plan := BuildDNS(st, []profile.Status{status})
 	resolved, ok := plan.Resolve("example.com")
@@ -210,6 +210,24 @@ func TestExitNodeAddsAutomaticEffectiveProfileDNSDefault(t *testing.T) {
 	plan = BuildDNS(st, []profile.Status{status})
 	if _, ok := plan.Resolve("example.com"); ok {
 		t.Fatalf("exit-node DNS route installed before preference became active: %+v", plan.Automatic)
+	}
+}
+
+func TestExitNodeWithoutProfileDNSAddsNoAutomaticDNSRoute(t *testing.T) {
+	st := state.State{
+		Profiles: []state.Profile{{ID: "wg-id", Name: "wg"}},
+		ExitNode: &state.ExitNode{
+			ProfileID: "wg-id",
+			NodeID:    "gateway",
+			PeerIP:    netip.MustParseAddr("10.80.0.1"),
+		},
+	}
+	status := profile.Status{
+		ProfileID: "wg-id", Kind: "wireguard", BackendState: "Running", ExitNodeID: "gateway",
+	}
+	plan := BuildDNS(st, []profile.Status{status})
+	if _, ok := plan.Resolve("example.com"); ok {
+		t.Fatalf("exit-node DNS route for a profile without its own DNS service: %+v", plan.Automatic)
 	}
 }
 

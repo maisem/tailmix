@@ -23,6 +23,7 @@ func (e *exitPreferenceEngine) Close() error                { return nil }
 func (e *exitPreferenceEngine) Dial(context.Context, string, string) (net.Conn, error) {
 	return nil, net.ErrClosed
 }
+
 func (e *exitPreferenceEngine) Status(context.Context) (tailmixprofile.Status, error) {
 	return e.status, nil
 }
@@ -38,6 +39,7 @@ func (e *exitPreferenceEngine) SetExitNodeIP(_ context.Context, peerIP netip.Add
 	}
 	return nil
 }
+
 func (e *exitPreferenceEngine) SetRouteAll(_ context.Context, enabled bool) error {
 	e.routeChanges = append(e.routeChanges, enabled)
 	e.status.RouteAll = enabled
@@ -179,7 +181,7 @@ func TestStatusReportsSelectedPolicyWithoutAvailableChoices(t *testing.T) {
 	prefix := netip.MustParsePrefix("10.20.0.0/16")
 	engine := &exitPreferenceEngine{status: tailmixprofile.Status{
 		ProfileID: "p_work", Alias: "work", BackendState: "Running",
-		MagicDNSSuffix: "work.example", ExitNodeID: "exit-node",
+		MagicDNSSuffix: "work.example", ProfileDNS: true, ExitNodeID: "exit-node",
 		AvailableRoutes: []tailmixprofile.RouteStatus{{
 			Prefix: prefix, PrimaryRouter: "subnet-router",
 		}},

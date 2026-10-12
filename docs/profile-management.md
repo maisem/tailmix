@@ -304,6 +304,12 @@ In SOCKS mode, the selected exit node is the fallback for otherwise-unmatched
 IP literals and DNS names. Explicit IP and DNS policy still wins. Clearing the
 selection removes the fallback in both modes.
 
+The exit node is also the DNS authority for queries that no other route
+covers, so tailmix resolves those queries through the selected profile's own
+DNS service. A profile that carries no DNS service of its own, such as a raw
+WireGuard profile, does not become that authority: the host keeps resolving
+with its own resolvers, and their traffic already leaves through the exit node.
+
 Disabling the selected profile withdraws its default route but retains the
 desired selection, which resumes when the same profile is enabled. Removing
 the selected profile clears the selection. There is no automatic failover to

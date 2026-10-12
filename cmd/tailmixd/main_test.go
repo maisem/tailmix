@@ -827,6 +827,7 @@ func TestTUNPlanInstallsSelectedExitNodeDefaults(t *testing.T) {
 		ProfileID:    "work",
 		BackendState: "Running",
 		ExitNodeID:   "exit-node",
+		ProfileDNS:   true,
 		SelfNodeID:   "self",
 		SelfIPs: []netip.Addr{
 			netip.MustParseAddr("100.64.0.10"),
@@ -889,6 +890,50 @@ func TestTUNPlanInstallsSelectedExitNodeDefaults(t *testing.T) {
 	}
 	if len(plan.DNSConfig.Routes) != 0 {
 		t.Fatalf("exit-node DNS route installed before profile preference applied: %+v", plan.DNSConfig.Routes)
+	}
+}
+
+func TestTUNPlanInstallsWireGuardExitNodeWithoutProfileDNS(t *testing.T) {
+	st := state.State{
+		SyntheticPool:   "10.250.0.0/16",
+		SyntheticPoolV6: "fd6d:6e65:7400::/120",
+		Profiles:        []state.Profile{{ID: "wg", Name: "wg"}},
+		ExitNode: &state.ExitNode{
+			ProfileID: "wg",
+			NodeID:    "gateway",
+			PeerIP:    netip.MustParseAddr("10.80.0.1"),
+		},
+	}
+	status := tailmixprofile.Status{
+		ProfileID:    "wg",
+		Kind:         "wireguard",
+		BackendState: "Running",
+		ExitNodeID:   "gateway",
+		SelfIPs:      []netip.Addr{netip.MustParseAddr("10.80.0.2")},
+	}
+	plan, err := buildTUNPlan(st, []tailmixprofile.Status{status})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route, ok := plan.Table.ExitRoutes.Lookup(netip.MustParseAddr("203.0.113.10")); !ok || !route.Active || route.ProfileID != "wg" {
+		t.Fatalf("exit route for a WireGuard exit node = %+v, %v", route, ok)
+	}
+	found := false
+	for _, route := range plan.HostConfig.Routes {
+		if route.Destination == netip.MustParsePrefix("0.0.0.0/1") {
+			if !route.Exit {
+				t.Fatalf("host route %+v is not marked as an exit route", route)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("host routes %+v do not contain the exit route", plan.HostConfig.Routes)
+	}
+	for _, route := range plan.DNSConfig.Routes {
+		if route.ProfileDNS {
+			t.Fatalf("profile DNS route for a WireGuard exit node: %+v", plan.DNSConfig.Routes)
+		}
 	}
 }
 

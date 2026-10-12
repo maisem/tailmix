@@ -277,6 +277,7 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		Alias:           e.cfg.Alias,
 		Kind:            "tailscale",
 		MagicDNSSuffix:  suffix,
+		ProfileDNS:      true,
 		BackendState:    st.BackendState,
 		AuthURL:         st.AuthURL,
 		SelfNodeID:      selfNode,

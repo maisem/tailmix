@@ -28,10 +28,13 @@ type Update struct {
 }
 
 type Status struct {
-	ProfileID       string
-	Alias           string
-	Kind            string
-	MagicDNSSuffix  string
+	ProfileID      string
+	Alias          string
+	Kind           string
+	MagicDNSSuffix string
+	// ProfileDNS reports whether the engine resolves queries through the
+	// profile's own DNS service.
+	ProfileDNS      bool
 	BackendState    string
 	AuthURL         string
 	SelfNodeID      string
