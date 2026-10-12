@@ -718,9 +718,8 @@ func (s *supervisor) configureDNSLocked(cfg tailmixdns.LiveConfig) error {
 		closeForwarders(nextForwarders)
 		return err
 	}
-	// Keep the replaced forwarders open until the next reconfiguration: the
-	// aggregate resolver can still have queries in flight against them, and a
-	// closed endpoint leaves those clients waiting out their own timeout.
+	// Rotate the retired set before closing it: the generation that was live
+	// before this one now takes its place.
 	retired := s.retiredDNSForwarders
 	s.retiredDNSForwarders = s.dnsForwarders
 	s.dnsForwarders = nextForwarders
