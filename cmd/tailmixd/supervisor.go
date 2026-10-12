@@ -81,13 +81,17 @@ type supervisor struct {
 	mux           *tunmux.Mux
 	dnsService    tailmixdns.Service
 	dnsForwarders []*tailmixdns.Forwarder
-	socksListener net.Listener
-	socksRouter   *socksproxy.DynamicRouter
-	networkErr    chan error
-	reconcileErr  string
-	updateMu      sync.Mutex
-	updateWake    chan struct{}
-	updateRestart chan updateRestart
+	// retiredDNSForwarders holds the forwarders replaced by the last DNS
+	// reconfiguration. They stay open until the next reconfiguration because
+	// the aggregate resolver can still have queries in flight against them.
+	retiredDNSForwarders []*tailmixdns.Forwarder
+	socksListener        net.Listener
+	socksRouter          *socksproxy.DynamicRouter
+	networkErr           chan error
+	reconcileErr         string
+	updateMu             sync.Mutex
+	updateWake           chan struct{}
+	updateRestart        chan updateRestart
 
 	leaseActivity effectiveip.ActivityTracker
 }
@@ -713,9 +717,13 @@ func (s *supervisor) configureDNSLocked(cfg tailmixdns.LiveConfig) error {
 		closeForwarders(nextForwarders)
 		return err
 	}
-	old := s.dnsForwarders
+	// Keep the replaced forwarders open until the next reconfiguration: the
+	// aggregate resolver can still have queries in flight against them, and a
+	// closed endpoint leaves those clients waiting out their own timeout.
+	retired := s.retiredDNSForwarders
+	s.retiredDNSForwarders = s.dnsForwarders
 	s.dnsForwarders = nextForwarders
-	closeForwarders(old)
+	closeForwarders(retired)
 	return nil
 }
 
@@ -741,6 +749,8 @@ func (s *supervisor) close() error {
 	}
 	closeForwarders(s.dnsForwarders)
 	s.dnsForwarders = nil
+	closeForwarders(s.retiredDNSForwarders)
+	s.retiredDNSForwarders = nil
 	if s.dnsService != nil {
 		_ = s.dnsService.Close()
 		s.dnsService = nil

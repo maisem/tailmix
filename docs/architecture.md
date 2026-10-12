@@ -295,7 +295,12 @@ exact-name route without claiming its entire source suffix.
 
 For advertised split-DNS and default resolvers, tailmix creates a loopback
 forwarder tied to the chosen profile. Classic DNS and DNS-over-HTTPS connections
-therefore travel through that profile rather than the host's default network.
+therefore travel through that profile rather than the host's default network. A
+forwarder whose upstream does not answer returns SERVFAIL within a few seconds
+instead of dropping the query, so the OS resolver can fail over rather than wait
+out its own timeout. A forwarder replaced by a reconfiguration keeps answering
+until the next one, because the aggregate resolver can still have queries in
+flight against it.
 
 On macOS, the Tailscale DNS manager installs native split-DNS resolver entries.
 When a root DNS route is active, it installs a synthetic System Configuration

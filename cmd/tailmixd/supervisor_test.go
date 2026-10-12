@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/maisem/tailmix/controlapi"
+	tailmixdns "github.com/maisem/tailmix/dns"
 	"github.com/maisem/tailmix/hosttun"
 	tailmixprofile "github.com/maisem/tailmix/profile"
 	"github.com/maisem/tailmix/profilesocket"
@@ -20,6 +22,7 @@ import (
 	"github.com/maisem/tailmix/state"
 	"github.com/maisem/tailmix/wireguardcfg"
 	"github.com/tailscale/wireguard-go/tun"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 type lifecycleEngine struct {
@@ -33,9 +36,11 @@ func (e *lifecycleEngine) Close() error {
 	e.closeCalls++
 	return e.closeErr
 }
+
 func (e *lifecycleEngine) Dial(context.Context, string, string) (net.Conn, error) {
 	return nil, net.ErrClosed
 }
+
 func (e *lifecycleEngine) Status(context.Context) (tailmixprofile.Status, error) {
 	return e.status, nil
 }
@@ -312,5 +317,149 @@ func TestSupervisorCloseReportsHostCleanupError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "close host TUN: route delete failed") {
 		t.Fatalf("stderr = %q, want host cleanup failure", stderr.String())
+	}
+}
+
+// profileDNSEngine is a lifecycleEngine whose profile exposes an effective DNS
+// resolver, so the supervisor can build a profile DNS forwarder for it.
+type profileDNSEngine struct {
+	lifecycleEngine
+	response []byte
+}
+
+func (e *profileDNSEngine) QueryDNS(string, dnsmessage.Type) ([]byte, error) {
+	return e.response, nil
+}
+
+type recordingDNSService struct {
+	configs []tailmixdns.LiveConfig
+}
+
+func (s *recordingDNSService) Addr() netip.AddrPort { return netip.AddrPort{} }
+
+func (s *recordingDNSService) Configure([]tailmixdns.Domain, []tailmixdns.Record) error {
+	return nil
+}
+
+func (s *recordingDNSService) ConfigureFull(cfg tailmixdns.LiveConfig) error {
+	s.configs = append(s.configs, cfg)
+	return nil
+}
+
+func (s *recordingDNSService) HandlePacket([]byte) bool { return false }
+func (s *recordingDNSService) Outbound() <-chan []byte  { return nil }
+func (s *recordingDNSService) Err() error               { return nil }
+func (s *recordingDNSService) Close() error             { return nil }
+
+func dnsTestQuery(t *testing.T, name string) []byte {
+	t.Helper()
+	builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: 0x1234, RecursionDesired: true})
+	if err := builder.StartQuestions(); err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.Question(dnsmessage.Question{
+		Name: dnsmessage.MustNewName(name), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	query, err := builder.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return query
+}
+
+func dnsTestResponse(t *testing.T, query []byte, addr netip.Addr) []byte {
+	t.Helper()
+	var parser dnsmessage.Parser
+	header, err := parser.Start(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	question, err := parser.Question()
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{
+		ID: header.ID, Response: true,
+		RecursionDesired: header.RecursionDesired, RecursionAvailable: true,
+	})
+	if err := builder.StartQuestions(); err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.Question(question); err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.StartAnswers(); err != nil {
+		t.Fatal(err)
+	}
+	resourceHeader := dnsmessage.ResourceHeader{
+		Name: question.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 60,
+	}
+	if err := builder.AResource(resourceHeader, dnsmessage.AResource{A: addr.As4()}); err != nil {
+		t.Fatal(err)
+	}
+	response, err := builder.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func TestConfigureDNSKeepsReplacedForwardersServing(t *testing.T) {
+	s := newLifecycleTestSupervisor(t, lifecycleTestState())
+	query := dnsTestQuery(t, "db.work.ts.net.")
+	response := dnsTestResponse(t, query, netip.MustParseAddr("100.127.0.7"))
+	s.runtimes["p_work"] = &managedProfile{
+		runtime: runtimeProfile{Engine: &profileDNSEngine{response: response}},
+	}
+	s.dnsService = &recordingDNSService{}
+
+	first := tailmixdns.LiveConfig{Routes: []tailmixdns.Route{{
+		Suffix: "work.ts.net.", ProfileID: "p_work", ProfileDNS: true,
+	}}}
+	if err := s.configureDNSLocked(first); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.dnsForwarders) != 1 {
+		t.Fatalf("forwarders = %d, want 1", len(s.dnsForwarders))
+	}
+	replaced := s.dnsForwarders[0]
+
+	second := tailmixdns.LiveConfig{Routes: []tailmixdns.Route{{
+		Suffix: "other.ts.net.", ProfileID: "p_work", ProfileDNS: true,
+	}}}
+	if err := s.configureDNSLocked(second); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.dnsForwarders) != 1 || s.dnsForwarders[0] == replaced {
+		t.Fatalf("forwarders = %v, want a replacement", s.dnsForwarders)
+	}
+
+	// The aggregate resolver can have queries in flight against the previous
+	// forwarder, so it must keep answering until the next reconfiguration.
+	conn, err := net.Dial("udp", replaced.Resolver().Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write(query); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 512)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		t.Fatalf("replaced forwarder did not answer: %v", err)
+	}
+	var parser dnsmessage.Parser
+	header, err := parser.Start(buffer[:n])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !header.Response || header.RCode != dnsmessage.RCodeSuccess || header.ID != 0x1234 {
+		t.Fatalf("response header = %+v, want a successful answer", header)
 	}
 }

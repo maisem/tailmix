@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 	"tailscale.com/types/dnstype"
@@ -110,5 +112,109 @@ func TestForwarderDoHUsesProfileDialerAndBootstrapResolution(t *testing.T) {
 	defer dialer.mu.Unlock()
 	if len(dialer.addrs) == 0 || !strings.HasPrefix(dialer.addrs[0], "127.0.0.1:") {
 		t.Fatalf("profile dial addresses = %q", dialer.addrs)
+	}
+}
+
+type failingDNSQueryer struct{}
+
+func (failingDNSQueryer) QueryDNS(string, dnsmessage.Type) ([]byte, error) {
+	return nil, errors.New("profile DNS unavailable")
+}
+
+func buildForwarderTestQuery(t *testing.T, name dnsmessage.Name, queryType dnsmessage.Type) []byte {
+	t.Helper()
+	builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: 0xbeef, RecursionDesired: true})
+	if err := builder.StartQuestions(); err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.Question(dnsmessage.Question{
+		Name: name, Type: queryType, Class: dnsmessage.ClassINET,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	query, err := builder.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return query
+}
+
+func queryForwarder(t *testing.T, addr netip.AddrPort, query []byte) dnsmessage.Header {
+	t.Helper()
+	conn, err := net.Dial("udp", addr.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write(query); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 512)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		t.Fatalf("no DNS response: %v", err)
+	}
+	var parser dnsmessage.Parser
+	header, err := parser.Start(buffer[:n])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return header
+}
+
+func TestForwarderAnswersSERVFAILWhenProfileDNSFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	forwarder, err := StartProfileDNSForwarder(ctx, failingDNSQueryer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer forwarder.Close()
+
+	header := queryForwarder(t, forwarder.addr, buildForwarderTestQuery(t, dnsmessage.MustNewName("example.com."), dnsmessage.TypeA))
+	if header.ID != 0xbeef {
+		t.Fatalf("response ID = %#x, want %#x", header.ID, 0xbeef)
+	}
+	if !header.Response || header.RCode != dnsmessage.RCodeServerFailure {
+		t.Fatalf("response header = %+v, want SERVFAIL", header)
+	}
+}
+
+func TestForwarderAnswersSERVFAILWhenResolverIsUnreachable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	forwarder, err := StartForwarder(ctx, &networkDialer{}, []*dnstype.Resolver{{Addr: "127.0.0.1:1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer forwarder.Close()
+
+	header := queryForwarder(t, forwarder.addr, buildForwarderTestQuery(t, dnsmessage.MustNewName("example.com."), dnsmessage.TypeA))
+	if !header.Response || header.RCode != dnsmessage.RCodeServerFailure {
+		t.Fatalf("response header = %+v, want SERVFAIL", header)
+	}
+}
+
+// blockingDNSQueryer models a profile whose DNS manager never answers.
+type blockingDNSQueryer struct{}
+
+func (blockingDNSQueryer) QueryDNS(string, dnsmessage.Type) ([]byte, error) {
+	select {}
+}
+
+func TestForwarderAbandonsProfileDNSQueryAtDeadline(t *testing.T) {
+	forwarder := &Forwarder{queryer: blockingDNSQueryer{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	query := buildForwarderTestQuery(t, dnsmessage.MustNewName("example.com."), dnsmessage.TypeA)
+	start := time.Now()
+	if _, err := forwarder.exchangeProfileDNS(ctx, query); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("exchangeProfileDNS error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("exchangeProfileDNS returned after %v", elapsed)
 	}
 }

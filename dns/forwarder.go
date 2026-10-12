@@ -19,6 +19,12 @@ import (
 	"tailscale.com/types/dnstype"
 )
 
+// forwarderQueryTimeout bounds one upstream exchange. Two clients wait on this
+// endpoint: the Tailscale DNS manager gives up after ten seconds, and the host
+// resolver (systemd-resolved) retries after five. Answering SERVFAIL within
+// three seconds keeps both of them from seeing a timeout.
+const forwarderQueryTimeout = 3 * time.Second
+
 type ProfileDialer interface {
 	Dial(context.Context, string, string) (net.Conn, error)
 }
@@ -103,6 +109,36 @@ func (f *Forwarder) Close() error {
 	return result
 }
 
+// servfailResponse builds a SERVFAIL response for query. It returns nil when
+// query is not a DNS query that can be answered.
+func servfailResponse(query []byte) []byte {
+	var parser dnsmessage.Parser
+	header, err := parser.Start(query)
+	if err != nil {
+		return nil
+	}
+	questions, err := parser.AllQuestions()
+	if err != nil {
+		return nil
+	}
+	message := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:                 header.ID,
+			Response:           true,
+			OpCode:             header.OpCode,
+			RecursionDesired:   header.RecursionDesired,
+			RecursionAvailable: true,
+			RCode:              dnsmessage.RCodeServerFailure,
+		},
+		Questions: questions,
+	}
+	response, err := message.Pack()
+	if err != nil {
+		return nil
+	}
+	return response
+}
+
 func (f *Forwarder) serveUDP() {
 	defer f.wg.Done()
 	buffer := make([]byte, 64<<10)
@@ -115,12 +151,16 @@ func (f *Forwarder) serveUDP() {
 		f.wg.Add(1)
 		go func() {
 			defer f.wg.Done()
-			ctx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
+			ctx, cancel := context.WithTimeout(f.ctx, forwarderQueryTimeout)
 			defer cancel()
 			response, err := f.exchange(ctx, "udp", query)
-			if err == nil {
-				_, _ = f.udp.WriteToUDP(response, peer)
+			if err != nil {
+				response = servfailResponse(query)
+				if response == nil {
+					return
+				}
 			}
+			_, _ = f.udp.WriteToUDP(response, peer)
 		}()
 	}
 }
@@ -146,10 +186,16 @@ func (f *Forwarder) serveTCP() {
 				if _, err := io.ReadFull(conn, query); err != nil {
 					return
 				}
-				ctx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
+				ctx, cancel := context.WithTimeout(f.ctx, forwarderQueryTimeout)
 				response, err := f.exchange(ctx, "tcp", query)
 				cancel()
-				if err != nil || len(response) > 65535 {
+				if err != nil {
+					response = servfailResponse(query)
+					if response == nil {
+						return
+					}
+				}
+				if len(response) > 65535 {
 					return
 				}
 				if err := binary.Write(conn, binary.BigEndian, uint16(len(response))); err != nil {
@@ -212,10 +258,28 @@ func (f *Forwarder) exchangeProfileDNS(ctx context.Context, query []byte) ([]byt
 	if questions[0].Class != dnsmessage.ClassINET {
 		return nil, fmt.Errorf("profile DNS query uses unsupported class %v", questions[0].Class)
 	}
-	response, err := f.queryer.QueryDNS(questions[0].Name.String(), questions[0].Type)
-	if err != nil {
-		return nil, err
+	// QueryDNS has no context parameter and the profile's own DNS manager can
+	// hold a query for ten seconds. Abandon it on the caller's deadline so the
+	// client receives a SERVFAIL instead of waiting out its own timeout.
+	type profileResult struct {
+		response []byte
+		err      error
 	}
+	results := make(chan profileResult, 1)
+	go func() {
+		response, err := f.queryer.QueryDNS(questions[0].Name.String(), questions[0].Type)
+		results <- profileResult{response: response, err: err}
+	}()
+	var result profileResult
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result = <-results:
+	}
+	if result.err != nil {
+		return nil, result.err
+	}
+	response := result.response
 	if len(response) < 2 {
 		return nil, errors.New("profile DNS resolver returned a truncated header")
 	}
@@ -234,7 +298,11 @@ func (f *Forwarder) exchangeClassic(ctx context.Context, network string, resolve
 		return nil, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(forwarderQueryTimeout))
+	}
 	if network == "tcp" {
 		if len(query) > 65535 {
 			return nil, errors.New("DNS query is too large")
