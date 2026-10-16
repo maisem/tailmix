@@ -1,5 +1,11 @@
 # Repository agent instructions
 
+## Language preference
+
+Prefer Go for tools, helpers, and automation. Implement actual test logic and
+test helpers in Go, not Python. Python is acceptable for CI orchestration and
+tests of that orchestration.
+
 ## Commit before returning
 
 After completing a user request, run `make check` and commit all changes made

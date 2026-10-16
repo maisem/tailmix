@@ -48,7 +48,7 @@ require_command() {
 	command -v "$1" >/dev/null 2>&1 || fail "required command is unavailable: $1"
 }
 
-for command in go ip jq ping python3 sudo; do
+for command in go ip jq ping sudo; do
 	require_command "$command"
 done
 [[ $(uname -s) == Linux ]] || fail "Linux is required"
@@ -60,158 +60,16 @@ mkdir -p "$work_dir/bin" "$work_dir/a/run" "$work_dir/b/run"
 	cd "$repo_root"
 	go build -o "$work_dir/bin/tailmixd" ./cmd/tailmixd
 	go build -o "$work_dir/bin/tailmix" ./cmd/tailmix
+	go build -o "$work_dir/bin/integration-tool" ./cmd/integration-tool
 )
 
-cat >"$work_dir/keygen.go" <<'GO'
-package main
-
-import (
-	"fmt"
-
-	"github.com/maisem/tailmix/wireguardcfg"
-)
-
-func main() {
-	for range 2 {
-		private, err := wireguardcfg.GeneratePrivateKey()
-		if err != nil {
-			panic(err)
-		}
-		public, err := private.Public()
-		if err != nil {
-			panic(err)
-		}
-		fmt.Printf("%s %s\n", private.String(), public.String())
-	}
-}
-GO
-mapfile -t key_pairs < <(cd "$repo_root" && go run "$work_dir/keygen.go")
+mapfile -t key_pairs < <("$work_dir/bin/integration-tool" keygen)
 ((${#key_pairs[@]} == 2)) || fail "key generation returned an unexpected result"
 read -r private_a public_a <<<"${key_pairs[0]}"
 read -r private_b public_b <<<"${key_pairs[1]}"
 printf '%s\n' "$private_a" >"$work_dir/a.key"
 printf '%s\n' "$private_b" >"$work_dir/b.key"
 chmod 0600 "$work_dir/a.key" "$work_dir/b.key"
-
-cat >"$work_dir/socket_tool.py" <<'PY'
-import pathlib
-import socket
-import sys
-import time
-
-mode = sys.argv[1]
-
-
-def ready(path):
-    pathlib.Path(path).write_text("ready\n")
-
-
-def tcp_server():
-    port = int(sys.argv[2])
-    ready_path = sys.argv[3]
-    count = int(sys.argv[4])
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("0.0.0.0", port))
-        listener.listen()
-        listener.settimeout(15)
-        ready(ready_path)
-        for _ in range(count):
-            conn, _ = listener.accept()
-            with conn:
-                conn.settimeout(5)
-                data = conn.recv(4096)
-                conn.sendall(b"reply:" + data)
-
-
-def tcp_client():
-    address, port, payload = sys.argv[2], int(sys.argv[3]), sys.argv[4].encode()
-    try:
-        with socket.create_connection((address, port), timeout=2) as conn:
-            conn.settimeout(2)
-            conn.sendall(payload)
-            conn.shutdown(socket.SHUT_WR)
-            response = conn.recv(4096)
-    except TimeoutError:
-        raise SystemExit(20)
-    except ConnectionRefusedError:
-        raise SystemExit(21)
-    except OSError:
-        raise SystemExit(22)
-    sys.stdout.buffer.write(response)
-
-
-def hold_server():
-    port = int(sys.argv[2])
-    ready_path = sys.argv[3]
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("0.0.0.0", port))
-        listener.listen(1)
-        listener.settimeout(15)
-        ready(ready_path)
-        conn, _ = listener.accept()
-        with conn:
-            conn.settimeout(10)
-            stream = conn.makefile("rwb", buffering=0)
-            for _ in range(2):
-                line = stream.readline()
-                if not line:
-                    raise SystemExit(30)
-                stream.write(b"reply:" + line)
-
-
-def hold_client():
-    address, port = sys.argv[2], int(sys.argv[3])
-    first_path, continue_path, result_path = map(pathlib.Path, sys.argv[4:7])
-    with socket.create_connection((address, port), timeout=3) as conn:
-        conn.settimeout(10)
-        stream = conn.makefile("rwb", buffering=0)
-        stream.write(b"one\n")
-        first = stream.readline()
-        first_path.write_bytes(first)
-        deadline = time.monotonic() + 10
-        while not continue_path.exists():
-            if time.monotonic() >= deadline:
-                raise SystemExit(31)
-            time.sleep(0.05)
-        stream.write(b"two\n")
-        second = stream.readline()
-        result_path.write_bytes(first + second)
-
-
-def udp_server():
-    port = int(sys.argv[2])
-    ready_path = sys.argv[3]
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
-        server.bind(("0.0.0.0", port))
-        server.settimeout(15)
-        ready(ready_path)
-        data, address = server.recvfrom(4096)
-        server.sendto(b"reply:" + data, address)
-
-
-def udp_client():
-    address, port, payload = sys.argv[2], int(sys.argv[3]), sys.argv[4].encode()
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
-        client.settimeout(2)
-        client.sendto(payload, (address, port))
-        try:
-            response, _ = client.recvfrom(4096)
-        except TimeoutError:
-            raise SystemExit(20)
-    sys.stdout.buffer.write(response)
-
-
-{
-    "tcp-server": tcp_server,
-    "tcp-client": tcp_client,
-    "hold-server": hold_server,
-    "hold-client": hold_client,
-    "udp-server": udp_server,
-    "udp-client": udp_client,
-}[mode]()
-PY
 
 sudo ip netns add "$ns_a"
 sudo ip netns add "$ns_b"
@@ -325,7 +183,7 @@ start_tool() {
 	local ns
 	ns=$(namespace_for "$side")
 	rm -f "$ready_path"
-	sudo ip netns exec "$ns" python3 "$work_dir/socket_tool.py" "$mode" "$port" "$ready_path" "$@" \
+	sudo ip netns exec "$ns" "$work_dir/bin/integration-tool" "$mode" "$port" "$ready_path" "$@" \
 		>"$ready_path.stdout" 2>"$ready_path.stderr" &
 	LAST_TOOL_PID=$!
 	background_pids+=("$LAST_TOOL_PID")
@@ -337,7 +195,7 @@ expect_tcp_allowed() {
 	[[ $destination == a ]] && target=$effective_a || target=$effective_b
 	ns=$(namespace_for "$source")
 	start_tool "$destination" tcp-server "$port" "$work_dir/server-ready" 1
-	if ! response=$(sudo ip netns exec "$ns" python3 "$work_dir/socket_tool.py" tcp-client "$target" "$port" "$payload"); then
+	if ! response=$(sudo ip netns exec "$ns" "$work_dir/bin/integration-tool" tcp-client "$target" "$port" "$payload"); then
 		fail "expected TCP flow was not accepted"
 	fi
 	[[ $response == "reply:$payload" ]] || fail "allowed TCP flow returned an unexpected payload"
@@ -350,7 +208,7 @@ expect_tcp_blocked() {
 	ns=$(namespace_for "$source")
 	start_tool "$destination" tcp-server "$port" "$work_dir/server-ready" 1
 	set +e
-	sudo ip netns exec "$ns" python3 "$work_dir/socket_tool.py" tcp-client "$target" "$port" blocked \
+	sudo ip netns exec "$ns" "$work_dir/bin/integration-tool" tcp-client "$target" "$port" blocked \
 		>"$work_dir/blocked.stdout" 2>"$work_dir/blocked.stderr"
 	rc=$?
 	set -e
@@ -381,7 +239,7 @@ expect_udp_allowed() {
 	[[ $destination == a ]] && target=$effective_a || target=$effective_b
 	ns=$(namespace_for "$source")
 	start_tool "$destination" udp-server "$port" "$work_dir/server-ready"
-	if ! response=$(sudo ip netns exec "$ns" python3 "$work_dir/socket_tool.py" udp-client "$target" "$port" "$payload"); then
+	if ! response=$(sudo ip netns exec "$ns" "$work_dir/bin/integration-tool" udp-client "$target" "$port" "$payload"); then
 		fail "expected UDP flow was not accepted"
 	fi
 	[[ $response == "reply:$payload" ]] || fail "allowed UDP flow returned an unexpected payload"
@@ -425,7 +283,7 @@ apply_profile b tcp:18084
 rm -f "$work_dir/hold-server-ready" "$work_dir/hold-first" "$work_dir/hold-continue" "$work_dir/hold-result"
 start_tool b hold-server 18084 "$work_dir/hold-server-ready"
 hold_server_pid=$LAST_TOOL_PID
-sudo ip netns exec "$ns_a" python3 "$work_dir/socket_tool.py" hold-client \
+sudo ip netns exec "$ns_a" "$work_dir/bin/integration-tool" hold-client \
 	"$effective_b" 18084 "$work_dir/hold-first" "$work_dir/hold-continue" "$work_dir/hold-result" \
 	>"$work_dir/hold-client.stdout" 2>"$work_dir/hold-client.stderr" &
 hold_client_pid=$!

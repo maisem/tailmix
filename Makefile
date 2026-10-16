@@ -2,13 +2,14 @@ PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 DESTDIR ?=
 GO ?= go
+LINUX_NETWORK_ARGS ?=
 INSTALL ?= install
 SED ?= sed
 SYSTEMCTL ?= systemctl
 SYSTEMD_UNIT_DIR ?= $(PREFIX)/lib/systemd/system
 SYSTEMD_UNIT ?= tailmixd.service
 
-.PHONY: check install install-systemd install-test licenses licenses-check release-check
+.PHONY: check check-linux-network clean-linux-network install install-systemd install-test licenses licenses-check release-check
 
 check:
 	$(GO) test ./...
@@ -18,6 +19,16 @@ check:
 	$(GO) mod tidy -diff
 	$(MAKE) licenses-check
 	$(MAKE) install-test
+
+check-linux-network:
+	$(GO) test ./cmd/linux-network-e2e
+	@set -eu; bin="$$(mktemp "$${TMPDIR:-/tmp}/tailmix-linux-network.XXXXXX")"; \
+	trap 'rm -f "$$bin"' EXIT HUP INT TERM; \
+	CGO_ENABLED=0 $(GO) build -o "$$bin" ./cmd/linux-network-e2e; \
+	GO="$(GO)" "$$bin" $(LINUX_NETWORK_ARGS)
+
+clean-linux-network:
+	@$(MAKE) --no-print-directory check-linux-network LINUX_NETWORK_ARGS=--cleanup
 
 install-test:
 	./scripts/install_test.sh

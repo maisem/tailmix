@@ -43,7 +43,7 @@ require_command() {
 	command -v "$1" >/dev/null 2>&1 || fail "required command is unavailable: $1"
 }
 
-for command in awk date getconf git go grep head ip iperf3 mktemp python3 seq ss sudo timeout uname; do
+for command in awk date getconf git go grep head ip iperf3 mktemp seq ss sudo timeout uname; do
 	require_command "$command"
 done
 [[ $(uname -s) == Linux ]] || fail "Linux is required"
@@ -57,32 +57,10 @@ mkdir -p "$work_dir/bin" "$work_dir/a/run" "$work_dir/b/run" "$work_dir/results"
 	cd "$repo_root"
 	go build -o "$work_dir/bin/tailmixd" ./cmd/tailmixd
 	go build -o "$work_dir/bin/tailmix" ./cmd/tailmix
+	go build -o "$work_dir/bin/integration-tool" ./cmd/integration-tool
 )
 
-cat >"$work_dir/keygen.go" <<'GO'
-package main
-
-import (
-	"fmt"
-
-	"github.com/maisem/tailmix/wireguardcfg"
-)
-
-func main() {
-	for range 2 {
-		private, err := wireguardcfg.GeneratePrivateKey()
-		if err != nil {
-			panic(err)
-		}
-		public, err := private.Public()
-		if err != nil {
-			panic(err)
-		}
-		fmt.Printf("%s %s\n", private.String(), public.String())
-	}
-}
-GO
-mapfile -t key_pairs < <(cd "$repo_root" && go run "$work_dir/keygen.go")
+mapfile -t key_pairs < <("$work_dir/bin/integration-tool" keygen)
 ((${#key_pairs[@]} == 2)) || fail "key generation returned an unexpected result"
 read -r private_a public_a <<<"${key_pairs[0]}"
 read -r private_b public_b <<<"${key_pairs[1]}"
@@ -180,15 +158,7 @@ apply_profile() {
 apply_profile a
 apply_profile b
 
-effective_b=$(python3 - "$work_dir/a-profile.json" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as source:
-    profile = json.load(source)
-print(profile["peers"][0]["effectiveAddresses"][0])
-PY
-)
+effective_b=$("$work_dir/bin/integration-tool" effective-address "$work_dir/a-profile.json")
 [[ -n $effective_b ]] || fail "first profile did not report an effective peer address"
 
 sudo ip netns exec "$ns_b" "$iperf3_bin" -s >"$work_dir/iperf3-server.log" 2>&1 &
@@ -245,42 +215,4 @@ printf 'cpu: %s\n' "$cpu_model"
 printf 'logical_cpus: %s\n' "$logical_cpus"
 printf 'parameters: TCP, P1/P4/P8 through one tunnel, normal+reverse, 3 repetitions/concurrency/direction, 12s/run, omit first 2s, 30s hard timeout/run\n'
 
-python3 - "$work_dir/results" <<'PY'
-import json
-import pathlib
-import statistics
-import sys
-
-results_dir = pathlib.Path(sys.argv[1])
-for concurrency in (1, 4, 8):
-    for direction in ("normal", "reverse"):
-        throughputs = []
-        print(f"P{concurrency} {direction} runs:")
-        for run in range(1, 4):
-            path = results_dir / f"p{concurrency}-{direction}-{run}.json"
-            with path.open(encoding="utf-8") as source:
-                result = json.load(source)
-            error = result.get("error")
-            if error:
-                raise SystemExit(
-                    f"iperf3 P{concurrency} {direction} run {run} failed: {error}"
-                )
-            end = result["end"]
-            bits_per_second = float(end["sum_received"]["bits_per_second"])
-            retransmits = int(end.get("sum_sent", {}).get("retransmits", 0))
-            throughputs.append(bits_per_second)
-            print(
-                f"  run {run}: {bits_per_second / 1_000_000_000:.3f} Gbit/s, "
-                f"retransmits={retransmits}"
-            )
-        minimum = min(throughputs)
-        maximum = max(throughputs)
-        median = statistics.median(throughputs)
-        unstable = maximum - minimum > 0.10 * median
-        print(
-            f"  summary: median={median / 1_000_000_000:.3f} Gbit/s "
-            f"min={minimum / 1_000_000_000:.3f} Gbit/s "
-            f"max={maximum / 1_000_000_000:.3f} Gbit/s "
-            f"unstable={'yes' if unstable else 'no'}"
-        )
-PY
+"$work_dir/bin/integration-tool" benchmark-report "$work_dir/results"
