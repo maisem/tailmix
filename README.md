@@ -1,227 +1,172 @@
 # tailmix
 
-tailmix connects one host to multiple Tailscale tailnets at the same time.
+tailmix connects one Mac or Linux machine to multiple Tailscale tailnets at the
+same time. Each tailnet gets its own profile, and you choose which routes, exit
+node, and DNS each one provides.
+
+Website: <https://tailmix.net>
 
 tailmix is an independent project and is not affiliated with, sponsored by, or
 endorsed by Tailscale Inc. Tailscale is a registered trademark of Tailscale
 Inc.
 
-## Start here
+## Install
 
-You only need to install it, connect one profile, and check that it works.
+Disconnect the regular Tailscale client first; it competes with tailmix for
+routes and DNS.
 
-Before starting, disconnect the regular Tailscale client. It can otherwise
-compete with tailmix for routes and DNS.
+1. Install and start tailmix (macOS, or Linux with systemd):
 
-### 1. Install and start tailmix
+   ```sh
+   curl -fsSL https://tailmix.net/install.sh | sudo sh
+   ```
 
-On macOS or Linux with systemd:
+   This serves `install.sh` from the latest GitHub release. To read it first,
+   run `curl -fLO https://tailmix.net/install.sh`, then `sudo sh install.sh`.
 
-```sh
-curl -fsSL https://tailmix.net/install.sh | sudo sh
-```
+2. Log in to your first tailnet and open the link it prints:
 
-This serves `install.sh` from the latest GitHub release. To read it before
-running it, download it first with `curl -fLO https://tailmix.net/install.sh`.
+   ```sh
+   sudo tailmix ts login
+   ```
+
+   tailmix creates a profile named `default` for it.
+
+3. Check it:
+
+   ```sh
+   tailmix status
+   ```
+
+   You are done when `default` is listed as running.
 
 For Linux prerequisites and troubleshooting, see the
-[systemd guide](docs/linux-install.md).
+[Linux guide](docs/linux-install.md).
 
-### 2. Connect your first tailnet
-
-```sh
-sudo tailmix ts login
-```
-
-Open the login link it prints. tailmix creates a profile named `default` for
-this tailnet.
-
-### 3. Check it
-
-```sh
-tailmix status
-tailmix ts status
-```
-
-If `default` is listed and the second command shows the tailnet, you are done.
-
-To connect another tailnet, add a named profile and log in to it:
+## Add another tailnet
 
 ```sh
 sudo tailmix profiles add work
 sudo tailmix ts -p work login
 ```
 
-`tailmix ts` uses the only profile when there is one. Once you have several,
-pick one with `-p`. Rename the first with
+`tailmix ts` uses the only profile when there is one; with several, choose one
+with `-p`. Rename the first profile with
 `sudo tailmix profiles rename default home`.
 
-Direct installations check stable GitHub releases after a randomized startup
-delay and then daily. Both binaries switch versions together and the daemon
-restarts itself without a service timer. Release checksums are verified after
-download; authenticity relies on GitHub's HTTPS and release access controls.
-Manage the policy with:
+## Routes and exit nodes
+
+For each destination, tailmix uses the first match:
+
+1. **Peers** are reached through the tailnet they belong to.
+2. **Subnet routes** you accepted; the most specific one wins.
+3. **The exit node**, if you selected one.
+4. Otherwise, your normal network.
+
+No subnet routes are accepted until you ask:
 
 ```sh
-tailmix update status
-sudo tailmix update check
-sudo tailmix update apply
-sudo tailmix update disable # or: enable
+tailmix routes list --available                         # what each tailnet advertises
+sudo tailmix routes set -p work --accept-all=true       # accept all of work's routes
+sudo tailmix routes bind -p lab 10.20.0.0/16            # pin one prefix to lab
 ```
 
-Homebrew remains available for source-based macOS installations, but those
-installations are updated by Homebrew rather than tailmix itself.
+A pinned prefix overrides accept-all. If two tailnets advertise the same prefix
+under accept-all, neither is used until you pin one.
 
-## Shell completion
-
-Homebrew installs completion scripts for Bash, Zsh, fish, and PowerShell
-automatically. For other installation methods, load a completion script in the
-current shell with one of these commands:
+Select one exit node from any tailnet:
 
 ```sh
-# Bash
-source <(tailmix completion bash)
-
-# Zsh
-source <(tailmix completion zsh)
-
-# fish
-tailmix completion fish | source
+tailmix exit-node list                                  # or: --filter Canada
+sudo tailmix exit-node set -p home gateway
+sudo tailmix exit-node clear
 ```
 
-For PowerShell:
+`gateway` may be a short hostname, full DNS name, stable node ID, or Tailscale
+IP.
 
-```powershell
-tailmix completion powershell | Out-String | Invoke-Expression
-```
+## DNS
 
-The scripts complete tailmix commands and flags, local profile names, and the
-embedded Tailscale CLI after `tailmix ts --profile <profile>`.
+Each tailnet's MagicDNS names work automatically. The exit node's tailnet
+answers names no other route covers.
 
-## Common next steps
-
-Pause every profile without changing which profiles should normally run:
+Use short names such as `ssh mybox` by adding a tailnet's MagicDNS suffix as a
+search domain. `tailmix dns search list` shows each profile's suffix:
 
 ```sh
-sudo tailmix down
-sudo tailmix up
-```
-
-The down state survives daemon restarts and host reboots. `tailmix up` restores
-only profiles that were enabled before the pause; use `tailmix profiles enable`
-or `disable` while tailmix is up to change that restore set. Profile lifecycle
-and configuration changes are rejected while tailmix is down.
-
-List everything before changing policy:
-
-```sh
-tailmix routes list
-tailmix exit-node list
-tailmix dns routes list
-tailmix dns search list
-```
-
-`tailmix status` starts with the global up/down state and summarizes the policy
-currently selected from every active profile. It includes accepted IP routes,
-the selected exit node, effective DNS routes, and configured DNS search domains
-without listing every available choice.
-
-Like Tailscale's CLI, `tailmix exit-node list` collapses located nodes to the
-highest-priority node per city and adds an **Any** row for countries with
-multiple cities. Use `tailmix exit-node list --filter Canada` to show every
-node in one country.
-
-Accept every advertised subnet route and DNS route from one profile:
-
-```sh
-sudo tailmix routes set --profile work --accept-all=true
-sudo tailmix dns routes set --profile work --accept-all=true
-```
-
-Pin one subnet to a profile:
-
-```sh
-sudo tailmix routes bind --profile work 10.20.0.0/16
-```
-
-Send default traffic through one exit node:
-
-```sh
-sudo tailmix exit-node set --profile work gateway
-```
-
-`gateway` may be the node's short hostname, full DNS name, stable node ID, or
-Tailscale IP. Run `sudo tailmix exit-node clear` to return to the host's normal
-default route.
-
-Enable Tailscale SSH on one profile:
-
-```sh
-sudo tailmix ts --profile work set --ssh
-```
-
-The tailnet must also have Tailscale SSH enabled and grant access to the node in
-its access-control policy.
-
-Use short MagicDNS names such as `ssh mybox` by adding the tailnet's MagicDNS
-suffix as a search domain. `tailmix dns search list` shows each profile's
-suffix:
-
-```sh
-tailmix dns search list
 sudo tailmix dns search add example.ts.net
 ```
 
 Add one suffix per tailnet; earlier entries win when a short name exists in
 more than one.
 
-Route a DNS suffix through a profile, then make it a search domain so short
-names such as `printer` can expand to `printer.corp.example.com`:
+Send another DNS suffix to a tailnet, optionally as a search domain too:
 
 ```sh
-sudo tailmix dns routes bind --profile work corp.example.com
+sudo tailmix dns routes bind -p work corp.example.com
 sudo tailmix dns search add corp.example.com
+sudo tailmix dns routes set -p work --accept-all=true   # or accept all of work's DNS routes
 ```
 
-Explicit bindings override profile-wide accept-all settings. Changes apply
-without restarting `tailmixd`.
+## Overlapping addresses
 
-Run `tailmix help` for every command. `-p` is shorthand for `--profile`
-everywhere. Status and other read-only commands work as a regular local user;
-commands that change daemon-managed state require root.
+Two tailnets can use the same `100.x` address. tailmix gives every node and
+Tailscale Service a stable local address from `100.127.0.0/16` (and
+`fd6d:6e65:7400::/56` for IPv6), and rewrites packets as they enter and leave
+each tailnet. MagicDNS names resolve to these local addresses, so connect by
+name. Inside each tailnet, your machine still uses its own Tailscale address,
+so ACLs work as usual.
 
-## How it works
+## Everyday commands
 
-`tailmixd` runs one embedded Tailscale node per profile and connects them to one
-host TUN. It gives overlapping node and Tailscale Service addresses stable
-local addresses, then uses your route and DNS bindings to choose the right
-profile. Service MagicDNS names resolve to those effective addresses just like
-node names. `tailmix` changes policy through a local socket, so adding profiles
-or changing bindings does not restart unrelated profiles.
+```sh
+tailmix status                     # what is running and selected
+tailmix ts -p work ping printer    # any Tailscale CLI command, per profile
+sudo tailmix ts -p work set --ssh  # enable Tailscale SSH for one profile
+sudo tailmix down                  # pause every profile; survives reboots
+sudo tailmix up                    # resume them
+tailmix help                       # every command
+```
 
-One exit node can be selected across all profiles. Direct peer and accepted
-subnet routes remain profile-specific and take precedence over that default.
-The selected exit-node profile also supplies DNS for otherwise-unmatched names.
-More-specific DNS routes, including automatic MagicDNS zones, keep precedence.
-An explicitly bound root (`.`) replaces the exit-node DNS default and remains
-configured when the exit node is changed or cleared.
+Read-only commands work without `sudo`. Policy changes apply immediately
+without restarting other profiles.
 
-## More information
+## Updates
 
-- [Linux service setup and troubleshooting](docs/linux-install.md)
-- [Profile, route, exit-node, and DNS command reference](docs/profile-management.md)
+Installs from `install.sh` update themselves: they check stable GitHub releases
+daily, verify release checksums, and restart the daemon.
+
+```sh
+tailmix update status
+sudo tailmix update apply
+sudo tailmix update disable           # or: enable
+```
+
+Homebrew installs from source are updated by Homebrew instead.
+
+## Shell completion
+
+Homebrew installs completions automatically. Otherwise, load them in your shell:
+
+```sh
+source <(tailmix completion bash)     # Bash
+source <(tailmix completion zsh)      # Zsh
+tailmix completion fish | source      # fish
+```
+
+For PowerShell, run
+`tailmix completion powershell | Out-String | Invoke-Expression`.
+
+## Documentation
+
+- [Linux guide](docs/linux-install.md)
+- [Command reference: profiles, routes, exit nodes, DNS](docs/profile-management.md)
 - [Raw WireGuard profiles](docs/wireguard.md)
 - [Architecture](docs/architecture.md)
-- [Development workflows](DEVELOPMENT.md)
+- [Development](DEVELOPMENT.md)
 
 ## License
 
-Except for the forked source under `tsnet/` and `netns/`, the contents of this
-repository are available under the BSD 3-Clause License. See
-[LICENSE](LICENSE). The [`tsnet` fork](tsnet/README.md) and
-[`netns` fork](netns/README.md) record their exact upstream sources and why
-tailmix carries them. They retain Tailscale's copyright and licenses in
-[tsnet/LICENSE](tsnet/LICENSE) and [netns/LICENSE](netns/LICENSE). The linked
-Go dependency license report is generated with `go-licenses`; see
-[licenses/tailmix.md](licenses/tailmix.md) and
-[licenses/README.md](licenses/README.md).
+BSD 3-Clause; see [LICENSE](LICENSE). The forks under [`tsnet/`](tsnet/README.md)
+and [`netns/`](netns/README.md) keep Tailscale's copyright and licenses. The Go
+dependency license report is in [licenses/](licenses/README.md).
