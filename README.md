@@ -173,6 +173,18 @@ sudo tailmix ts --profile work set --ssh
 The tailnet must also have Tailscale SSH enabled and grant access to the node in
 its access-control policy.
 
+Use short MagicDNS names such as `ssh mybox` by adding the tailnet's MagicDNS
+suffix as a search domain. `tailmix dns search list` shows each profile's
+suffix:
+
+```sh
+tailmix dns search list
+sudo tailmix dns search add example.ts.net
+```
+
+Add one suffix per tailnet; earlier entries win when a short name exists in
+more than one.
+
 Route a DNS suffix through a profile, then make it a search domain so short
 names such as `printer` can expand to `printer.corp.example.com`:
 
