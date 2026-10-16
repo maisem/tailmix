@@ -28,6 +28,9 @@ const (
 	dnsNICID     tcpip.NICID = 1
 	dnsQueueSize int         = 512
 	dnsMTU       uint32      = 1280
+	// Allow the profile forwarder to answer, but cap the SDK's UDP-to-TCP
+	// fallback before the operating system's resolver gives up.
+	aggregateQueryTimeout = requestTimeout + 500*time.Millisecond
 )
 
 // netstackClock keeps gVisor's monotonic time nondecreasing on virtualized hosts.
@@ -291,11 +294,16 @@ func (s *packetService) serveUDP(conn *gonet.UDPConn) error {
 		}
 		query := append([]byte(nil), buf[:n]...)
 		s.sessions.Go(func() {
-			response, err := s.manager.Query(s.ctx, query, "udp", udpRemote.AddrPort())
+			ctx, cancel := context.WithTimeout(s.ctx, aggregateQueryTimeout)
+			defer cancel()
+			response, err := s.manager.Query(ctx, query, "udp", udpRemote.AddrPort())
+			if s.ctx.Err() != nil {
+				return
+			}
 			if err != nil {
-				if s.ctx.Err() == nil {
-					s.logf("MagicDNS UDP query from %v: %v", udpRemote, err)
-				}
+				response = failureResponse(query)
+			}
+			if response == nil {
 				return
 			}
 			if _, err := conn.WriteTo(response, udpRemote); err != nil && s.ctx.Err() == nil {

@@ -715,7 +715,9 @@ func (s *supervisor) configureDNSLocked(cfg tailmixdns.LiveConfig) error {
 	}
 	old := s.dnsForwarders
 	s.dnsForwarders = nextForwarders
-	closeForwarders(old)
+	for _, forwarder := range old {
+		forwarder.Retire()
+	}
 	return nil
 }
 

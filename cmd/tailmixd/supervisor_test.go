@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/maisem/tailmix/controlapi"
+	tailmixdns "github.com/maisem/tailmix/dns"
 	"github.com/maisem/tailmix/hosttun"
 	tailmixprofile "github.com/maisem/tailmix/profile"
 	"github.com/maisem/tailmix/profilesocket"
@@ -20,6 +21,7 @@ import (
 	"github.com/maisem/tailmix/state"
 	"github.com/maisem/tailmix/wireguardcfg"
 	"github.com/tailscale/wireguard-go/tun"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 type lifecycleEngine struct {
@@ -312,5 +314,100 @@ func TestSupervisorCloseReportsHostCleanupError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "close host TUN: route delete failed") {
 		t.Fatalf("stderr = %q, want host cleanup failure", stderr.String())
+	}
+}
+
+type lifecycleDNSService struct {
+	tailmixdns.Service
+	err error
+}
+
+func (s *lifecycleDNSService) ConfigureFull(tailmixdns.LiveConfig) error { return s.err }
+
+type lifecycleDNSEngine struct {
+	lifecycleEngine
+	query func() ([]byte, error)
+}
+
+func (e *lifecycleDNSEngine) QueryDNS(string, dnsmessage.Type) ([]byte, error) {
+	return e.query()
+}
+
+func TestSupervisorDNSReplacementDrainsAcrossMultipleUpdates(t *testing.T) {
+	s := newLifecycleTestSupervisor(t, lifecycleTestState())
+	service := &lifecycleDNSService{}
+	s.dnsService = service
+	entered, release := make(chan struct{}), make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	question := dnsmessage.Question{Name: dnsmessage.MustNewName("example.com."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}
+	response, err := (&dnsmessage.Message{Header: dnsmessage.Header{Response: true}, Questions: []dnsmessage.Question{question}}).Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := &lifecycleDNSEngine{query: func() ([]byte, error) {
+		close(entered)
+		<-release
+		return response, nil
+	}}
+	s.runtimes["p_work"] = &managedProfile{runtime: runtimeProfile{Engine: engine}}
+	configure := func() error {
+		return s.configureDNSLocked(tailmixdns.LiveConfig{Routes: []tailmixdns.Route{{Suffix: ".", ProfileID: "p_work", ProfileDNS: true}}})
+	}
+	if err := configure(); err != nil {
+		t.Fatal(err)
+	}
+	old := s.dnsForwarders[0]
+	defer old.Close()
+	conn, err := net.Dial("udp", old.Resolver().Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	query, err := (&dnsmessage.Message{Header: dnsmessage.Header{ID: 42, RecursionDesired: true}, Questions: []dnsmessage.Question{question}}).Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write(query); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("upstream query did not start")
+	}
+	// A failed configuration must leave the currently installed generation alone.
+	service.err = errors.New("configure failed")
+	if err := configure(); err == nil {
+		t.Fatal("configuration unexpectedly succeeded")
+	}
+	if s.dnsForwarders[0] != old {
+		t.Fatal("failed configure replaced the active forwarder")
+	}
+	service.err = nil
+	for i := 0; i < 2; i++ {
+		if err := configure(); err != nil {
+			t.Fatal(err)
+		}
+		defer s.dnsForwarders[0].Close()
+	}
+	close(release)
+	wire := make([]byte, 65535)
+	n, err := conn.Read(wire)
+	if err != nil {
+		t.Fatalf("two replacements lost an in-flight query: %v", err)
+	}
+	var msg dnsmessage.Message
+	if err := msg.Unpack(wire[:n]); err != nil {
+		t.Fatal(err)
+	}
+	if msg.Header.ID != 42 || msg.Header.RCode != dnsmessage.RCodeSuccess || !msg.Header.Response {
+		t.Fatalf("drained reply = %+v", msg)
 	}
 }

@@ -27,19 +27,32 @@ type ProfileDNSQueryer interface {
 	QueryDNS(string, dnsmessage.Type) ([]byte, error)
 }
 
+// ProfileDNSContextQueryer optionally supports bounded, cancellable requests.
+// Implementations must bound outstanding work even if their backend cannot cancel.
+type ProfileDNSContextQueryer interface {
+	QueryDNSContext(context.Context, string, dnsmessage.Type) ([]byte, error)
+}
+
+const requestTimeout = 3 * time.Second
+
 // Forwarder exposes one loopback classic-DNS endpoint and sends every upstream
 // query through a selected profile dialer.
 type Forwarder struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	dialer    ProfileDialer
-	queryer   ProfileDNSQueryer
-	resolvers []*dnstype.Resolver
-	udp       *net.UDPConn
-	tcp       net.Listener
-	addr      netip.AddrPort
-	wg        sync.WaitGroup
-	closeOnce sync.Once
+	ctx        context.Context
+	cancel     context.CancelFunc
+	dialer     ProfileDialer
+	queryer    ProfileDNSQueryer
+	resolvers  []*dnstype.Resolver
+	udp        *net.UDPConn
+	tcp        net.Listener
+	addr       netip.AddrPort
+	wg         sync.WaitGroup
+	closeOnce  sync.Once
+	mu         sync.Mutex
+	retired    bool
+	conns      map[net.Conn]struct{}
+	done       chan struct{}
+	querySlots chan struct{}
 }
 
 func StartForwarder(ctx context.Context, dialer ProfileDialer, resolvers []*dnstype.Resolver) (*Forwarder, error) {
@@ -74,18 +87,28 @@ func startForwarder(ctx context.Context, dialer ProfileDialer, queryer ProfileDN
 	}
 	forwarderCtx, cancel := context.WithCancel(ctx)
 	f := &Forwarder{
-		ctx:       forwarderCtx,
-		cancel:    cancel,
-		dialer:    dialer,
-		queryer:   queryer,
-		resolvers: cloneDNSResolvers(resolvers),
-		udp:       udp,
-		tcp:       tcp,
-		addr:      netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)),
+		ctx:        forwarderCtx,
+		cancel:     cancel,
+		dialer:     dialer,
+		queryer:    queryer,
+		resolvers:  cloneDNSResolvers(resolvers),
+		udp:        udp,
+		tcp:        tcp,
+		conns:      make(map[net.Conn]struct{}),
+		done:       make(chan struct{}),
+		querySlots: make(chan struct{}, 16),
+		addr:       netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", port)),
 	}
 	f.wg.Add(2)
 	go f.serveUDP()
 	go f.serveTCP()
+	stopParent := context.AfterFunc(ctx, f.stop)
+	go func() {
+		f.wg.Wait()
+		stopParent()
+		f.stop()
+		close(f.done)
+	}()
 	return f, nil
 }
 
@@ -93,14 +116,41 @@ func (f *Forwarder) Resolver() *dnstype.Resolver {
 	return &dnstype.Resolver{Addr: f.addr.String()}
 }
 
-func (f *Forwarder) Close() error {
-	var result error
+// Retire stops accepting queries while allowing already accepted work to reply.
+// It is nonblocking; Close or cancellation of the startup context forces shutdown.
+func (f *Forwarder) Retire() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.retired {
+		return
+	}
+	f.retired = true
+	_ = f.udp.SetReadDeadline(time.Now())
+	_ = f.udp.SetWriteDeadline(time.Now().Add(requestTimeout + 100*time.Millisecond))
+	_ = f.tcp.Close()
+	for conn := range f.conns {
+		_ = conn.SetReadDeadline(time.Now())
+	}
+}
+
+func (f *Forwarder) stop() {
 	f.closeOnce.Do(func() {
 		f.cancel()
-		result = errors.Join(f.udp.Close(), f.tcp.Close())
-		f.wg.Wait()
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.retired = true
+		_ = f.udp.Close()
+		_ = f.tcp.Close()
+		for conn := range f.conns {
+			_ = conn.Close()
+		}
 	})
-	return result
+}
+
+func (f *Forwarder) Close() error {
+	f.stop()
+	<-f.done
+	return nil
 }
 
 func (f *Forwarder) serveUDP() {
@@ -112,13 +162,16 @@ func (f *Forwarder) serveUDP() {
 			return
 		}
 		query := append([]byte(nil), buffer[:n]...)
+		f.mu.Lock()
+		if f.retired {
+			f.mu.Unlock()
+			return
+		}
 		f.wg.Add(1)
+		f.mu.Unlock()
 		go func() {
 			defer f.wg.Done()
-			ctx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
-			defer cancel()
-			response, err := f.exchange(ctx, "udp", query)
-			if err == nil {
+			if response := f.answer("udp", query); response != nil {
 				_, _ = f.udp.WriteToUDP(response, peer)
 			}
 		}()
@@ -132,12 +185,31 @@ func (f *Forwarder) serveTCP() {
 		if err != nil {
 			return
 		}
+		f.mu.Lock()
+		if f.retired {
+			f.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
+		f.conns[conn] = struct{}{}
 		f.wg.Add(1)
+		f.mu.Unlock()
 		go func() {
 			defer f.wg.Done()
-			defer conn.Close()
-			_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+			defer func() {
+				_ = conn.Close()
+				f.mu.Lock()
+				delete(f.conns, conn)
+				f.mu.Unlock()
+			}()
 			for {
+				f.mu.Lock()
+				if f.retired {
+					f.mu.Unlock()
+					return
+				}
+				_ = conn.SetReadDeadline(time.Now().Add(requestTimeout))
+				f.mu.Unlock()
 				var size uint16
 				if err := binary.Read(conn, binary.BigEndian, &size); err != nil {
 					return
@@ -146,12 +218,12 @@ func (f *Forwarder) serveTCP() {
 				if _, err := io.ReadFull(conn, query); err != nil {
 					return
 				}
-				ctx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
-				response, err := f.exchange(ctx, "tcp", query)
-				cancel()
-				if err != nil || len(response) > 65535 {
+				response := f.answer("tcp", query)
+				if response == nil {
 					return
 				}
+				// A client that stops reading must not prevent retirement.
+				_ = conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
 				if err := binary.Write(conn, binary.BigEndian, uint16(len(response))); err != nil {
 					return
 				}
@@ -163,9 +235,79 @@ func (f *Forwarder) serveTCP() {
 	}
 }
 
+func parseQuery(query []byte) (dnsmessage.Message, error) {
+	var msg dnsmessage.Message
+	if err := msg.Unpack(query); err != nil {
+		return msg, err
+	}
+	if msg.Header.Response || msg.Header.OpCode != 0 || len(msg.Questions) != 1 || msg.Questions[0].Class != dnsmessage.ClassINET {
+		return msg, errors.New("unsupported DNS query")
+	}
+	return msg, nil
+}
+
+func (f *Forwarder) answer(network string, query []byte) []byte {
+	if _, err := parseQuery(query); err != nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(f.ctx, requestTimeout)
+	defer cancel()
+	response, err := f.exchange(ctx, network, query)
+	if err == nil {
+		return response
+	}
+	return failureResponse(query)
+}
+
+func failureResponse(query []byte) []byte {
+	msg, err := parseQuery(query)
+	if err != nil {
+		return nil
+	}
+	// Never reflect untrusted answers or query sections other than the question.
+	header := msg.Header
+	header.Response = true
+	header.Authoritative = false
+	header.Truncated = false
+	header.AuthenticData = false
+	header.RecursionAvailable = true
+	header.RCode = dnsmessage.RCodeServerFailure
+	response, _ := (&dnsmessage.Message{Header: header, Questions: msg.Questions}).Pack()
+	return response
+}
+
+func validateResponse(query, response []byte) error {
+	request, err := parseQuery(query)
+	if err != nil {
+		return err
+	}
+	var reply dnsmessage.Message
+	if len(response) > 65535 {
+		return errors.New("DNS response is too large")
+	}
+	if err := reply.Unpack(response); err != nil {
+		return err
+	}
+	if !reply.Header.Response || reply.Header.ID != request.Header.ID || reply.Header.OpCode != request.Header.OpCode || len(reply.Questions) != 1 {
+		return errors.New("DNS response does not match query")
+	}
+	a, b := request.Questions[0], reply.Questions[0]
+	if !strings.EqualFold(a.Name.String(), b.Name.String()) || a.Type != b.Type || a.Class != b.Class {
+		return errors.New("DNS response question does not match query")
+	}
+	return nil
+}
+
 func (f *Forwarder) exchange(ctx context.Context, network string, query []byte) ([]byte, error) {
+	if _, err := parseQuery(query); err != nil {
+		return nil, err
+	}
 	if f.queryer != nil {
-		return f.exchangeProfileDNS(ctx, query)
+		response, err := f.exchangeProfileDNS(ctx, query)
+		if err == nil {
+			err = validateResponse(query, response)
+		}
+		return response, err
 	}
 	var lastErr error
 	for _, resolver := range f.resolvers {
@@ -178,6 +320,9 @@ func (f *Forwarder) exchange(ctx context.Context, network string, query []byte) 
 			response, err = f.exchangeHTTP(ctx, resolver, query)
 		} else {
 			response, err = f.exchangeClassic(ctx, network, resolver, query)
+		}
+		if err == nil {
+			err = validateResponse(query, response)
 		}
 		if err == nil {
 			return response, nil
@@ -194,25 +339,39 @@ func (f *Forwarder) exchangeProfileDNS(ctx context.Context, query []byte) ([]byt
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var parser dnsmessage.Parser
-	header, err := parser.Start(query)
+	msg, err := parseQuery(query)
 	if err != nil {
-		return nil, fmt.Errorf("parse profile DNS query header: %w", err)
+		return nil, err
 	}
-	if header.Response {
-		return nil, errors.New("profile DNS forwarder received a response")
+	question := msg.Questions[0]
+	var response []byte
+	if queryer, ok := f.queryer.(ProfileDNSContextQueryer); ok {
+		response, err = queryer.QueryDNSContext(ctx, question.Name.String(), question.Type)
+	} else {
+		// Legacy implementations cannot cancel. Keep their slot until they exit,
+		// not merely until the caller times out, bounding abandoned work.
+		select {
+		case f.querySlots <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		type result struct {
+			response []byte
+			err      error
+		}
+		done := make(chan result, 1)
+		go func() {
+			defer func() { <-f.querySlots }()
+			response, err := f.queryer.QueryDNS(question.Name.String(), question.Type)
+			done <- result{response, err}
+		}()
+		select {
+		case res := <-done:
+			response, err = res.response, res.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
-	questions, err := parser.AllQuestions()
-	if err != nil {
-		return nil, fmt.Errorf("parse profile DNS question: %w", err)
-	}
-	if len(questions) != 1 {
-		return nil, fmt.Errorf("profile DNS query has %d questions; want 1", len(questions))
-	}
-	if questions[0].Class != dnsmessage.ClassINET {
-		return nil, fmt.Errorf("profile DNS query uses unsupported class %v", questions[0].Class)
-	}
-	response, err := f.queryer.QueryDNS(questions[0].Name.String(), questions[0].Type)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +379,7 @@ func (f *Forwarder) exchangeProfileDNS(ctx context.Context, query []byte) ([]byt
 		return nil, errors.New("profile DNS resolver returned a truncated header")
 	}
 	response = append([]byte(nil), response...)
-	binary.BigEndian.PutUint16(response[:2], header.ID)
+	binary.BigEndian.PutUint16(response[:2], msg.Header.ID)
 	return response, nil
 }
 
@@ -234,7 +393,11 @@ func (f *Forwarder) exchangeClassic(ctx context.Context, network string, resolve
 		return nil, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	if network == "tcp" {
 		if len(query) > 65535 {
 			return nil, errors.New("DNS query is too large")

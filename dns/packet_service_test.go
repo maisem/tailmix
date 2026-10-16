@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"net"
 	"net/netip"
 	"sync"
 	"testing"
@@ -24,7 +25,9 @@ import (
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/packet"
 	"tailscale.com/net/tsdial"
+	"tailscale.com/types/dnstype"
 	"tailscale.com/types/logger"
+	"tailscale.com/util/dnsname"
 	"tailscale.com/util/eventbus"
 )
 
@@ -315,5 +318,88 @@ func TestPacketServiceAnswersTCPFromBothResolverAddresses(t *testing.T) {
 				t.Fatalf("TCP MagicDNS answer = %v, want %v", got, wantIP)
 			}
 		})
+	}
+}
+
+func TestPacketServiceUDPBoundsManagerFallbackAndReturnsServfail(t *testing.T) {
+	// A real upstream socket accepts both protocols but never answers DNS.
+	// This exercises Manager.Query's UDP race and TCP fallback, not a query mock.
+	tcpUpstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcpUpstream.Close()
+	addr := tcpUpstream.Addr().(*net.TCPAddr)
+	udpUpstream, err := net.ListenUDP("udp", &net.UDPAddr{IP: addr.IP, Port: addr.Port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udpUpstream.Close()
+	tcpAccepted, tcpDone := make(chan struct{}, 1), make(chan struct{})
+	go func() {
+		defer close(tcpDone)
+		conn, err := tcpUpstream.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Also bound this ordinary test peer if the client cancellation regresses.
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		tcpAccepted <- struct{}{}
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+	service := newTestPacketService(t, "db.work.ts.net", netip.MustParseAddr("100.127.0.7"))
+	if err := service.manager.Set(tailscaledns.Config{Routes: map[dnsname.FQDN][]*dnstype.Resolver{
+		".": {{Addr: udpUpstream.LocalAddr().String()}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	clientIP := netip.MustParseAddr("100.127.0.10")
+	query := dnsAQuery(t, "slow.example")
+	query[3] |= 0x10 // Checking Disabled must survive the synthesized failure.
+	start := time.Now()
+	if !service.HandlePacket(packet.Generate(packet.UDP4Header{
+		IP4Header: packet.IP4Header{Src: clientIP, Dst: testResolverIP},
+		SrcPort:   54321, DstPort: 53,
+	}, query)) {
+		t.Fatal("UDP query was not consumed")
+	}
+	select {
+	case raw := <-service.Outbound():
+		var parsed packet.Parsed
+		parsed.Decode(raw)
+		if parsed.Src != netip.AddrPortFrom(testResolverIP, 53) || parsed.Dst != netip.AddrPortFrom(clientIP, 54321) {
+			t.Fatalf("failure reply flow = %v > %v", parsed.Src, parsed.Dst)
+		}
+		var msg dnsmessage.Message
+		if err := msg.Unpack(parsed.Payload()); err != nil {
+			t.Fatal(err)
+		}
+		if msg.Header.ID != 1 || !msg.Header.Response || !msg.Header.RecursionDesired || !msg.Header.CheckingDisabled || msg.Header.RCode != dnsmessage.RCodeServerFailure || len(msg.Questions) != 1 || msg.Questions[0].Name.String() != "slow.example." {
+			t.Fatalf("UDP failure reply = %+v", msg)
+		}
+		if elapsed := time.Since(start); elapsed > aggregateQueryTimeout+750*time.Millisecond {
+			t.Fatalf("aggregate UDP deadline took %v", elapsed)
+		}
+	case <-time.After(aggregateQueryTimeout + time.Second):
+		t.Fatal("aggregate UDP query dropped instead of returning bounded SERVFAIL")
+	}
+	select {
+	case <-tcpAccepted:
+	default:
+		t.Fatal("test did not exercise SDK TCP fallback")
+	}
+	select {
+	case <-tcpDone:
+	case <-time.After(time.Second):
+		t.Fatal("manager cancellation did not close upstream TCP fallback")
+	}
+}
+
+func TestFailureResponseRejectsMalformedQueries(t *testing.T) {
+	for _, query := range [][]byte{{1, 2}, dnsAQuery(t, "example.com")[:13]} {
+		if response := failureResponse(query); response != nil {
+			t.Fatalf("reflected malformed query as %x", response)
+		}
 	}
 }

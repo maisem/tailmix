@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/maisem/tailmix/tsnet"
 	"github.com/tailscale/wireguard-go/tun"
@@ -36,8 +37,10 @@ type TSNetConfig struct {
 }
 
 type TSNetEngine struct {
-	cfg    TSNetConfig
-	server *tsnet.Server
+	cfg      TSNetConfig
+	server   *tsnet.Server
+	dnsOnce  sync.Once
+	dnsSlots chan struct{}
 }
 
 func NewTSNetEngine(cfg TSNetConfig) *TSNetEngine {
@@ -106,6 +109,36 @@ func (e *TSNetEngine) QueryDNS(name string, queryType dnsmessage.Type) ([]byte, 
 	}
 	response, _, err := backend.QueryDNS(name, queryType)
 	return response, err
+}
+
+// QueryDNSContext bounds work shared by every forwarder for this engine. The
+// backend API has no request context; a slot stays occupied until it returns.
+func (e *TSNetEngine) QueryDNSContext(ctx context.Context, name string, queryType dnsmessage.Type) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	e.dnsOnce.Do(func() { e.dnsSlots = make(chan struct{}, 16) })
+	select {
+	case e.dnsSlots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	type result struct {
+		response []byte
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		defer func() { <-e.dnsSlots }()
+		response, err := e.QueryDNS(name, queryType)
+		done <- result{response, err}
+	}()
+	select {
+	case res := <-done:
+		return res.response, res.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (e *TSNetEngine) WatchUpdates(ctx context.Context, notify func()) error {

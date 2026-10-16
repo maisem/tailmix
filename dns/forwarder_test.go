@@ -3,6 +3,8 @@ package dns
 import (
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 	"tailscale.com/types/dnstype"
@@ -59,9 +62,9 @@ func TestForwarderUsesEffectiveProfileDNSAndRestoresQueryID(t *testing.T) {
 	}
 
 	queryer := &recordingDNSQueryer{
-		response: []byte{0, 1, 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0},
+		response: testDNSMessage(t, true, dnsmessage.TypeAAAA),
 	}
-	forwarder := &Forwarder{queryer: queryer}
+	forwarder := &Forwarder{queryer: queryer, querySlots: make(chan struct{}, 16)}
 	response, err := forwarder.exchange(context.Background(), "udp", query)
 	if err != nil {
 		t.Fatal(err)
@@ -110,5 +113,332 @@ func TestForwarderDoHUsesProfileDialerAndBootstrapResolution(t *testing.T) {
 	defer dialer.mu.Unlock()
 	if len(dialer.addrs) == 0 || !strings.HasPrefix(dialer.addrs[0], "127.0.0.1:") {
 		t.Fatalf("profile dial addresses = %q", dialer.addrs)
+	}
+}
+
+func testDNSMessage(t *testing.T, response bool, typ dnsmessage.Type) []byte {
+	t.Helper()
+	msg := dnsmessage.Message{
+		Header:    dnsmessage.Header{ID: 0xbeef, Response: response, RecursionDesired: true, CheckingDisabled: true},
+		Questions: []dnsmessage.Question{{Name: dnsmessage.MustNewName("example.com."), Type: typ, Class: dnsmessage.ClassINET}},
+	}
+	wire, err := msg.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
+}
+
+type functionQueryer func(string, dnsmessage.Type) ([]byte, error)
+
+func (q functionQueryer) QueryDNS(name string, typ dnsmessage.Type) ([]byte, error) {
+	return q(name, typ)
+}
+
+type contextQueryer struct {
+	functionQueryer
+	query func(context.Context) ([]byte, error)
+}
+
+func (q contextQueryer) QueryDNSContext(ctx context.Context, _ string, _ dnsmessage.Type) ([]byte, error) {
+	return q.query(ctx)
+}
+
+func testDNSConn(t *testing.T, f *Forwarder, network string) net.Conn {
+	t.Helper()
+	conn, err := net.Dial(network, f.Resolver().Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
+
+func writeDNSQuery(t *testing.T, conn net.Conn, network string, query []byte) {
+	t.Helper()
+	if network == "tcp" {
+		if err := binary.Write(conn, binary.BigEndian, uint16(len(query))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := conn.Write(query); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readDNSReply(t *testing.T, conn net.Conn, network string) dnsmessage.Message {
+	t.Helper()
+	wire := make([]byte, 65535)
+	var err error
+	if network == "tcp" {
+		var size uint16
+		if err = binary.Read(conn, binary.BigEndian, &size); err != nil {
+			t.Fatal(err)
+		}
+		wire = wire[:size]
+		_, err = io.ReadFull(conn, wire)
+	} else {
+		var n int
+		n, err = conn.Read(wire)
+		wire = wire[:n]
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg dnsmessage.Message
+	if err := msg.Unpack(wire); err != nil {
+		t.Fatal(err)
+	}
+	return msg
+}
+
+func TestForwarderServfailForUpstreamErrorsAndInvalidResponses(t *testing.T) {
+	for _, network := range []string{"udp", "tcp"} {
+		for _, failure := range []string{"error", "short-header", "missing-question", "wrong-question", "not-response"} {
+			t.Run(network+"/"+failure, func(t *testing.T) {
+				response := testDNSMessage(t, true, dnsmessage.TypeAAAA)
+				var err error
+				switch failure {
+				case "error":
+					err = errors.New("unavailable")
+				case "short-header":
+					response = []byte{1, 2}
+				case "missing-question":
+					response = []byte{0, 1, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+				case "wrong-question":
+					response = testDNSMessage(t, true, dnsmessage.TypeA)
+				case "not-response":
+					response = testDNSMessage(t, false, dnsmessage.TypeAAAA)
+				}
+				f, startErr := StartProfileDNSForwarder(context.Background(), functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { return response, err }))
+				if startErr != nil {
+					t.Fatal(startErr)
+				}
+				defer f.Close()
+				conn := testDNSConn(t, f, network)
+				writeDNSQuery(t, conn, network, testDNSMessage(t, false, dnsmessage.TypeAAAA))
+				msg := readDNSReply(t, conn, network)
+				if !msg.Header.Response || msg.Header.ID != 0xbeef || msg.Header.RCode != dnsmessage.RCodeServerFailure || !msg.Header.RecursionDesired || !msg.Header.CheckingDisabled || len(msg.Questions) != 1 || msg.Questions[0].Type != dnsmessage.TypeAAAA {
+					t.Fatalf("SERVFAIL = %+v", msg)
+				}
+				// TCP must remain usable after an upstream failure.
+				if network == "tcp" {
+					writeDNSQuery(t, conn, network, testDNSMessage(t, false, dnsmessage.TypeAAAA))
+					readDNSReply(t, conn, network)
+				}
+			})
+		}
+	}
+}
+
+func TestForwarderRequestBudgetAndContextTrait(t *testing.T) {
+	q := contextQueryer{functionQueryer: func(string, dnsmessage.Type) ([]byte, error) {
+		t.Error("legacy method called")
+		return nil, errors.New("wrong method")
+	}, query: func(ctx context.Context) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }}
+	f, err := StartProfileDNSForwarder(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	conns := []net.Conn{testDNSConn(t, f, "udp"), testDNSConn(t, f, "tcp")}
+	start := time.Now()
+	for i, network := range []string{"udp", "tcp"} {
+		writeDNSQuery(t, conns[i], network, testDNSMessage(t, false, dnsmessage.TypeA))
+	}
+	for i, network := range []string{"udp", "tcp"} {
+		if msg := readDNSReply(t, conns[i], network); msg.Header.RCode != dnsmessage.RCodeServerFailure {
+			t.Fatalf("rcode = %v", msg.Header.RCode)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Fatalf("request took %v", elapsed)
+	}
+}
+
+func TestForwarderRetireDrainsUDPAndTCP(t *testing.T) {
+	for _, network := range []string{"udp", "tcp"} {
+		t.Run(network, func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			response := testDNSMessage(t, true, dnsmessage.TypeA)
+			q := functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { close(entered); <-release; return response, nil })
+			f, err := StartProfileDNSForwarder(context.Background(), q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			defer func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}()
+			conn := testDNSConn(t, f, network)
+			writeDNSQuery(t, conn, network, testDNSMessage(t, false, dnsmessage.TypeA))
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("query did not start")
+			}
+			f.Retire()
+			// Further generations retire independently, not by closing their predecessor.
+			for i := 0; i < 2; i++ {
+				next, err := StartProfileDNSForwarder(context.Background(), q)
+				if err != nil {
+					t.Fatal(err)
+				}
+				next.Retire()
+				next.Close()
+			}
+			close(release)
+			if msg := readDNSReply(t, conn, network); msg.Header.RCode != dnsmessage.RCodeSuccess {
+				t.Fatalf("rcode = %v", msg.Header.RCode)
+			}
+			select {
+			case <-f.done:
+			case <-time.After(time.Second):
+				t.Fatal("retired forwarder did not close")
+			}
+		})
+	}
+}
+
+func TestForwarderParentCancellationClosesIdleTCP(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f, err := StartProfileDNSForwarder(ctx, functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { return nil, errors.New("unused") }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	conn := testDNSConn(t, f, "tcp")
+	cancel()
+	select {
+	case <-f.done:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not close idle TCP")
+	}
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("TCP connection remained open")
+	}
+}
+
+func TestForwarderLegacyWorkerBoundSurvivesTimeouts(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{}, 16)
+	finished := make(chan struct{}, 16)
+	q := functionQueryer(func(string, dnsmessage.Type) ([]byte, error) {
+		started <- struct{}{}
+		<-release
+		finished <- struct{}{}
+		return nil, errors.New("released")
+	})
+	f, err := StartProfileDNSForwarder(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	query := testDNSMessage(t, false, dnsmessage.TypeA)
+	for i := 0; i < 20; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		_, err := f.exchange(ctx, "udp", query)
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("error = %v", err)
+		}
+	}
+	if len(started) != 16 {
+		t.Fatalf("started %d workers, want 16", len(started))
+	}
+	close(release)
+	for i := 0; i < 16; i++ {
+		select {
+		case <-finished:
+		case <-time.After(time.Second):
+			t.Fatal("worker did not finish")
+		}
+	}
+}
+
+type pipeDNSDialer struct{ done chan struct{} }
+
+func (d pipeDNSDialer) Dial(context.Context, string, string) (net.Conn, error) {
+	client, server := net.Pipe()
+	go func() { defer close(d.done); defer server.Close(); io.Copy(io.Discard, server) }()
+	return client, nil
+}
+
+func TestForwarderClassicIOHonorsContextDeadlineAndCancellation(t *testing.T) {
+	for _, network := range []string{"udp", "tcp"} {
+		for _, cancelOnly := range []bool{false, true} {
+			t.Run(network+"/cancel="+fmt.Sprint(cancelOnly), func(t *testing.T) {
+				done := make(chan struct{})
+				f := &Forwarder{dialer: pipeDNSDialer{done}}
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				if cancelOnly {
+					cancel()
+					ctx, cancel = context.WithCancel(context.Background())
+					timer := time.AfterFunc(20*time.Millisecond, cancel)
+					defer timer.Stop()
+				}
+				defer cancel()
+				start := time.Now()
+				_, err := f.exchangeClassic(ctx, network, &dnstype.Resolver{Addr: "127.0.0.1:53"}, testDNSMessage(t, false, dnsmessage.TypeA))
+				if err == nil {
+					t.Fatal("exchange succeeded")
+				}
+				if time.Since(start) > time.Second {
+					t.Fatal("exchange ignored request context")
+				}
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Fatal("upstream did not close")
+				}
+			})
+		}
+	}
+}
+
+func TestForwarderRejectsMalformedQueries(t *testing.T) {
+	f := &Forwarder{ctx: context.Background(), queryer: functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { t.Error("malformed query forwarded"); return nil, nil })}
+	for _, query := range [][]byte{{1, 2}, testDNSMessage(t, true, dnsmessage.TypeA), testDNSMessage(t, false, dnsmessage.TypeA)[:13]} {
+		if reply := f.answer("udp", query); reply != nil {
+			t.Fatalf("malformed query generated response %x", reply)
+		}
+	}
+}
+
+func TestForwarderRetireClosesPartialTCPReads(t *testing.T) {
+	f, err := StartProfileDNSForwarder(context.Background(), functionQueryer(func(string, dnsmessage.Type) ([]byte, error) {
+		t.Error("partial query reached upstream")
+		return nil, errors.New("unused")
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	conn := testDNSConn(t, f, "tcp")
+	// Stop halfway through the two-byte length prefix.
+	if _, err := conn.Write([]byte{0}); err != nil {
+		t.Fatal(err)
+	}
+	f.Retire()
+	f.Retire() // idempotent; do not extend a draining generation's deadlines.
+	select {
+	case <-f.done:
+	case <-time.After(time.Second):
+		t.Fatal("partial TCP read prevented retirement")
 	}
 }

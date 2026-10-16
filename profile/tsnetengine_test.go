@@ -1,8 +1,13 @@
 package profile
 
 import (
+	"context"
+	"errors"
 	"net/netip"
 	"testing"
+	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 
 	"github.com/maisem/tailmix/tunmux"
 	"tailscale.com/ipn"
@@ -158,5 +163,31 @@ func TestServiceStatusesBuildStableMagicDNSTargets(t *testing.T) {
 	}, "")
 	if len(withoutDNS) != 1 || withoutDNS[0].DNSName != "" {
 		t.Fatalf("service without MagicDNS suffix = %+v", withoutDNS)
+	}
+}
+
+func TestTSNetEngineDNSContextBoundsSharedCapacity(t *testing.T) {
+	engine := NewTSNetEngine(TSNetConfig{})
+	engine.dnsOnce.Do(func() { engine.dnsSlots = make(chan struct{}, 16) })
+	// Simulate outstanding contextless backend calls belonging to older
+	// forwarders. New generations must wait on this same engine-wide gate.
+	for i := 0; i < cap(engine.dnsSlots); i++ {
+		engine.dnsSlots <- struct{}{}
+	}
+	defer func() {
+		for len(engine.dnsSlots) != 0 {
+			<-engine.dnsSlots
+		}
+	}()
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		_, err := engine.QueryDNSContext(ctx, "example.com.", dnsmessage.TypeA)
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("saturated engine query = %v, want deadline", err)
+		}
+	}
+	if len(engine.dnsSlots) != 16 {
+		t.Fatalf("timed-out callers released active backend slots: %d", len(engine.dnsSlots))
 	}
 }
