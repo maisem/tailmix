@@ -1008,8 +1008,8 @@ func runTailscale(ctx context.Context, client managementClient, socketDir string
 	return deps.runCLI(ctx, cliArgs)
 }
 
-// defaultProfileName names the profile that "tailmix ts up" and
-// "tailmix ts login" create when no Tailscale profile exists yet.
+// defaultProfileName names the profile that "tailmix ts login" and
+// "tailmix ts up" create when no Tailscale profile exists yet.
 const defaultProfileName = "default"
 
 // implicitTailscaleProfile selects the profile for a "tailmix ts" command run
@@ -1035,7 +1035,7 @@ func implicitTailscaleProfile(ctx context.Context, client managementClient, subc
 		return only, nil
 	case 0:
 		if subcommand != "up" && subcommand != "login" {
-			return controlapi.Profile{}, usageError{`no Tailscale profiles yet; run "tailmix ts up" to create one`}
+			return controlapi.Profile{}, usageError{`no Tailscale profiles yet; run "sudo tailmix ts login" to create one`}
 		}
 		created, err := client.AddProfile(ctx, controlapi.AddProfileRequest{Name: defaultProfileName})
 		if err != nil {
@@ -1765,7 +1765,7 @@ const tailscaleHelp = `Usage:
 Profile option: -p, --profile <profile>
 
 --profile may be omitted when exactly one Tailscale profile exists. If none
-exist, "tailmix ts up" and "tailmix ts login" create a profile named "default".
+exist, "tailmix ts login" (or "tailmix ts up") creates a profile named "default".
 
 All remaining arguments are passed unchanged to Tailscale's upstream CLI.
 The --socket option is owned by tailmix and cannot be overridden.

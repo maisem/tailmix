@@ -37,7 +37,7 @@ For Linux prerequisites and troubleshooting, see the
 ### 2. Connect your first tailnet
 
 ```sh
-sudo tailmix ts up
+sudo tailmix ts login
 ```
 
 Open the login link it prints. tailmix creates a profile named `default` for

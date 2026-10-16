@@ -134,7 +134,7 @@ policy remains authoritative.
 raw WireGuard and removed profiles are not counted. With several, it fails and
 lists their names. With none, `up` and `login` first add a profile named
 `default` and report it on standard error, so a first-time setup is one
-command (`sudo tailmix ts up`). Other subcommands fail instead of creating
+command (`sudo tailmix ts login`). Other subcommands fail instead of creating
 state.
 
 Every tailmix `--profile` option also accepts the short form `-p`. The

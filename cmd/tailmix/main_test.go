@@ -1169,7 +1169,7 @@ func TestTSWithoutProfile(t *testing.T) {
 			profiles:   []controlapi.Profile{},
 			args:       []string{"ts", "status"},
 			wantCode:   2,
-			wantStderr: `no Tailscale profiles yet; run "tailmix ts up" to create one`,
+			wantStderr: `no Tailscale profiles yet; run "sudo tailmix ts login" to create one`,
 		},
 		{
 			name: "multiple profiles require a choice",
