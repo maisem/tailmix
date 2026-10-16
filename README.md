@@ -36,14 +36,12 @@ For Linux prerequisites and troubleshooting, see the
 
 ### 2. Connect your first tailnet
 
-Pick a short profile name such as `work`:
-
 ```sh
-sudo tailmix profiles add work
-sudo tailmix ts --profile work up
+sudo tailmix ts up
 ```
 
-Open the login link printed by the second command.
+Open the login link it prints. tailmix creates a profile named `default` for
+this tailnet.
 
 ### 3. Check it
 
@@ -51,13 +49,22 @@ Open the login link printed by the second command.
 tailmix version
 tailmixd --version
 tailmix status
-tailmix ts --profile work status
+tailmix ts status
 ```
 
-If the version prints, `work` is listed, and the final command shows the
+If the version prints, `default` is listed, and the final command shows the
 tailnet, you are done.
 
-To connect another tailnet, repeat step 2 with a different profile name.
+To connect another tailnet, add a named profile and log in to it:
+
+```sh
+sudo tailmix profiles add work
+sudo tailmix ts -p work login
+```
+
+`tailmix ts` uses the only profile when there is one. Once you have several,
+pick one with `-p`. Rename the first with
+`sudo tailmix profiles rename default home`.
 
 Direct installations check stable GitHub releases after a randomized startup
 delay and then daily. Both binaries switch versions together and the daemon

@@ -41,6 +41,7 @@ type fakeManagementClient struct {
 	wireGuardProfile controlapi.WireGuardProfile
 	wireGuardName    string
 	wireGuardShields bool
+	added            []controlapi.AddProfileRequest
 }
 
 func (f *fakeManagementClient) Version(context.Context) (tailmixversion.Meta, error) {
@@ -70,7 +71,8 @@ func (f *fakeManagementClient) Profile(_ context.Context, name string) (controla
 	f.profileName = name
 	return f.profile, nil
 }
-func (f *fakeManagementClient) AddProfile(context.Context, controlapi.AddProfileRequest) (controlapi.Profile, error) {
+func (f *fakeManagementClient) AddProfile(_ context.Context, request controlapi.AddProfileRequest) (controlapi.Profile, error) {
+	f.added = append(f.added, request)
 	return f.profile, nil
 }
 func (f *fakeManagementClient) PatchProfile(context.Context, string, controlapi.PatchProfileRequest) (controlapi.Profile, error) {
@@ -1116,5 +1118,105 @@ func TestSearchListIncludesEveryDetectedSearchDomain(t *testing.T) {
 		if strings.Contains(output.String(), unwanted) {
 			t.Fatalf("search domain list unexpectedly contains %q:\n%s", unwanted, output.String())
 		}
+	}
+}
+
+func TestTSWithoutProfile(t *testing.T) {
+	work := controlapi.Profile{ID: "p_work", Name: "work", Kind: "tailscale", LocalAPISocket: "/tmp/work.sock"}
+	tests := []struct {
+		name       string
+		profiles   []controlapi.Profile
+		args       []string
+		wantCode   int
+		wantArgs   []string
+		wantAdded  bool
+		wantStderr string
+	}{
+		{
+			name:     "single profile",
+			profiles: []controlapi.Profile{work},
+			args:     []string{"ts", "status"},
+			wantArgs: []string{"--socket=/tmp/work.sock", "status"},
+		},
+		{
+			name: "ignores WireGuard and removed profiles",
+			profiles: []controlapi.Profile{
+				{ID: "p_lab", Name: "lab", Kind: "wireguard"},
+				{ID: "p_old", Name: "old", Kind: "tailscale", Removed: true},
+				work,
+			},
+			args:     []string{"ts", "up"},
+			wantArgs: []string{"--socket=/tmp/work.sock", "up"},
+		},
+		{
+			name:       "first up creates default profile",
+			profiles:   []controlapi.Profile{},
+			args:       []string{"ts", "up", "--accept-routes"},
+			wantArgs:   []string{"--socket=/tmp/work.sock", "up", "--accept-routes"},
+			wantAdded:  true,
+			wantStderr: `Created profile "work".`,
+		},
+		{
+			name:       "first login creates default profile",
+			profiles:   []controlapi.Profile{},
+			args:       []string{"tailscale", "login"},
+			wantArgs:   []string{"--socket=/tmp/work.sock", "login"},
+			wantAdded:  true,
+			wantStderr: "Created profile",
+		},
+		{
+			name:       "other commands do not create profiles",
+			profiles:   []controlapi.Profile{},
+			args:       []string{"ts", "status"},
+			wantCode:   2,
+			wantStderr: `no Tailscale profiles yet; run "tailmix ts up" to create one`,
+		},
+		{
+			name: "multiple profiles require a choice",
+			profiles: []controlapi.Profile{
+				{ID: "p_home", Name: "home", Kind: "tailscale"},
+				work,
+			},
+			args:       []string{"ts", "up"},
+			wantCode:   2,
+			wantStderr: "multiple profiles (home, work); choose one with --profile <profile>",
+		},
+		{
+			name:       "empty profile flag",
+			profiles:   []controlapi.Profile{work},
+			args:       []string{"ts", "--profile=", "up"},
+			wantCode:   2,
+			wantStderr: "--profile cannot be empty",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// AddProfile returns client.profile, standing in for the daemon's
+			// newly created profile.
+			client := &fakeManagementClient{profile: work, statusProfiles: tt.profiles}
+			var gotArgs []string
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), tt.args,
+				testDependencies(client, io.Discard, &stderr, func(_ context.Context, args []string) error {
+					gotArgs = slices.Clone(args)
+					return nil
+				}))
+			if code != tt.wantCode {
+				t.Fatalf("exit = %d, want %d; stderr = %q", code, tt.wantCode, stderr.String())
+			}
+			if !slices.Equal(gotArgs, tt.wantArgs) {
+				t.Errorf("upstream args = %q, want %q", gotArgs, tt.wantArgs)
+			}
+			if tt.wantAdded {
+				if len(client.added) != 1 || client.added[0] != (controlapi.AddProfileRequest{Name: defaultProfileName}) {
+					t.Errorf("added = %+v, want one %q profile", client.added, defaultProfileName)
+				}
+			} else if len(client.added) != 0 {
+				t.Errorf("unexpectedly added %+v", client.added)
+			}
+			if !strings.Contains(stderr.String(), tt.wantStderr) {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tt.wantStderr)
+			}
+		})
 	}
 }

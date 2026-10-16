@@ -19,23 +19,24 @@ You need systemd, `curl`, and root access.
    sudo sh install.sh
    ```
 
-3. Add a profile and log in:
+3. Log in to your first tailnet:
 
    ```sh
-   sudo tailmix profiles add work
-   sudo tailmix ts --profile work up
+   sudo tailmix ts up
    ```
 
-   Open the login link printed by the second command.
+   Open the login link it prints. tailmix creates a profile named `default`.
 
 4. Check it:
 
    ```sh
    tailmix status
-   tailmix ts --profile work status
+   tailmix ts status
    ```
 
-If `work` is listed and the second command shows the tailnet, you are done.
+If `default` is listed and the second command shows the tailnet, you are done.
+To connect another tailnet, run `sudo tailmix profiles add work` and then
+`sudo tailmix ts -p work login`.
 
 The installer enables `tailmixd` at boot and starts it immediately. It keeps
 state in `/var/lib/tailmix` and runtime sockets in `/run/tailmix`.
