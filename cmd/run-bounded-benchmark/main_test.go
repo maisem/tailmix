@@ -26,6 +26,11 @@ func TestBoundedHelper(t *testing.T) {
 	switch mode {
 	case "success":
 		os.Exit(0)
+	case "artifact":
+		if err := os.WriteFile("core", []byte("test artifact"), 0600); err != nil {
+			os.Exit(2)
+		}
+		os.Exit(0)
 	case "failure":
 		os.Exit(7)
 	case "descendant":
@@ -63,11 +68,44 @@ func TestBoundedHelper(t *testing.T) {
 
 func helperCommand(t *testing.T, mode string) []string {
 	t.Helper()
+	// An immediate timeout can deliver SIGQUIT before the child installs its
+	// runtime handlers. Keep any resulting core dump in test-owned storage.
+	t.Chdir(t.TempDir())
 	t.Setenv("TAILMIX_BOUNDED_HELPER", mode)
 	// Race-instrumented child processes otherwise pause for one second during
 	// os.Exit, obscuring the leader-exited-before-grace regression.
 	t.Setenv("GORACE", "atexit_sleep_ms=0")
 	return []string{os.Args[0], "-test.run=^TestBoundedHelper$"}
+}
+
+func TestHelperArtifactsAreRemoved(t *testing.T) {
+	original, err := os.Getwd()
+	if err != nil {
+		t.Fatal("cannot identify original working directory")
+	}
+	var workdir string
+	// Register first so this runs after the helper's temporary-directory cleanup.
+	t.Cleanup(func() {
+		if workdir != "" {
+			if _, err := os.Stat(workdir); !os.IsNotExist(err) {
+				t.Error("helper artifact directory survived cleanup")
+			}
+		}
+	})
+	command := helperCommand(t, "artifact")
+	cwd, err := os.Getwd()
+	if err != nil || cwd == original {
+		t.Fatal("helper still uses the package working directory")
+	}
+	workdir = cwd
+	status, timedOut := runBounded(5*time.Second, time.Millisecond, command)
+	if status != 0 || timedOut {
+		t.Fatal("artifact helper did not exit successfully")
+	}
+	data, err := os.ReadFile(filepath.Join(workdir, "core"))
+	if err != nil || string(data) != "test artifact" {
+		t.Fatal("child artifact was not confined to test-owned storage")
+	}
 }
 
 func TestRunBoundedExitStatus(t *testing.T) {
