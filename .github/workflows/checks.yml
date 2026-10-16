@@ -1,4 +1,5 @@
 name: checks
+run-name: checks${{ inputs.request_id && format(' / {0}', inputs.request_id) || '' }}
 
 on:
   pull_request:
@@ -9,6 +10,8 @@ on:
       - Makefile
       - licenses/**
       - scripts/licenses.sh
+      - scripts/ci*.py
+      - integration/**
       - .github/workflows/checks.yml
   push:
     branches: [main]
@@ -19,19 +22,89 @@ on:
       - Makefile
       - licenses/**
       - scripts/licenses.sh
+      - scripts/ci*.py
+      - integration/**
       - .github/workflows/checks.yml
   schedule:
     - cron: "23 9 * * 1"
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Checks to run
+        type: choice
+        options: [all, check, linux-network]
+        default: all
+      revision:
+        description: Exact commit SHA to test (defaults to the event commit)
+        type: string
+      request_id:
+        description: Caller correlation ID
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   check:
+    if: github.event_name != 'workflow_dispatch' || inputs.suite != 'linux-network'
     runs-on: [self-hosted, tailmix-vm]
     container:
       image: golang:1.27.2
     steps:
       - uses: actions/checkout@v6
-      - run: make check
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+      - name: Verify requested revision
+        env:
+          EXPECTED_REVISION: ${{ inputs.revision }}
+        run: |
+          echo "GIT_CONFIG_COUNT=1" >> "$GITHUB_ENV"
+          echo "GIT_CONFIG_KEY_0=safe.directory" >> "$GITHUB_ENV"
+          printf 'GIT_CONFIG_VALUE_0=%s\n' "$PWD" >> "$GITHUB_ENV"
+          if [ -n "$EXPECTED_REVISION" ]; then
+            test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$EXPECTED_REVISION"
+          fi
+      - name: Install CI orchestration test runtime
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3
+      - run: make check check-ci
+
+  linux-network:
+    if: github.event_name != 'workflow_dispatch' || inputs.suite != 'check'
+    runs-on: [self-hosted, tailmix-vm]
+    container:
+      image: golang:1.27.2
+    timeout-minutes: 20
+    env:
+      GOMAXPROCS: "2"
+      GOFLAGS: "-p=1"
+      TAILMIX_E2E_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-linux-network
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+      - name: Verify requested revision
+        env:
+          EXPECTED_REVISION: ${{ inputs.revision }}
+        run: |
+          echo "GIT_CONFIG_COUNT=1" >> "$GITHUB_ENV"
+          echo "GIT_CONFIG_KEY_0=safe.directory" >> "$GITHUB_ENV"
+          printf 'GIT_CONFIG_VALUE_0=%s\n' "$PWD" >> "$GITHUB_ENV"
+          if [ -n "$EXPECTED_REVISION" ]; then
+            test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$EXPECTED_REVISION"
+          fi
+      - name: Install networking test tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            docker-cli docker-buildx iproute2
+      - name: Test real Linux routing and DNS
+        run: make check-linux-network
+      - name: Clean up test resources
+        if: always()
+        run: |
+          if command -v docker >/dev/null && \
+             test -f cmd/linux-network-e2e/main.go; then
+            make clean-linux-network
+          fi

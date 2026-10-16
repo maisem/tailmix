@@ -2,6 +2,8 @@ PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 DESTDIR ?=
 GO ?= go
+PYTHON ?= python3
+CI_ARGS ?=
 LINUX_NETWORK_ARGS ?=
 INSTALL ?= install
 SED ?= sed
@@ -9,7 +11,7 @@ SYSTEMCTL ?= systemctl
 SYSTEMD_UNIT_DIR ?= $(PREFIX)/lib/systemd/system
 SYSTEMD_UNIT ?= tailmixd.service
 
-.PHONY: check check-linux-network clean-linux-network install install-systemd install-test licenses licenses-check release-check
+.PHONY: check check-linux-network clean-linux-network check-ci ci install install-systemd install-test licenses licenses-check release-check
 
 check:
 	$(GO) test ./...
@@ -19,6 +21,12 @@ check:
 	$(GO) mod tidy -diff
 	$(MAKE) licenses-check
 	$(MAKE) install-test
+
+ci:
+	@$(PYTHON) scripts/ci.py $(CI_ARGS)
+
+check-ci:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/ci_test.py
 
 check-linux-network:
 	$(GO) test ./cmd/linux-network-e2e
