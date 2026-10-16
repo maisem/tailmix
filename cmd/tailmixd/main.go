@@ -515,7 +515,11 @@ func tsnetConfig(rp runtimeProfile, stderr io.Writer, verbose, logUpload bool, l
 		UserLogf:       prefixedLogf(stderr, rp.State.ID),
 		LogUpload:      logUpload,
 		LogUploadURL:   logUploadURL,
-		Tun:            rp.Tun,
+	}
+	// Keep the interface nil in userspace mode. Assigning a nil *ChanTUN
+	// makes tsnet treat it as a supplied device and dereference it.
+	if rp.Tun != nil {
+		cfg.Tun = rp.Tun
 	}
 	if verbose {
 		cfg.Logf = prefixedLogf(stderr, rp.State.ID)
