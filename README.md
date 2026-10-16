@@ -15,21 +15,14 @@ compete with tailmix for routes and DNS.
 
 ### 1. Install and start tailmix
 
-Choose your operating system.
-
-**macOS**
+On macOS or Linux with systemd:
 
 ```sh
-curl -fLO https://github.com/maisem/tailmix/releases/latest/download/install.sh
-sudo sh install.sh
+curl -fsSL https://tailmix.net/install.sh | sudo sh
 ```
 
-**Linux with systemd**
-
-```sh
-curl -fLO https://github.com/maisem/tailmix/releases/latest/download/install.sh
-sudo sh install.sh
-```
+This serves `install.sh` from the latest GitHub release. To read it before
+running it, download it first with `curl -fLO https://tailmix.net/install.sh`.
 
 For Linux prerequisites and troubleshooting, see the
 [systemd guide](docs/linux-install.md).
@@ -46,14 +39,11 @@ this tailnet.
 ### 3. Check it
 
 ```sh
-tailmix version
-tailmixd --version
 tailmix status
 tailmix ts status
 ```
 
-If the version prints, `default` is listed, and the final command shows the
-tailnet, you are done.
+If `default` is listed and the second command shows the tailnet, you are done.
 
 To connect another tailnet, add a named profile and log in to it:
 

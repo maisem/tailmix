@@ -15,7 +15,7 @@ You need systemd, `curl`, and root access.
    the service:
 
    ```sh
-   curl -fLO https://github.com/maisem/tailmix/releases/latest/download/install.sh
+   curl -fLO https://tailmix.net/install.sh
    sudo sh install.sh
    ```
 
