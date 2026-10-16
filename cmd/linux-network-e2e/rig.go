@@ -342,7 +342,23 @@ func (r *rig) setupPeer() {
 	peer := decode[tailStatus](r.e("peer", "tailscale", "--socket=/private/tailscaled.sock", "status", "--json"))
 	r.peerIPs = peer.Self.TailscaleIPs
 	require(contains(r.peerIPs, "100.64.0.1"), "fresh sequential allocator")
-	require(privateWrite(filepath.Join(r.tmp, "peer", "dnsmasq.conf"), dnsmasqConfig) == nil, "private resolver config")
+	var v4, v6 string
+	for _, text := range r.peerIPs {
+		ip := must(netip.ParseAddr(text))
+		if ip.Is4() {
+			v4 = ip.String()
+		} else {
+			v6 = ip.String()
+		}
+	}
+	require(v4 != "" && v6 != "", "private resolver dual-stack targets")
+	config := dnsmasqConfig + fmt.Sprintf(`host-record=proxy.corp.test,%s,%s,60
+host-record=proxy4.corp.test,%s,60
+host-record=proxy6.corp.test,%s,60
+host-record=outage.corp.test,%s,60
+cname=alias.corp.test,proxy.corp.test
+`, v4, v6, v4, v6, v4)
+	require(privateWrite(filepath.Join(r.tmp, "peer", "dnsmasq.conf"), config) == nil, "private resolver config")
 	r.e("peer", "dnsmasq", "--conf-file=/private/dnsmasq.conf")
 }
 

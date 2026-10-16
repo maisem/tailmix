@@ -509,7 +509,7 @@ func (s *supervisor) reconcileLocked() (err error) {
 			profiles = append(profiles, socksproxy.Profile{
 				ID:             status.ProfileID,
 				MagicDNSSuffix: status.MagicDNSSuffix,
-				Dialer:         managed.runtime.Engine,
+				Dialer:         tailmixprofile.SOCKSDialer{Engine: managed.runtime.Engine},
 			})
 		}
 		var subnetRoutes []socksproxy.SubnetRoute

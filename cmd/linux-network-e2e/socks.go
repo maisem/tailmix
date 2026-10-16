@@ -120,6 +120,11 @@ func (r *rig) socksTests() {
 	r.start("client", r.image, false, []string{
 		"--env-file", filepath.Join(r.tmp, "client", "env"),
 		"--mount", "type=bind,src=" + r.bind(r.binaryDir) + ",dst=/checkout,readonly",
+		// A host-resolver fallback would succeed for these names even when
+		// the profile resolver rejects them or is unavailable.
+		"--add-host=missing.corp.test:100.64.0.1",
+		"--add-host=outage.corp.test:100.64.0.1",
+		"--add-host=proxy.corp.test:127.0.0.1",
 	}, nil)
 	r.e("client", "test", "!", "-e", "/dev/net/tun")
 	r.e("client", "ln", "-s", "/checkout/tailmix", "/bin/tailmix")
@@ -175,6 +180,20 @@ func (r *rig) socksTests() {
 	check("effective IPv6 stream", net.JoinHostPort(effective[1], "18080"), true)
 	check("MagicDNS stream", "resolver.isolated.test:18080", true)
 	check("normalized MagicDNS stream", "RESOLVER.ISOLATED.TEST.:18080", true)
+	check("private dual-stack DNS stream", "proxy.corp.test:18080", true)
+	check("private IPv4-only DNS stream", "proxy4.corp.test:18080", true)
+	check("private IPv6-only DNS stream", "proxy6.corp.test:18080", true)
+	check("private DNS alias stream", "alias.corp.test:18080", true)
+	check("private NXDOMAIN without host fallback", "missing.corp.test:18080", false)
+	if err := guarded(func() {
+		r.pause("STOP")
+		check("private resolver outage without host fallback", "outage.corp.test:18080", false)
+	}); err != nil {
+		r.pause("CONT")
+		panic(err)
+	}
+	r.pause("CONT")
+	check("private resolver recovery", "outage.corp.test:18080", true)
 
 	for _, ip := range r.peerIPs {
 		check("canonical address refusal", net.JoinHostPort(ip, "18080"), false)
