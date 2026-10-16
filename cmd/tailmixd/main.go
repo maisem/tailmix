@@ -25,9 +25,9 @@ import (
 	"github.com/maisem/tailmix/profilesocket"
 	"github.com/maisem/tailmix/routingpolicy"
 	"github.com/maisem/tailmix/state"
-	"github.com/maisem/tailmix/tunmux"
 	tailmixupdate "github.com/maisem/tailmix/update"
 	tailmixversion "github.com/maisem/tailmix/version"
+	"github.com/tailscale/wireguard-go/tun"
 	"tailscale.com/net/tsaddr"
 )
 
@@ -64,7 +64,7 @@ type runtimeProfile struct {
 	State      state.Profile
 	AuthKeyEnv string
 	Engine     tailmixprofile.Engine
-	Tun        *tunmux.ChanTUN
+	Tun        tun.Device
 }
 
 func main() {
@@ -515,11 +515,7 @@ func tsnetConfig(rp runtimeProfile, stderr io.Writer, verbose, logUpload bool, l
 		UserLogf:       prefixedLogf(stderr, rp.State.ID),
 		LogUpload:      logUpload,
 		LogUploadURL:   logUploadURL,
-	}
-	// Keep the interface nil in userspace mode. Assigning a nil *ChanTUN
-	// makes tsnet treat it as a supplied device and dereference it.
-	if rp.Tun != nil {
-		cfg.Tun = rp.Tun
+		Tun:            rp.Tun,
 	}
 	if verbose {
 		cfg.Logf = prefixedLogf(stderr, rp.State.ID)

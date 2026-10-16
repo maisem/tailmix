@@ -6,6 +6,7 @@ import (
 
 	"github.com/maisem/tailmix/state"
 	"github.com/maisem/tailmix/tunmux"
+	"github.com/tailscale/wireguard-go/tun"
 )
 
 func TestTSNetConfigTUNSelection(t *testing.T) {
@@ -21,13 +22,18 @@ func TestTSNetConfigTUNSelection(t *testing.T) {
 			t.Fatal("userspace configuration must have a nil TUN interface")
 		}
 	})
-	t.Run("custom_TUN", func(t *testing.T) {
-		device := tunmux.NewChanTUN("test")
-		t.Cleanup(func() { _ = device.Close() })
-		rp.Tun = device
-		cfg, err := tsnetConfig(rp, io.Discard, false, false, "")
-		if err != nil || cfg.Tun != device {
-			t.Fatal("custom TUN was not preserved")
-		}
-	})
+	for _, name := range []string{"custom_TUN", "wrapped_TUN"} {
+		t.Run(name, func(t *testing.T) {
+			device := tunmux.NewChanTUN("test")
+			t.Cleanup(func() { _ = device.Close() })
+			rp.Tun = device
+			if name == "wrapped_TUN" {
+				rp.Tun = struct{ tun.Device }{device}
+			}
+			cfg, err := tsnetConfig(rp, io.Discard, false, false, "")
+			if err != nil || cfg.Tun != rp.Tun {
+				t.Fatal("custom TUN interface was not preserved")
+			}
+		})
+	}
 }

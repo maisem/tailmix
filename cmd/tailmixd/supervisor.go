@@ -335,8 +335,10 @@ func (s *supervisor) startProfileLockedWithWireGuardTransition(configured state.
 	}
 	runtimeCtx, cancel := context.WithCancel(s.ctx)
 	rp := runtimeProfile{State: configured, AuthKeyEnv: authKeyEnv}
+	var profileTUN *tunmux.ChanTUN
 	if s.cfg.Mode == "tun" {
-		rp.Tun = tunmux.NewChanTUN("tailmix-" + dnsLabel(configured.ID))
+		profileTUN = tunmux.NewChanTUN("tailmix-" + dnsLabel(configured.ID))
+		rp.Tun = profileTUN
 	}
 	switch configured.Kind {
 	case "", state.ProfileKindTailscale:
@@ -384,7 +386,7 @@ func (s *supervisor) startProfileLockedWithWireGuardTransition(configured state.
 	managed := &managedProfile{runtime: rp, cancel: cancel}
 	s.runtimes[configured.ID] = managed
 	if s.mux != nil {
-		if err := s.mux.AddProfile(configured.ID, rp.Tun); err != nil {
+		if err := s.mux.AddProfile(configured.ID, profileTUN); err != nil {
 			delete(s.runtimes, configured.ID)
 			cancel()
 			_ = rp.Engine.Close()
