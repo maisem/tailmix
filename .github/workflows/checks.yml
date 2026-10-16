@@ -99,7 +99,7 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             docker-cli docker-buildx iproute2
-      - name: Test real Linux routing and DNS
+      - name: Test real Linux routing, DNS and SOCKS
         run: make check-linux-network
       - name: Clean up test resources
         if: always()

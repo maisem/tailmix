@@ -48,6 +48,23 @@ func parseOptions(args []string) (options, bool, error) {
 }
 
 func runMain(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 1 && (args[0] == "--serve-echo" || args[0] == "--echo-probe" || args[0] == "--socks-probe") {
+		err := guarded(func() {
+			if args[0] == "--serve-echo" {
+				serveEcho()
+			} else if args[0] == "--echo-probe" {
+				echoProbe()
+			} else {
+				socksProbe()
+			}
+		})
+		if err != nil {
+			fmt.Fprintln(stdout, err)
+			fmt.Fprintln(stderr, "linux-network: FAIL [SOCKS fixture]")
+			return 1
+		}
+		return 0
+	}
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		fmt.Fprintln(stdout, "Usage: linux-network-e2e [--binary-dir DIR] [--timeout SECONDS] [--cleanup]")
 		fmt.Fprintln(stdout, "Run real isolated Linux networking tests (default timeout: 720 seconds).")
@@ -93,7 +110,7 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	failed := false
-	if err := guarded(func() { r.setup(); r.tests() }); err != nil {
+	if err := guarded(func() { r.setup(); r.tests(); r.socksTests() }); err != nil {
 		fmt.Fprintf(stderr, "linux-network: FAIL [%s] %s\n", r.stage, err)
 		failed = true
 	}
