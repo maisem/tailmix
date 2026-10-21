@@ -11,12 +11,151 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 	"tailscale.com/types/dnstype"
 )
+
+func collideForwarderTCP(t *testing.T, network string, addr *net.TCPAddr) (*net.TCPListener, error) {
+	t.Helper()
+	blocker, err := net.ListenTCP(network, addr)
+	if err != nil {
+		if !errors.Is(err, errAddrInUse) {
+			t.Fatal(err)
+		}
+		return nil, err
+	}
+	t.Cleanup(func() { blocker.Close() })
+	return net.ListenTCP(network, addr)
+}
+
+func checkForwarderUDPClosed(t *testing.T, udp *net.UDPConn) {
+	t.Helper()
+	if err := udp.SetReadDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("rejected UDP listener still open: %v", err)
+	}
+}
+
+func TestListenForwarderRetriesTCPPortCollision(t *testing.T) {
+	var candidates []*net.UDPConn
+	attempts := 0
+	udp, tcp, err := listenForwarder(context.Background(),
+		func(network string, addr *net.UDPAddr) (*net.UDPConn, error) {
+			for _, candidate := range candidates {
+				checkForwarderUDPClosed(t, candidate)
+			}
+			conn, err := net.ListenUDP(network, addr)
+			if err == nil {
+				candidates = append(candidates, conn)
+				t.Cleanup(func() { conn.Close() })
+			}
+			return conn, err
+		},
+		func(network string, addr *net.TCPAddr) (*net.TCPListener, error) {
+			attempts++
+			if attempts == 1 {
+				return collideForwarderTCP(t, network, addr)
+			}
+			return net.ListenTCP(network, addr)
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { tcp.Close() })
+	if attempts < 2 {
+		t.Fatalf("TCP bind attempts = %d, want at least 2", attempts)
+	}
+	if got, want := tcp.Addr().String(), udp.LocalAddr().String(); got != want {
+		t.Fatalf("TCP address = %q, want UDP address %q", got, want)
+	}
+	if err := udp.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatalf("successful UDP listener closed: %v", err)
+	}
+}
+
+func TestListenForwarderFailures(t *testing.T) {
+	udpErr := errors.New("UDP bind failed")
+	tcpErr := &net.OpError{Op: "listen", Net: "tcp", Err: syscall.EACCES}
+	for _, tt := range []struct {
+		name         string
+		udpErr       error
+		tcpErr       error
+		wantAttempts int
+	}{
+		{"exhausted", nil, errAddrInUse, forwarderListenAttempts},
+		{"TCP error", nil, tcpErr, 1},
+		{"UDP error", udpErr, nil, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var candidates []*net.UDPConn
+			udpAttempts, tcpAttempts := 0, 0
+			udp, tcp, err := listenForwarder(context.Background(),
+				func(network string, addr *net.UDPAddr) (*net.UDPConn, error) {
+					udpAttempts++
+					for _, candidate := range candidates {
+						checkForwarderUDPClosed(t, candidate)
+					}
+					if tt.udpErr != nil {
+						return nil, tt.udpErr
+					}
+					conn, err := net.ListenUDP(network, addr)
+					if err == nil {
+						candidates = append(candidates, conn)
+						t.Cleanup(func() { conn.Close() })
+					}
+					return conn, err
+				},
+				func(network string, addr *net.TCPAddr) (*net.TCPListener, error) {
+					tcpAttempts++
+					if tt.tcpErr == errAddrInUse {
+						return collideForwarderTCP(t, network, addr)
+					}
+					return nil, tt.tcpErr
+				})
+			wantErr := tt.tcpErr
+			wantUDPAttempts := tt.wantAttempts
+			if tt.udpErr != nil {
+				wantErr = tt.udpErr
+				wantUDPAttempts = 1
+			}
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("error = %v, want %v", err, wantErr)
+			}
+			if wantErr != errAddrInUse && err != wantErr {
+				t.Fatalf("error = %v, want original error", err)
+			}
+			if udp != nil || tcp != nil {
+				t.Fatal("failed bind returned a listener")
+			}
+			if udpAttempts != wantUDPAttempts || tcpAttempts != tt.wantAttempts {
+				t.Fatalf("UDP/TCP attempts = %d/%d, want %d/%d", udpAttempts, tcpAttempts, wantUDPAttempts, tt.wantAttempts)
+			}
+			for _, candidate := range candidates {
+				checkForwarderUDPClosed(t, candidate)
+			}
+		})
+	}
+}
+
+func TestListenForwarderCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	udp, tcp, err := listenForwarder(ctx,
+		func(string, *net.UDPAddr) (*net.UDPConn, error) {
+			t.Fatal("UDP bind called with canceled context")
+			return nil, nil
+		},
+		func(string, *net.TCPAddr) (*net.TCPListener, error) {
+			t.Fatal("TCP bind called with canceled context")
+			return nil, nil
+		})
+	if !errors.Is(err, context.Canceled) || udp != nil || tcp != nil {
+		t.Fatalf("listenForwarder = %v, %v, %v; want nil, nil, context.Canceled", udp, tcp, err)
+	}
+}
 
 type networkDialer struct {
 	mu    sync.Mutex

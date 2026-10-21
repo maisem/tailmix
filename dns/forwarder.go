@@ -75,16 +75,11 @@ func StartProfileDNSForwarder(ctx context.Context, queryer ProfileDNSQueryer) (*
 }
 
 func startForwarder(ctx context.Context, dialer ProfileDialer, queryer ProfileDNSQueryer, resolvers []*dnstype.Resolver) (*Forwarder, error) {
-	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	udp, tcp, err := listenForwarder(ctx, net.ListenUDP, net.ListenTCP)
 	if err != nil {
 		return nil, err
 	}
 	port := udp.LocalAddr().(*net.UDPAddr).Port
-	tcp, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
-	if err != nil {
-		_ = udp.Close()
-		return nil, err
-	}
 	forwarderCtx, cancel := context.WithCancel(ctx)
 	f := &Forwarder{
 		ctx:        forwarderCtx,
@@ -110,6 +105,36 @@ func startForwarder(ctx context.Context, dialer ProfileDialer, queryer ProfileDN
 		close(f.done)
 	}()
 	return f, nil
+}
+
+const forwarderListenAttempts = 10
+
+func listenForwarder(ctx context.Context,
+	listenUDP func(string, *net.UDPAddr) (*net.UDPConn, error),
+	listenTCP func(string, *net.TCPAddr) (*net.TCPListener, error),
+) (*net.UDPConn, *net.TCPListener, error) {
+	var err error
+	for range forwarderListenAttempts {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		udp, udpErr := listenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if udpErr != nil {
+			return nil, nil, udpErr
+		}
+		port := udp.LocalAddr().(*net.UDPAddr).Port
+		var tcp *net.TCPListener
+		tcp, err = listenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+		if err == nil {
+			return udp, tcp, nil
+		}
+		_ = udp.Close()
+		// UDP's ephemeral port can already be occupied in the TCP port space.
+		if !errors.Is(err, errAddrInUse) {
+			return nil, nil, err
+		}
+	}
+	return nil, nil, err
 }
 
 func (f *Forwarder) Resolver() *dnstype.Resolver {
