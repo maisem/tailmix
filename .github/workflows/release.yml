@@ -12,9 +12,6 @@ jobs:
     runs-on: [self-hosted, tailmix-vm]
     container:
       image: golang:1.27.3
-    env:
-      GOMAXPROCS: "2"
-      GOFLAGS: "-p=1"
     steps:
       - uses: actions/checkout@v6
         with:
