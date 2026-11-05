@@ -24,6 +24,13 @@ type Route struct {
 	ProfileID  string
 	ProfileDNS bool
 	Resolvers  []*dnstype.Resolver
+	// Rewrites maps a canonical tailnet address of a node or service of
+	// ProfileID to its effective IP for this host. Profile forwarders use
+	// it to translate split-DNS answers that point at tailnet addresses
+	// into routable effective IPs. Entries are strictly per profile:
+	// different tailnets may reuse the same canonical address. Nil when
+	// the route has no profile or no known addresses.
+	Rewrites map[netip.Addr]netip.Addr
 }
 
 type LiveConfig struct {
@@ -189,6 +196,17 @@ func sameResolvers(a, b []*dnstype.Resolver) bool {
 		}
 	}
 	return true
+}
+
+func cloneAddrMap(in map[netip.Addr]netip.Addr) map[netip.Addr]netip.Addr {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[netip.Addr]netip.Addr, len(in))
+	for canonical, effective := range in {
+		out[canonical] = effective
+	}
+	return out
 }
 
 func cloneDNSResolvers(in []*dnstype.Resolver) []*dnstype.Resolver {

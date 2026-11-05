@@ -386,9 +386,11 @@ and DNS-over-HTTPS behavior rather than assuming every resolver is a plain UDP
 address.
 
 This policy routes DNS queries, not arbitrary application connections by
-hostname. MagicDNS node answers contain effective IPs. Addresses returned by
-split DNS follow the host's IP routing policy; reaching one through a tailnet
-requires a corresponding installed IP route binding or accept-all import.
+hostname. MagicDNS node answers contain effective IPs. Split-DNS answers
+that point at a known node or service of the routing profile are translated
+to its effective IP. Other addresses returned by split DNS follow the host's
+IP routing policy; reaching one through a tailnet requires a corresponding
+installed IP route binding or accept-all import.
 
 ### DNS search domains
 

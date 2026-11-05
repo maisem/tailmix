@@ -12,6 +12,7 @@ import (
 	"github.com/maisem/tailmix/effectiveip"
 	"github.com/maisem/tailmix/packetmap"
 	tailmixprofile "github.com/maisem/tailmix/profile"
+	"github.com/maisem/tailmix/routingpolicy"
 	"github.com/maisem/tailmix/state"
 	tailmixversion "github.com/maisem/tailmix/version"
 	"tailscale.com/net/packet"
@@ -899,4 +900,120 @@ func hasDNSRecord(records []tailmixdns.Record, name string, ip netip.Addr) bool 
 		}
 	}
 	return false
+}
+
+func TestTunDNSLiveConfigMapsSplitDNSRewritesPerProfile(t *testing.T) {
+	canonicalSelf := netip.MustParseAddr("100.64.0.10")
+	canonicalPeer := netip.MustParseAddr("100.64.0.20")
+	canonicalSvc := netip.MustParseAddr("100.100.1.10")
+	statusFor := func(profileID, suffix string) tailmixprofile.Status {
+		return tailmixprofile.Status{
+			ProfileID:      profileID,
+			MagicDNSSuffix: suffix,
+			SelfNodeID:     profileID + "-self",
+			SelfDNSName:    "tailmix." + suffix,
+			SelfIPs:        []netip.Addr{canonicalSelf},
+			Peers: []tailmixprofile.PeerStatus{{
+				NodeID:       profileID + "-peer",
+				DNSName:      "db." + suffix,
+				TailscaleIPs: []netip.Addr{canonicalPeer},
+			}},
+			Services: []tailmixprofile.ServiceStatus{{
+				Name:         "svc:api",
+				DNSName:      "api." + suffix,
+				TailscaleIPs: []netip.Addr{canonicalSvc},
+			}},
+		}
+	}
+	statuses := []tailmixprofile.Status{statusFor("home", "home.ts.net"), statusFor("work", "work.ts.net")}
+	st := state.State{
+		SyntheticPool:   "100.127.0.0/24",
+		SyntheticPoolV6: "fd6d:6e65:7400::/120",
+	}
+	if err := ensureHostIPs(&st); err != nil {
+		t.Fatal(err)
+	}
+	leases, _, err := assignEffectiveIPs(st, statuses)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both tailnets reuse the same canonical addresses, so the per-route
+	// maps must select the routing profile's own effective IPs.
+	effective := map[string]map[netip.Addr]netip.Addr{}
+	for _, lease := range leases {
+		if effective[lease.NodeKey.ProfileID] == nil {
+			effective[lease.NodeKey.ProfileID] = map[netip.Addr]netip.Addr{}
+		}
+		effective[lease.NodeKey.ProfileID][lease.NodeKey.CanonicalIP] = lease.EffectiveIP
+	}
+	policy := routingpolicy.DNSPlan{
+		Imported: []routingpolicy.DNSEntry{{
+			Domain:    "corp.example",
+			ProfileID: "work",
+			Active:    true,
+			Resolvers: []*dnstype.Resolver{{Addr: "10.0.0.53"}},
+		}},
+		Automatic: []routingpolicy.DNSEntry{{
+			Domain:     "svc.example",
+			ProfileID:  "work",
+			Active:     true,
+			ProfileDNS: true,
+		}},
+	}
+	cfg, err := tunDNSLiveConfig(st, statuses, leases, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeBySuffix := map[string]tailmixdns.Route{}
+	for _, route := range cfg.Routes {
+		routeBySuffix[route.Suffix] = route
+	}
+	wantWork := map[netip.Addr]netip.Addr{
+		canonicalSelf: st.NATIP,
+		canonicalPeer: effective["work"][canonicalPeer],
+		canonicalSvc:  effective["work"][canonicalSvc],
+	}
+	for _, suffix := range []string{"corp.example", "svc.example"} {
+		route, ok := routeBySuffix[suffix]
+		if !ok {
+			t.Fatalf("route %q missing from %+v", suffix, cfg.Routes)
+		}
+		if route.ProfileID != "work" {
+			t.Fatalf("route %q has profile %q, want work", suffix, route.ProfileID)
+		}
+		if len(route.Rewrites) != len(wantWork) {
+			t.Fatalf("route %q rewrites = %v, want %v", suffix, route.Rewrites, wantWork)
+		}
+		for canonical, want := range wantWork {
+			if got := route.Rewrites[canonical]; got != want {
+				t.Fatalf("route %q rewrites[%v] = %v, want %v", suffix, canonical, got, want)
+			}
+		}
+		for _, homeIP := range effective["home"] {
+			for _, mapped := range route.Rewrites {
+				if mapped == homeIP {
+					t.Fatalf("route %q rewrites to home effective IP %v", suffix, homeIP)
+				}
+			}
+		}
+	}
+	profileDNS := routeBySuffix["svc.example"]
+	if !profileDNS.ProfileDNS {
+		t.Fatalf("svc.example route = %+v, want ProfileDNS", profileDNS)
+	}
+	// Routes without a profile (shared single-owner MagicDNS names) must
+	// not rewrite anything.
+	shared := 0
+	for _, route := range cfg.Routes {
+		if route.ProfileID != "" {
+			continue
+		}
+		shared++
+		if len(route.Rewrites) != 0 {
+			t.Fatalf("profile-less route %q has rewrites %v", route.Suffix, route.Rewrites)
+		}
+	}
+	if shared == 0 {
+		t.Fatalf("no profile-less routes in %+v", cfg.Routes)
+	}
 }
