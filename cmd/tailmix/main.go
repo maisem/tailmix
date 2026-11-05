@@ -1686,7 +1686,7 @@ const profilesHelp = `Usage:
   tailmix profiles remove <profile> [--purge --yes] [--json]
 
 Add options:
-  --hostname <hostname>
+  --hostname <hostname> (default: machine hostname)
   --state-dir <directory>
   --auth-key-env <variable>
   --auth-key-file <path|->

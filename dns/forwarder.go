@@ -43,6 +43,7 @@ type Forwarder struct {
 	dialer     ProfileDialer
 	queryer    ProfileDNSQueryer
 	resolvers  []*dnstype.Resolver
+	rewrites   map[netip.Addr]netip.Addr
 	udp        *net.UDPConn
 	tcp        net.Listener
 	addr       netip.AddrPort
@@ -55,26 +56,26 @@ type Forwarder struct {
 	querySlots chan struct{}
 }
 
-func StartForwarder(ctx context.Context, dialer ProfileDialer, resolvers []*dnstype.Resolver) (*Forwarder, error) {
+func StartForwarder(ctx context.Context, dialer ProfileDialer, resolvers []*dnstype.Resolver, rewrites map[netip.Addr]netip.Addr) (*Forwarder, error) {
 	if dialer == nil {
 		return nil, errors.New("profile DNS forwarder requires a dialer")
 	}
 	if len(resolvers) == 0 {
 		return nil, errors.New("profile DNS forwarder requires at least one resolver")
 	}
-	return startForwarder(ctx, dialer, nil, resolvers)
+	return startForwarder(ctx, dialer, nil, resolvers, rewrites)
 }
 
 // StartProfileDNSForwarder exposes a loopback classic-DNS endpoint backed by a
 // profile's effective Tailscale DNS configuration.
-func StartProfileDNSForwarder(ctx context.Context, queryer ProfileDNSQueryer) (*Forwarder, error) {
+func StartProfileDNSForwarder(ctx context.Context, queryer ProfileDNSQueryer, rewrites map[netip.Addr]netip.Addr) (*Forwarder, error) {
 	if queryer == nil {
 		return nil, errors.New("profile DNS forwarder requires a queryer")
 	}
-	return startForwarder(ctx, nil, queryer, nil)
+	return startForwarder(ctx, nil, queryer, nil, rewrites)
 }
 
-func startForwarder(ctx context.Context, dialer ProfileDialer, queryer ProfileDNSQueryer, resolvers []*dnstype.Resolver) (*Forwarder, error) {
+func startForwarder(ctx context.Context, dialer ProfileDialer, queryer ProfileDNSQueryer, resolvers []*dnstype.Resolver, rewrites map[netip.Addr]netip.Addr) (*Forwarder, error) {
 	udp, tcp, err := listenForwarder(ctx, net.ListenUDP, net.ListenTCP)
 	if err != nil {
 		return nil, err
@@ -87,6 +88,7 @@ func startForwarder(ctx context.Context, dialer ProfileDialer, queryer ProfileDN
 		dialer:     dialer,
 		queryer:    queryer,
 		resolvers:  cloneDNSResolvers(resolvers),
+		rewrites:   cloneAddrMap(rewrites),
 		udp:        udp,
 		tcp:        tcp,
 		conns:      make(map[net.Conn]struct{}),
@@ -332,6 +334,9 @@ func (f *Forwarder) exchange(ctx context.Context, network string, query []byte) 
 		if err == nil {
 			err = validateResponse(query, response)
 		}
+		if err == nil {
+			response, err = rewriteResponseAddrs(response, f.rewrites)
+		}
 		return response, err
 	}
 	var lastErr error
@@ -350,6 +355,9 @@ func (f *Forwarder) exchange(ctx context.Context, network string, query []byte) 
 			err = validateResponse(query, response)
 		}
 		if err == nil {
+			response, err = rewriteResponseAddrs(response, f.rewrites)
+		}
+		if err == nil {
 			return response, nil
 		}
 		lastErr = err
@@ -358,6 +366,50 @@ func (f *Forwarder) exchange(ctx context.Context, network string, query []byte) 
 		lastErr = errors.New("no usable profile DNS resolver")
 	}
 	return nil, lastErr
+}
+
+// rewriteResponseAddrs translates A and AAAA records in the Answer section of
+// response whose address is a known canonical tailnet address into the
+// effective IP for this host. rewrites carries exactly one profile's mapping,
+// so addresses from other tailnets are never translated. Records in the
+// authority and additional sections, CNAMEs, unmapped addresses, and
+// family-mismatched mappings are left untouched. When nothing changes the
+// original bytes are returned unmodified; when a change is needed but the
+// response cannot be parsed or repacked an error is returned so the caller
+// answers SERVFAIL instead of an unroutable address.
+func rewriteResponseAddrs(response []byte, rewrites map[netip.Addr]netip.Addr) ([]byte, error) {
+	if len(rewrites) == 0 {
+		return response, nil
+	}
+	var msg dnsmessage.Message
+	if err := msg.Unpack(response); err != nil {
+		return nil, err
+	}
+	changed := false
+	for i := range msg.Answers {
+		switch body := msg.Answers[i].Body.(type) {
+		case *dnsmessage.AResource:
+			addr := netip.AddrFrom4(body.A)
+			if effective, ok := rewrites[addr]; ok && effective.Is4() && effective != addr {
+				body.A = effective.As4()
+				changed = true
+			}
+		case *dnsmessage.AAAAResource:
+			addr := netip.AddrFrom16(body.AAAA)
+			if effective, ok := rewrites[addr]; ok && effective.Is6() && effective != addr {
+				body.AAAA = effective.As16()
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return response, nil
+	}
+	packed, err := msg.Pack()
+	if err != nil {
+		return nil, err
+	}
+	return packed, nil
 }
 
 func (f *Forwarder) exchangeProfileDNS(ctx context.Context, query []byte) ([]byte, error) {

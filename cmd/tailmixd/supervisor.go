@@ -686,7 +686,7 @@ func (s *supervisor) configureDNSLocked(cfg tailmixdns.LiveConfig) error {
 				closeForwarders(nextForwarders)
 				return fmt.Errorf("profile %q does not expose its effective DNS resolver", s.nameForIDLocked(cfg.Routes[i].ProfileID))
 			}
-			forwarder, err := tailmixdns.StartProfileDNSForwarder(s.ctx, queryer)
+			forwarder, err := tailmixdns.StartProfileDNSForwarder(s.ctx, queryer, cfg.Routes[i].Rewrites)
 			if err != nil {
 				closeForwarders(nextForwarders)
 				return fmt.Errorf("start profile %q effective DNS forwarder: %w", s.nameForIDLocked(cfg.Routes[i].ProfileID), err)
@@ -703,7 +703,7 @@ func (s *supervisor) configureDNSLocked(cfg tailmixdns.LiveConfig) error {
 			closeForwarders(nextForwarders)
 			return fmt.Errorf("DNS route %q selected unavailable profile %q", cfg.Routes[i].Suffix, cfg.Routes[i].ProfileID)
 		}
-		forwarder, err := tailmixdns.StartForwarder(s.ctx, managed.runtime.Engine, cfg.Routes[i].Resolvers)
+		forwarder, err := tailmixdns.StartForwarder(s.ctx, managed.runtime.Engine, cfg.Routes[i].Resolvers, cfg.Routes[i].Rewrites)
 		if err != nil {
 			closeForwarders(nextForwarders)
 			return fmt.Errorf("start profile %q DNS forwarder: %w", s.nameForIDLocked(cfg.Routes[i].ProfileID), err)
@@ -1007,6 +1007,9 @@ func (s *supervisor) AddProfile(_ context.Context, request controlapi.AddProfile
 		return controlapi.Profile{}, err
 	}
 	hostname := strings.TrimSpace(request.Hostname)
+	if hostname == "" {
+		hostname = defaultHostname()
+	}
 	if hostname == "" {
 		suffix, err := randomOpaque("", 5)
 		if err != nil {

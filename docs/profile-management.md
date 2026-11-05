@@ -386,9 +386,11 @@ and DNS-over-HTTPS behavior rather than assuming every resolver is a plain UDP
 address.
 
 This policy routes DNS queries, not arbitrary application connections by
-hostname. MagicDNS node answers contain effective IPs. Addresses returned by
-split DNS follow the host's IP routing policy; reaching one through a tailnet
-requires a corresponding installed IP route binding or accept-all import.
+hostname. MagicDNS node answers contain effective IPs. Split-DNS answers
+that point at a known node or service of the routing profile are translated
+to its effective IP. Other addresses returned by split DNS follow the host's
+IP routing policy; reaching one through a tailnet requires a corresponding
+installed IP route binding or accept-all import.
 
 ### DNS search domains
 
@@ -489,8 +491,10 @@ Defaults are:
 - The daemon generates a stable opaque profile ID.
 - State directory defaults to a persisted path under
   `<daemon-state-dir>/profiles` derived from that ID.
-- Hostname defaults to an independently generated, persisted DNS hostname. It
-  is not derived from the profile name.
+- Hostname defaults to the machine's hostname (first DNS label, sanitized to
+  a valid Tailscale name, e.g. `laptop` from `laptop.example.com`). It falls
+  back to an independently generated, persisted `tailmix-` name only when the
+  machine hostname is unavailable. It is not derived from the profile name.
 - The profile is enabled unless `--disabled` is supplied.
 
 The CLI, not the daemon, resolves `--auth-key-env`. `--auth-key-file -` reads

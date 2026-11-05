@@ -464,7 +464,11 @@ func resolveProfiles(st state.State, specs []profileSpec, statePath string) ([]r
 			rp.State.StateDir = filepath.Join(baseDir, rp.State.ID)
 		}
 		if rp.State.Hostname == "" {
-			rp.State.Hostname = "tailmix-" + dnsLabel(rp.State.ID)
+			if host := defaultHostname(); host != "" {
+				rp.State.Hostname = host
+			} else {
+				rp.State.Hostname = "tailmix-" + dnsLabel(rp.State.ID)
+			}
 		}
 		out = append(out, rp)
 	}
@@ -893,6 +897,7 @@ func tunDNSLiveConfig(st state.State, statuses []tailmixprofile.Status, leases [
 		routes = append(routes, route)
 	}
 	sort.Slice(routes, func(i, j int) bool { return routes[i].Suffix < routes[j].Suffix })
+	attachSplitDNSRewrites(st, statuses, byKey, routes)
 	searchDomains := make([]string, 0, len(policy.Search.Installed))
 	for _, domain := range policy.Search.Installed {
 		searchDomains = append(searchDomains, domain.Domain)
@@ -903,6 +908,42 @@ func tunDNSLiveConfig(st state.State, statuses []tailmixprofile.Status, leases [
 		Routes:        routes,
 		SearchDomains: searchDomains,
 	}, nil
+}
+
+// attachSplitDNSRewrites gives each route with a profile the canonical to
+// effective IP mapping of that same profile, using the same leases and host
+// NAT addresses as the MagicDNS records above. Forwarders translate split-DNS
+// answers that point at a known node or service of the routing profile into
+// its effective IP; addresses from other tailnets are never rewritten even
+// when tailnets reuse the same canonical addresses. Routes without a profile
+// keep a nil map.
+func attachSplitDNSRewrites(st state.State, statuses []tailmixprofile.Status, byKey map[effectiveip.NodeKey]netip.Addr, routes []tailmixdns.Route) {
+	byProfile := make(map[string]map[netip.Addr]netip.Addr, len(statuses))
+	for _, ps := range statuses {
+		rewrites := map[netip.Addr]netip.Addr{}
+		for _, canonical := range ps.SelfIPs {
+			if effective := natIPFor(st, canonical); effective.IsValid() {
+				rewrites[canonical] = effective
+			}
+		}
+		for _, target := range reachableTargets(ps) {
+			for _, canonical := range target.IPs {
+				key := effectiveip.NodeKey{ProfileID: ps.ProfileID, NodeID: target.ID, CanonicalIP: canonical}
+				if effective, ok := byKey[key]; ok && effective.IsValid() {
+					rewrites[canonical] = effective
+				}
+			}
+		}
+		if len(rewrites) > 0 {
+			byProfile[ps.ProfileID] = rewrites
+		}
+	}
+	for i := range routes {
+		if routes[i].ProfileID == "" {
+			continue
+		}
+		routes[i].Rewrites = byProfile[routes[i].ProfileID]
+	}
 }
 
 func hasDNSPolicyDomain(domain string, entries []routingpolicy.DNSEntry) bool {
