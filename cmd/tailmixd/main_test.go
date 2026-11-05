@@ -68,6 +68,7 @@ func TestRegisterProfileFlagsAcceptsLongAndShortOptions(t *testing.T) {
 }
 
 func TestResolveProfilesMergesFlagsWithPersistentState(t *testing.T) {
+	stubHostname(t, "TestHost.example.com", nil)
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	got, err := resolveProfiles(state.State{
 		Profiles: []state.Profile{{
@@ -105,7 +106,7 @@ func TestResolveProfilesMergesFlagsWithPersistentState(t *testing.T) {
 	if home.State.ID != "home" {
 		home = got[1]
 	}
-	if home.State.Alias != "home" || home.State.StateDir == "" || home.State.Hostname != "tailmix-home" {
+	if home.State.Alias != "home" || home.State.StateDir == "" || home.State.Hostname != "testhost" {
 		t.Fatalf("defaulted home profile = %+v", home.State)
 	}
 }

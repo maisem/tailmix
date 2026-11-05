@@ -464,7 +464,11 @@ func resolveProfiles(st state.State, specs []profileSpec, statePath string) ([]r
 			rp.State.StateDir = filepath.Join(baseDir, rp.State.ID)
 		}
 		if rp.State.Hostname == "" {
-			rp.State.Hostname = "tailmix-" + dnsLabel(rp.State.ID)
+			if host := defaultHostname(); host != "" {
+				rp.State.Hostname = host
+			} else {
+				rp.State.Hostname = "tailmix-" + dnsLabel(rp.State.ID)
+			}
 		}
 		out = append(out, rp)
 	}

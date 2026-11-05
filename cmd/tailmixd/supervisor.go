@@ -1008,6 +1008,9 @@ func (s *supervisor) AddProfile(_ context.Context, request controlapi.AddProfile
 	}
 	hostname := strings.TrimSpace(request.Hostname)
 	if hostname == "" {
+		hostname = defaultHostname()
+	}
+	if hostname == "" {
 		suffix, err := randomOpaque("", 5)
 		if err != nil {
 			return controlapi.Profile{}, err
