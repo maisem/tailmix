@@ -47,6 +47,9 @@ type managementClient interface {
 	ExitNodes(context.Context) (controlapi.ExitNodes, error)
 	SetExitNode(context.Context, controlapi.SetExitNodeRequest) (controlapi.ExitNodes, error)
 	ClearExitNode(context.Context) (controlapi.ExitNodes, error)
+	AdvertiseRoutes(context.Context) (controlapi.AdvertisedRoutes, error)
+	SetAdvertiseRoutes(context.Context, controlapi.PatchAdvertiseRoutesRequest) (controlapi.AdvertisedRoutes, error)
+	ClearAdvertiseRoutes(context.Context, string) (controlapi.AdvertisedRoutes, error)
 	DNSRoutes(context.Context, bool) (controlapi.DNSRoutes, error)
 	PatchDNSRoutes(context.Context, controlapi.PatchDNSRoutesRequest) (controlapi.DNSRoutes, error)
 	SearchDomains(context.Context) (controlapi.SearchDomains, error)
@@ -119,6 +122,8 @@ func runWithDependencies(ctx context.Context, args []string, deps dependencies) 
 		err = runRoutes(ctx, client, args[1:], deps)
 	case "exit-node":
 		err = runExitNode(ctx, client, args[1:], deps)
+	case "advertise":
+		err = runAdvertise(ctx, client, args[1:], deps)
 	case "dns":
 		err = runDNS(ctx, client, args[1:], deps)
 	case "wireguard":
@@ -780,6 +785,91 @@ func runExitNode(ctx context.Context, client managementClient, args []string, de
 	return nil
 }
 
+func runAdvertise(ctx context.Context, client managementClient, args []string, deps dependencies) error {
+	if len(args) == 0 || isHelp(args[0]) {
+		fmt.Fprint(deps.stdout, advertiseHelp)
+		return nil
+	}
+	switch args[0] {
+	case "list":
+		rest := args[1:]
+		profileName, profileSet, err := takeProfile(&rest)
+		if err != nil {
+			return err
+		}
+		jsonOutput, err := takeBool(&rest, "--json")
+		if err != nil {
+			return err
+		}
+		if err := noOperands(rest); err != nil {
+			return err
+		}
+		result, err := client.AdvertiseRoutes(ctx)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(deps.stdout, result)
+		}
+		return writeAdvertisedRoutes(deps.stdout, result, profileName, profileSet)
+	case "set":
+		rest := args[1:]
+		profileName, set, err := takeProfile(&rest)
+		if err != nil {
+			return err
+		}
+		jsonOutput, err := takeBool(&rest, "--json")
+		if err != nil {
+			return err
+		}
+		if !set || strings.TrimSpace(profileName) == "" {
+			return usageError{"advertise set requires --profile"}
+		}
+		prefixes, err := parseAdvertisePrefixes(rest)
+		if err != nil {
+			return err
+		}
+		result, err := client.SetAdvertiseRoutes(ctx, controlapi.PatchAdvertiseRoutesRequest{
+			ProfileName: profileName,
+			Add:         prefixes,
+			Replace:     true,
+		})
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(deps.stdout, result)
+		}
+		return writeAdvertisedRoutes(deps.stdout, result, profileName, true)
+	case "clear":
+		rest := args[1:]
+		profileName, set, err := takeProfile(&rest)
+		if err != nil {
+			return err
+		}
+		jsonOutput, err := takeBool(&rest, "--json")
+		if err != nil {
+			return err
+		}
+		if !set || strings.TrimSpace(profileName) == "" {
+			return usageError{"advertise clear requires --profile"}
+		}
+		if err := noOperands(rest); err != nil {
+			return err
+		}
+		result, err := client.ClearAdvertiseRoutes(ctx, profileName)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(deps.stdout, result)
+		}
+		return writeAdvertisedRoutes(deps.stdout, result, profileName, true)
+	default:
+		return usageError{fmt.Sprintf("unknown advertise command %q", args[0])}
+	}
+}
+
 func runDNS(ctx context.Context, client managementClient, args []string, deps dependencies) error {
 	if len(args) == 0 || isHelp(args[0]) {
 		fmt.Fprint(deps.stdout, dnsHelp)
@@ -1218,6 +1308,31 @@ func parsePrefixes(args []string) ([]netip.Prefix, error) {
 	return out, nil
 }
 
+// parseAdvertisePrefixes mirrors parsePrefixes but keeps default routes:
+// advertising 0.0.0.0/0 and ::/0 offers exit-node service from the profile.
+func parseAdvertisePrefixes(args []string) ([]netip.Prefix, error) {
+	if len(args) == 0 {
+		return nil, usageError{"at least one IP prefix is required"}
+	}
+	out := make([]netip.Prefix, 0, len(args))
+	seen := map[netip.Prefix]bool{}
+	for _, raw := range args {
+		if strings.HasPrefix(raw, "-") {
+			return nil, usageError{fmt.Sprintf("unknown option %q", raw)}
+		}
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return nil, usageError{fmt.Sprintf("invalid IP prefix %q: %v", raw, err)}
+		}
+		prefix = prefix.Masked()
+		if !seen[prefix] {
+			seen[prefix] = true
+			out = append(out, prefix)
+		}
+	}
+	return out, nil
+}
+
 func parseDomains(args []string, allowRoot bool) ([]string, error) {
 	if len(args) == 0 {
 		return nil, usageError{"at least one DNS domain is required"}
@@ -1349,6 +1464,7 @@ func writeProfile(w io.Writer, profile controlapi.Profile) {
 		{"Self DNS", profile.SelfDNSName},
 		{"Accept all routes", yesNo(profile.AcceptAllRoutes)},
 		{"Accept all DNS routes", yesNo(profile.AcceptAllDNSRoutes)},
+		{"Advertised routes", joinStrings(profile.AdvertisedRoutes)},
 		{"LocalAPI socket", profile.LocalAPISocket},
 		{"Error", profile.LastError},
 	}
@@ -1559,6 +1675,31 @@ func writeIPMutationResult(w io.Writer, result controlapi.IPRoutes, jsonOutput b
 	return nil
 }
 
+func writeAdvertisedRoutes(w io.Writer, result controlapi.AdvertisedRoutes, profileName string, filter bool) error {
+	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(table, "PROFILE\tDESIRED\tAPPLIED\tSTATE")
+	matched := false
+	for _, entry := range result.Profiles {
+		if filter && entry.ProfileName != profileName {
+			continue
+		}
+		matched = true
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n",
+			entry.ProfileName,
+			joinStrings(entry.Routes),
+			joinStrings(entry.Applied),
+			stateLabel(entry.State, entry.Reason))
+	}
+	if result.ReconcileError != "" {
+		fmt.Fprintf(table, "!\t\t\tfailed:%s\n", result.ReconcileError)
+	}
+	_ = table.Flush()
+	if filter && !matched {
+		return fmt.Errorf("profile %q not found", profileName)
+	}
+	return nil
+}
+
 func writeDNSMutationResult(w io.Writer, result controlapi.DNSRoutes, jsonOutput bool) error {
 	if jsonOutput {
 		return writeJSON(w, result)
@@ -1619,6 +1760,7 @@ Commands:
   profiles     Manage profile lifecycle and configuration
   routes       Accept IP routes and pin prefixes to profiles
   exit-node    Select one profile's exit node for default traffic
+  advertise    Offer subnet routes and exit-node service to a tailnet
   dns routes   Route DNS suffixes through selected profiles
   dns search   Manage the ordered OS search-domain list
   wireguard    Apply and inspect raw WireGuard profiles
@@ -1724,6 +1866,21 @@ The default list shows the highest-priority node per city, an "Any" choice for
 countries with multiple cities, every node without location metadata, and any
 selected node hidden by those rules. Use --filter with a country name to show
 every exit node in that country.
+`
+
+const advertiseHelp = `Usage:
+  tailmix advertise list [--profile <profile>] [--json]
+  tailmix advertise set --profile <profile> <prefix>... [--json]
+  tailmix advertise clear --profile <profile> [--json]
+
+Profile option: -p, --profile <profile>
+
+Advertise offers subnet routes to a profile's tailnet so other devices can
+reach those prefixes through this host. This is the opposite direction from
+"routes", which accepts routes other devices advertise. Advertising
+0.0.0.0/0 and ::/0 offers exit-node service. Advertised prefixes are LAN or
+exit prefixes, never effective IPs. Requires tun mode on Linux, and
+tailscaled must be stopped first.
 `
 
 const dnsHelp = `Usage:

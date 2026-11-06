@@ -251,10 +251,12 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 	shieldsUp := false
 	routeAll := false
 	exitNodeID := ""
+	var advertisedRoutes []netip.Prefix
 	if prefs, err := lc.GetPrefs(ctx); err == nil {
 		shieldsUp = prefs.ShieldsUp
 		routeAll = prefs.RouteAll
 		exitNodeID = string(prefs.ExitNodeID)
+		advertisedRoutes = append([]netip.Prefix(nil), prefs.AdvertiseRoutes...)
 	}
 	var dnsRoutes []DNSRouteStatus
 	var searchDomains []string
@@ -306,24 +308,25 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 	})
 	sort.Strings(searchDomains)
 	return Status{
-		ProfileID:       e.cfg.ProfileID,
-		Alias:           e.cfg.Alias,
-		Kind:            "tailscale",
-		MagicDNSSuffix:  suffix,
-		BackendState:    st.BackendState,
-		AuthURL:         st.AuthURL,
-		SelfNodeID:      selfNode,
-		SelfDNSName:     selfDNSName,
-		SelfIPs:         ips,
-		Peers:           peers,
-		Services:        services,
-		PeerCount:       len(peers),
-		ShieldsUp:       shieldsUp,
-		AvailableRoutes: availableRoutes,
-		DNSRoutes:       dnsRoutes,
-		SearchDomains:   searchDomains,
-		RouteAll:        routeAll,
-		ExitNodeID:      exitNodeID,
+		ProfileID:        e.cfg.ProfileID,
+		Alias:            e.cfg.Alias,
+		Kind:             "tailscale",
+		MagicDNSSuffix:   suffix,
+		BackendState:     st.BackendState,
+		AuthURL:          st.AuthURL,
+		SelfNodeID:       selfNode,
+		SelfDNSName:      selfDNSName,
+		SelfIPs:          ips,
+		Peers:            peers,
+		Services:         services,
+		PeerCount:        len(peers),
+		ShieldsUp:        shieldsUp,
+		AvailableRoutes:  availableRoutes,
+		DNSRoutes:        dnsRoutes,
+		SearchDomains:    searchDomains,
+		RouteAll:         routeAll,
+		ExitNodeID:       exitNodeID,
+		AdvertisedRoutes: advertisedRoutes,
 	}, nil
 }
 
@@ -405,6 +408,32 @@ func exitNodePrefs(peerIP netip.Addr) *ipn.MaskedPrefs {
 		},
 		ExitNodeIDSet: true,
 		ExitNodeIPSet: true,
+	}
+}
+
+func (e *TSNetEngine) SetAdvertiseRoutes(ctx context.Context, routes []netip.Prefix) error {
+	if e.server == nil {
+		return fmt.Errorf("tsnet server is not started")
+	}
+	lc, err := e.server.LocalClient()
+	if err != nil {
+		return err
+	}
+	// Pass the desired set through as-is: unlike the accept-side policy,
+	// default routes are valid here for exit-node advertisements, and the
+	// daemon (not the engine) owns host forwarding. AdvertiseRoutesSet
+	// replaces the whole set, so clearing is an explicit empty set rather
+	// than an unchanged mask.
+	_, err = lc.EditPrefs(ctx, advertiseRoutesPrefs(routes))
+	return err
+}
+
+func advertiseRoutesPrefs(routes []netip.Prefix) *ipn.MaskedPrefs {
+	return &ipn.MaskedPrefs{
+		Prefs: ipn.Prefs{
+			AdvertiseRoutes: append([]netip.Prefix(nil), routes...),
+		},
+		AdvertiseRoutesSet: true,
 	}
 }
 

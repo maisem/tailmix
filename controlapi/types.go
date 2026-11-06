@@ -48,6 +48,7 @@ type Profile struct {
 	Removed                bool                    `json:"removed"`
 	AcceptAllRoutes        bool                    `json:"acceptAllRoutes"`
 	AcceptAllDNSRoutes     bool                    `json:"acceptAllDnsRoutes"`
+	AdvertisedRoutes       []netip.Prefix          `json:"advertisedRoutes,omitempty"`
 	RuntimeState           string                  `json:"runtimeState"`
 	BackendState           string                  `json:"backendState,omitempty"`
 	MagicDNSSuffix         string                  `json:"magicDnsSuffix,omitempty"`
@@ -243,6 +244,36 @@ type ExitNodes struct {
 type SetExitNodeRequest struct {
 	ProfileName string `json:"profileName"`
 	Peer        string `json:"peer"`
+}
+
+// PatchAdvertiseRoutesRequest changes one profile's advertised subnet routes.
+// Add and Remove are applied in order; Replace discards the stored set first
+// and then applies Add. A replace with no routes clears the advertisement.
+// Unlike the accept-side IPRoutes types, default routes are valid here: they
+// advertise exit-node service.
+type PatchAdvertiseRoutesRequest struct {
+	ProfileName string         `json:"profileName"`
+	Add         []netip.Prefix `json:"add,omitempty"`
+	Remove      []netip.Prefix `json:"remove,omitempty"`
+	Replace     bool           `json:"replace,omitempty"`
+}
+
+// ProfileAdvertisedRoutes is the advertise-side view of one profile. Routes
+// are the daemon's desired (persisted) set; AppliedRoutes is the set the
+// profile engine last reported. Advertised prefixes are LAN or exit prefixes
+// offered to the tailnet, not effective IPs.
+type ProfileAdvertisedRoutes struct {
+	ProfileID   string         `json:"profileId"`
+	ProfileName string         `json:"profileName"`
+	Routes      []netip.Prefix `json:"routes,omitempty"`
+	Applied     []netip.Prefix `json:"appliedRoutes,omitempty"`
+	State       string         `json:"state"`
+	Reason      string         `json:"reason,omitempty"`
+}
+
+type AdvertisedRoutes struct {
+	Profiles       []ProfileAdvertisedRoutes `json:"profiles,omitempty"`
+	ReconcileError string                    `json:"reconcileError,omitempty"`
 }
 
 type DNSResolver struct {

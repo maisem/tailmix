@@ -388,6 +388,15 @@ func completionCommandTree() *completionCommand {
 		},
 	}
 
+	advertise := &completionCommand{
+		name: "advertise", description: "Offer subnet routes and exit-node service to a tailnet", help: true,
+		subcommands: []*completionCommand{
+			leaf("list", "List advertised routes", []completionFlag{profileFlag(), jsonFlag()}),
+			{name: "set", description: "Replace advertised routes", flags: []completionFlag{profileFlag(), jsonFlag()}, variadic: completionFreeValue},
+			leaf("clear", "Clear advertised routes", []completionFlag{profileFlag(), jsonFlag()}),
+		},
+	}
+
 	dnsRoutes := &completionCommand{
 		name: "routes", description: "Manage DNS route policy", help: true,
 		subcommands: []*completionCommand{
@@ -452,6 +461,7 @@ func completionCommandTree() *completionCommand {
 			profiles,
 			routes,
 			exitNode,
+			advertise,
 			dns,
 			wireguard,
 			tailscaleCompletionCommand("tailscale", "Run an upstream Tailscale command for one profile", profileFlag()),

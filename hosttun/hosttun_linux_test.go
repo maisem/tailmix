@@ -35,6 +35,9 @@ func testLinuxHost(states ...linuxInstalledState) *linuxHost {
 		}},
 		logf: func(string, ...any) {},
 		ops:  noOpLinuxOps(),
+		runCmd: func(name string, args ...string) ([]byte, error) {
+			return nil, fmt.Errorf("firewall runner not configured in test")
+		},
 	}
 	h.readState = func([]Route) (linuxInstalledState, error) {
 		if stateIndex >= len(states) {

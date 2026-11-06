@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -67,6 +68,42 @@ func TestExitNodePrefsUsesBackendResolutionPath(t *testing.T) {
 			}
 			if !prefs.RouteAll {
 				t.Fatal("exit selection disabled RouteAll")
+			}
+		})
+	}
+}
+
+func TestAdvertiseRoutesPrefsRoundTrip(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		routes []netip.Prefix
+	}{
+		{name: "subnet", routes: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}},
+		{name: "exit", routes: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")}},
+		{name: "clear"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mp := advertiseRoutesPrefs(test.routes)
+			if !slices.Equal(mp.AdvertiseRoutes, test.routes) {
+				t.Fatalf("advertised routes = %v, want %v", mp.AdvertiseRoutes, test.routes)
+			}
+			if !mp.AdvertiseRoutesSet {
+				t.Fatalf("advertise mask is not set: %+v", mp)
+			}
+			if mp.RouteAllSet || mp.ExitNodeIDSet || mp.ExitNodeIPSet || mp.AutoExitNodeSet {
+				t.Fatalf("advertise selection changes unrelated preferences: %+v", mp)
+			}
+			prefs := ipn.Prefs{
+				RouteAll:        true,
+				ExitNodeID:      "stable-node",
+				AdvertiseRoutes: []netip.Prefix{netip.MustParsePrefix("10.99.0.0/16")},
+			}
+			prefs.ApplyEdits(mp)
+			if !slices.Equal(prefs.AdvertiseRoutes, test.routes) {
+				t.Fatalf("applied advertised routes = %v, want %v", prefs.AdvertiseRoutes, test.routes)
+			}
+			if !prefs.RouteAll || prefs.ExitNodeID != "stable-node" {
+				t.Fatalf("advertise selection disturbed route acceptance or exit node: %+v", prefs)
 			}
 		})
 	}

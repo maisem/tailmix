@@ -105,6 +105,7 @@ tailmix status [--json]
 tailmix profiles <lifecycle-command> [arguments]
 tailmix routes <policy-command> [arguments]
 tailmix exit-node <policy-command> [arguments]
+tailmix advertise <advertise-command> [arguments]
 tailmix dns routes <policy-command> [arguments]
 tailmix dns search <policy-command> [arguments]
 tailmix {tailscale|ts} [--profile <name>] <tailscale-subcommand> [arguments]
@@ -315,6 +316,48 @@ Disabling the selected profile withdraws its default route but retains the
 desired selection, which resumes when the same profile is enabled. Removing
 the selected profile clears the selection. There is no automatic failover to
 an exit node in another profile.
+
+### Advertised subnet routes
+
+Advertising is the opposite direction from accepting: `routes` controls which
+routes *other* devices advertise that this host may use, while `advertise`
+controls which routes *this host* offers to its tailnets so other devices can
+reach them through this host:
+
+```text
+tailmix advertise list [--profile <profile>] [--json]
+tailmix advertise set --profile <profile> <prefix>... [--json]
+tailmix advertise clear --profile <profile> [--json]
+```
+
+`set` replaces the profile's whole advertised set; `clear` empties it. Both
+persist immediately and reconcile live. `list` shows the desired set alongside
+the set the profile engine last reported, plus a state of `installed`,
+`waiting`, `unsupported`, `disabled`, or `off`, mirroring the exit-node
+resource. Advertising `0.0.0.0/0` and `::/0` offers exit-node service from the
+profile; any other prefix offers that subnet.
+
+Advertised prefixes are LAN or exit prefixes offered to the tailnet. They are
+never effective IPs and never become host destinations: the daemon does not
+install host routes for them. Instead, on Linux in tun mode the daemon owns
+host forwarding for them — scoped `FORWARD` accepts and `POSTROUTING`
+masquerade rules that match only packets arriving from the tailmix TUN, plus
+the IPv4/IPv6 forwarding sysctls while the matching family is advertised.
+The rules live in dedicated chains and are removed when the advertisement is
+cleared, the profile is disabled or removed, or the daemon closes the TUN.
+Sysctls are enabled but never disabled again, matching `tailscaled`.
+
+Route advertising requires tun mode on Linux, and `tailscaled` must be stopped
+first: two daemons would fight over the same forwarding rules. The daemon
+refuses `advertise set` while a `tailscaled` socket or `tailscale0` interface
+is present, and surfaces the same conflict if `tailscaled` appears later.
+Removing a profile withdraws its live tailnet advertisements before closing
+the engine and drops the persisted set, so a later re-add starts clean.
+
+Prefixes that overlap tailmix's effective-IP pools, host NAT addresses, or
+other daemon-reserved ranges are rejected, except that default routes are
+always allowed for exit-node use. Raw WireGuard profiles cannot advertise;
+requesting routes for one reports `unsupported`.
 
 ### DNS route bindings
 

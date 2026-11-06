@@ -26,6 +26,7 @@ func Normalize(st *State) {
 			cfg := st.Profiles[i].WireGuard.Clone()
 			st.Profiles[i].WireGuard = &cfg
 		}
+		st.Profiles[i].AdvertiseRoutes = normalizeAdvertisedRoutes(st.Profiles[i].AdvertiseRoutes)
 	}
 	sort.SliceStable(st.Profiles, func(i, j int) bool {
 		return st.Profiles[i].ID < st.Profiles[j].ID
@@ -80,6 +81,29 @@ func Normalize(st *State) {
 		(st.ExitNode.ProfileID == "" || st.ExitNode.NodeID == "" || !st.ExitNode.PeerIP.IsValid()) {
 		st.ExitNode = nil
 	}
+}
+
+// normalizeAdvertisedRoutes canonicalizes persisted per-profile advertised
+// prefixes: invalid entries are dropped, the rest are masked, deduplicated,
+// and sorted. Default routes are preserved here; whether a default route is
+// a valid advertisement is decided by the advertise policy validator, not by
+// storage normalization.
+func normalizeAdvertisedRoutes(routes []netip.Prefix) []netip.Prefix {
+	seen := make(map[netip.Prefix]bool, len(routes))
+	out := routes[:0]
+	for _, route := range routes {
+		if !route.IsValid() {
+			continue
+		}
+		route = route.Masked()
+		if seen[route] {
+			continue
+		}
+		seen[route] = true
+		out = append(out, route)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out
 }
 
 func normalizeDomain(raw string) string {

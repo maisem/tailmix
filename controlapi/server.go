@@ -36,6 +36,10 @@ type Backend interface {
 	SetExitNode(context.Context, SetExitNodeRequest) (ExitNodes, error)
 	ClearExitNode(context.Context) (ExitNodes, error)
 
+	AdvertiseRoutes(context.Context) (AdvertisedRoutes, error)
+	SetAdvertiseRoutes(context.Context, PatchAdvertiseRoutesRequest) (AdvertisedRoutes, error)
+	ClearAdvertiseRoutes(context.Context, string) (AdvertisedRoutes, error)
+
 	DNSRoutes(context.Context, bool) (DNSRoutes, error)
 	PatchDNSRoutes(context.Context, PatchDNSRoutesRequest) (DNSRoutes, error)
 	ReplaceDNSRoutes(context.Context, ReplaceDNSRoutesRequest) (DNSRoutes, error)
@@ -230,6 +234,28 @@ func Handler(backend Backend) http.Handler {
 	mux.HandleFunc("DELETE /v1/exit-node", func(w http.ResponseWriter, r *http.Request) {
 		result, err := backend.ClearExitNode(r.Context())
 		writeResult(w, result, err)
+	})
+
+	mux.HandleFunc("GET /v1/advertise", func(w http.ResponseWriter, r *http.Request) {
+		result, err := backend.AdvertiseRoutes(r.Context())
+		writeResult(w, result, err)
+	})
+	mux.HandleFunc("PUT /v1/advertise", func(w http.ResponseWriter, r *http.Request) {
+		var request PatchAdvertiseRoutesRequest
+		if !decodeRequest(w, r, &request) {
+			return
+		}
+		result, err := backend.SetAdvertiseRoutes(r.Context(), request)
+		writeResult(w, result, err)
+	})
+	mux.HandleFunc("DELETE /v1/advertise/by-name/{name}", func(w http.ResponseWriter, r *http.Request) {
+		name, err := url.PathUnescape(r.PathValue("name"))
+		if err != nil {
+			writeResult(w, nil, NewError("invalid_request", "invalid escaped profile name"))
+			return
+		}
+		result, backendErr := backend.ClearAdvertiseRoutes(r.Context(), name)
+		writeResult(w, result, backendErr)
 	})
 
 	mux.HandleFunc("GET /v1/dns/routes", func(w http.ResponseWriter, r *http.Request) {
