@@ -269,7 +269,8 @@ Rules:
 - Default routes are excluded from subnet bindings and remain governed by the
   exit-node policy below.
 - The daemon does not install anti-bridging rules.
-- The daemon does not automatically forward packets between tailnets.
+- The daemon does not automatically forward packets between tailnets. Forwarding
+  for advertised prefixes is tailnet-to-LAN only, never between two tailnets.
 - Host-admin forwarding, NAT, and proxying are ordinary host networking outside v1 semantics.
 
 Exit/default route behavior:
@@ -319,9 +320,22 @@ and `OperatorUser` permissions are evaluated in the same request path as
 `tailscaled`.
 
 Aggregate lifecycle commands use `tailmix profiles ...`; IP route bindings use
-`tailmix routes ...`; and DNS bindings and search policy use
+`tailmix routes ...`; subnet-route advertisements use `tailmix advertise ...`;
+and DNS bindings and search policy use
 `tailmix dns routes ...` and `tailmix dns search ...`. All use a separate
 multi-profile API and must not silently pick one profile.
+
+Advertising is the accept-side mirror: `routes` selects which prefixes other
+devices advertise that this host may use, while `advertise` selects which
+prefixes this host offers to its tailnets. An advertised prefix is a LAN or
+exit prefix served through this host, never an effective IP: effective IPs
+are local dial targets for inbound tailnet identities, and they are never
+advertised into any tailnet. In tun mode on Linux the daemon owns host
+forwarding for advertised prefixes (scoped `FORWARD` accepts, `POSTROUTING`
+masquerade, and the forwarding sysctls). The `wgengine` instances behind the
+fork have no Router, so the upstream subnet-router NAT never runs; tailmixd
+owns that forwarding instead. Advertising requires `tailscaled` to be stopped
+so the two daemons do not fight over forwarding state.
 
 Profile-wide imports are explicit live policy:
 
