@@ -103,42 +103,32 @@ func (e *TSNetEngine) LocalBackend() (*ipnlocal.LocalBackend, error) {
 // configuration. In particular, LocalBackend applies Tailscale's exit-node
 // DNS proxy and UseWithExitNode rules before selecting an upstream resolver.
 func (e *TSNetEngine) QueryDNS(name string, queryType dnsmessage.Type) ([]byte, error) {
-	backend, err := e.LocalBackend()
-	if err != nil {
-		return nil, err
-	}
-	response, _, err := backend.QueryDNS(name, queryType)
-	return response, err
+	return e.queryDNS(context.Background(), name, queryType)
 }
 
-// QueryDNSContext bounds work shared by every forwarder for this engine. The
-// backend API has no request context; a slot stays occupied until it returns.
+// QueryDNSContext is QueryDNS bounded by ctx. It also limits the number of
+// concurrent queries shared by every forwarder for this engine.
 func (e *TSNetEngine) QueryDNSContext(ctx context.Context, name string, queryType dnsmessage.Type) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	e.dnsOnce.Do(func() { e.dnsSlots = make(chan struct{}, 16) })
 	select {
 	case e.dnsSlots <- struct{}{}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	type result struct {
-		response []byte
-		err      error
+	defer func() { <-e.dnsSlots }()
+	return e.queryDNS(ctx, name, queryType)
+}
+
+func (e *TSNetEngine) queryDNS(ctx context.Context, name string, queryType dnsmessage.Type) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	done := make(chan result, 1)
-	go func() {
-		defer func() { <-e.dnsSlots }()
-		response, err := e.QueryDNS(name, queryType)
-		done <- result{response, err}
-	}()
-	select {
-	case res := <-done:
-		return res.response, res.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	backend, err := e.LocalBackend()
+	if err != nil {
+		return nil, err
 	}
+	response, _, err := backend.QueryDNS(ctx, name, queryType)
+	return response, err
 }
 
 func (e *TSNetEngine) WatchUpdates(ctx context.Context, notify func()) error {
