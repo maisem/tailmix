@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -352,7 +353,7 @@ func TestForwarderServfailForUpstreamErrorsAndInvalidResponses(t *testing.T) {
 				case "not-response":
 					response = testDNSMessage(t, false, dnsmessage.TypeAAAA)
 				}
-				f, startErr := StartProfileDNSForwarder(context.Background(), functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { return response, err }))
+				f, startErr := StartProfileDNSForwarder(context.Background(), functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { return response, err }), nil)
 				if startErr != nil {
 					t.Fatal(startErr)
 				}
@@ -378,7 +379,7 @@ func TestForwarderRequestBudgetAndContextTrait(t *testing.T) {
 		t.Error("legacy method called")
 		return nil, errors.New("wrong method")
 	}, query: func(ctx context.Context) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }}
-	f, err := StartProfileDNSForwarder(context.Background(), q)
+	f, err := StartProfileDNSForwarder(context.Background(), q, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +405,7 @@ func TestForwarderRetireDrainsUDPAndTCP(t *testing.T) {
 			entered, release := make(chan struct{}), make(chan struct{})
 			response := testDNSMessage(t, true, dnsmessage.TypeA)
 			q := functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { close(entered); <-release; return response, nil })
-			f, err := StartProfileDNSForwarder(context.Background(), q)
+			f, err := StartProfileDNSForwarder(context.Background(), q, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -426,7 +427,7 @@ func TestForwarderRetireDrainsUDPAndTCP(t *testing.T) {
 			f.Retire()
 			// Further generations retire independently, not by closing their predecessor.
 			for i := 0; i < 2; i++ {
-				next, err := StartProfileDNSForwarder(context.Background(), q)
+				next, err := StartProfileDNSForwarder(context.Background(), q, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -449,7 +450,7 @@ func TestForwarderRetireDrainsUDPAndTCP(t *testing.T) {
 func TestForwarderParentCancellationClosesIdleTCP(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	f, err := StartProfileDNSForwarder(ctx, functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { return nil, errors.New("unused") }))
+	f, err := StartProfileDNSForwarder(ctx, functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { return nil, errors.New("unused") }), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +477,7 @@ func TestForwarderLegacyWorkerBoundSurvivesTimeouts(t *testing.T) {
 		finished <- struct{}{}
 		return nil, errors.New("released")
 	})
-	f, err := StartProfileDNSForwarder(context.Background(), q)
+	f, err := StartProfileDNSForwarder(context.Background(), q, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,7 +564,7 @@ func TestForwarderRetireClosesPartialTCPReads(t *testing.T) {
 	f, err := StartProfileDNSForwarder(context.Background(), functionQueryer(func(string, dnsmessage.Type) ([]byte, error) {
 		t.Error("partial query reached upstream")
 		return nil, errors.New("unused")
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -579,5 +580,287 @@ func TestForwarderRetireClosesPartialTCPReads(t *testing.T) {
 	case <-f.done:
 	case <-time.After(time.Second):
 		t.Fatal("partial TCP read prevented retirement")
+	}
+}
+
+func rewriteTestResource(name string, ttl uint32, typ dnsmessage.Type, body dnsmessage.ResourceBody) dnsmessage.Resource {
+	return dnsmessage.Resource{
+		Header: dnsmessage.ResourceHeader{Name: dnsmessage.MustNewName(name), Type: typ, Class: dnsmessage.ClassINET, TTL: ttl},
+		Body:   body,
+	}
+}
+
+func rewriteTestResponse(t *testing.T, typ dnsmessage.Type, answers, authorities, additionals []dnsmessage.Resource) []byte {
+	t.Helper()
+	msg := dnsmessage.Message{
+		Header:      dnsmessage.Header{ID: 0xbeef, Response: true, RecursionDesired: true, RecursionAvailable: true, RCode: dnsmessage.RCodeSuccess},
+		Questions:   []dnsmessage.Question{{Name: dnsmessage.MustNewName("host.example.com."), Type: typ, Class: dnsmessage.ClassINET}},
+		Answers:     answers,
+		Authorities: authorities,
+		Additionals: additionals,
+	}
+	wire, err := msg.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
+}
+
+func rewriteTestAddrs() (canonicalV4, effectiveV4, canonicalV6, effectiveV6, foreignV4 netip.Addr) {
+	return netip.MustParseAddr("100.122.200.114"),
+		netip.MustParseAddr("100.127.0.11"),
+		netip.MustParseAddr("fd7a:115c:a1e0::20"),
+		netip.MustParseAddr("fd6d:6e65:7400::11"),
+		netip.MustParseAddr("100.99.0.5")
+}
+
+func unpackTestResponse(t *testing.T, wire []byte) dnsmessage.Message {
+	t.Helper()
+	var msg dnsmessage.Message
+	if err := msg.Unpack(wire); err != nil {
+		t.Fatal(err)
+	}
+	return msg
+}
+
+func answerV4(t *testing.T, msg dnsmessage.Message, index int) netip.Addr {
+	t.Helper()
+	body, ok := msg.Answers[index].Body.(*dnsmessage.AResource)
+	if !ok {
+		t.Fatalf("answer %d is %T, want A", index, msg.Answers[index].Body)
+	}
+	return netip.AddrFrom4(body.A)
+}
+
+func TestRewriteResponseAddrs(t *testing.T) {
+	canonicalV4, effectiveV4, canonicalV6, effectiveV6, foreignV4 := rewriteTestAddrs()
+	rewrites := map[netip.Addr]netip.Addr{canonicalV4: effectiveV4, canonicalV6: effectiveV6}
+	aRecord := func(ip netip.Addr) dnsmessage.Resource {
+		return rewriteTestResource("host.example.com.", 60, dnsmessage.TypeA, &dnsmessage.AResource{A: ip.As4()})
+	}
+	for _, tt := range []struct {
+		name          string
+		typ           dnsmessage.Type
+		answers       []dnsmessage.Resource
+		authorities   []dnsmessage.Resource
+		additionals   []dnsmessage.Resource
+		rewrites      map[netip.Addr]netip.Addr
+		wantV4        map[int]netip.Addr
+		wantV6        map[int]netip.Addr
+		wantIdentical bool
+	}{
+		{
+			name:    "A rewritten",
+			typ:     dnsmessage.TypeA,
+			answers: []dnsmessage.Resource{aRecord(canonicalV4)},
+			wantV4:  map[int]netip.Addr{0: effectiveV4},
+		},
+		{
+			name:    "AAAA rewritten",
+			typ:     dnsmessage.TypeAAAA,
+			answers: []dnsmessage.Resource{rewriteTestResource("host.example.com.", 60, dnsmessage.TypeAAAA, &dnsmessage.AAAAResource{AAAA: canonicalV6.As16()})},
+			wantV6:  map[int]netip.Addr{0: effectiveV6},
+		},
+		{
+			name:          "unmapped untouched",
+			typ:           dnsmessage.TypeA,
+			answers:       []dnsmessage.Resource{aRecord(netip.MustParseAddr("93.184.216.34"))},
+			wantV4:        map[int]netip.Addr{0: netip.MustParseAddr("93.184.216.34")},
+			wantIdentical: true,
+		},
+		{
+			// The map carries exactly one profile's leases. An address
+			// that is canonical in another tailnet but absent here must
+			// pass through even though it looks like a tailnet address.
+			name:          "other profile address untouched",
+			typ:           dnsmessage.TypeA,
+			answers:       []dnsmessage.Resource{aRecord(foreignV4)},
+			wantV4:        map[int]netip.Addr{0: foreignV4},
+			wantIdentical: true,
+		},
+		{
+			name: "CNAME chain keeps alias and rewrites target",
+			typ:  dnsmessage.TypeA,
+			answers: []dnsmessage.Resource{
+				rewriteTestResource("alias.example.com.", 60, dnsmessage.TypeCNAME, &dnsmessage.CNAMEResource{CNAME: dnsmessage.MustNewName("host.example.com.")}),
+				aRecord(canonicalV4),
+			},
+			wantV4: map[int]netip.Addr{1: effectiveV4},
+		},
+		{
+			// Only the Answer section is translated; authority and
+			// additional records keep their upstream addresses.
+			name:          "authority and additional untouched",
+			typ:           dnsmessage.TypeA,
+			authorities:   []dnsmessage.Resource{aRecord(canonicalV4)},
+			additionals:   []dnsmessage.Resource{aRecord(canonicalV4)},
+			wantIdentical: true,
+		},
+		{
+			// A mapping across address families must never corrupt a record.
+			name:          "family mismatch skipped",
+			typ:           dnsmessage.TypeA,
+			answers:       []dnsmessage.Resource{aRecord(canonicalV4)},
+			rewrites:      map[netip.Addr]netip.Addr{canonicalV4: effectiveV6},
+			wantV4:        map[int]netip.Addr{0: canonicalV4},
+			wantIdentical: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			wire := rewriteTestResponse(t, tt.typ, tt.answers, tt.authorities, tt.additionals)
+			rewrites := rewrites
+			if tt.rewrites != nil {
+				rewrites = tt.rewrites
+			}
+			got, err := rewriteResponseAddrs(wire, rewrites)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantIdentical && !bytes.Equal(got, wire) {
+				t.Fatal("response without rewrites was repacked")
+			}
+			if !tt.wantIdentical && bytes.Equal(got, wire) {
+				t.Fatal("rewritten response is byte-identical to upstream")
+			}
+			msg := unpackTestResponse(t, got)
+			if msg.Header.ID != 0xbeef || !msg.Header.Response || msg.Header.RCode != dnsmessage.RCodeSuccess || len(msg.Questions) != 1 || msg.Questions[0].Type != tt.typ {
+				t.Fatalf("question/flags changed: %+v", msg)
+			}
+			for i, want := range tt.wantV4 {
+				if got := answerV4(t, msg, i); got != want {
+					t.Fatalf("answer %d = %v, want %v", i, got, want)
+				}
+				if ttl := msg.Answers[i].Header.TTL; ttl != 60 {
+					t.Fatalf("answer %d TTL = %d, want preserved 60", i, ttl)
+				}
+			}
+			for i, want := range tt.wantV6 {
+				body, ok := msg.Answers[i].Body.(*dnsmessage.AAAAResource)
+				if !ok {
+					t.Fatalf("answer %d is %T, want AAAA", i, msg.Answers[i].Body)
+				}
+				if got := netip.AddrFrom16(body.AAAA); got != want {
+					t.Fatalf("answer %d = %v, want %v", i, got, want)
+				}
+			}
+			if tt.name == "CNAME chain keeps alias and rewrites target" {
+				body, ok := msg.Answers[0].Body.(*dnsmessage.CNAMEResource)
+				if !ok || body.CNAME.String() != "host.example.com." {
+					t.Fatalf("CNAME answer changed: %+v", msg.Answers[0])
+				}
+				if got := answerV4(t, msg, 1); got != effectiveV4 {
+					t.Fatalf("target A = %v, want %v", got, effectiveV4)
+				}
+			}
+		})
+	}
+}
+
+func TestRewriteResponseAddrsFailures(t *testing.T) {
+	canonicalV4, effectiveV4, _, _, _ := rewriteTestAddrs()
+	rewrites := map[netip.Addr]netip.Addr{canonicalV4: effectiveV4}
+	if _, err := rewriteResponseAddrs([]byte{1, 2}, rewrites); err == nil {
+		t.Fatal("unparseable response did not fail")
+	}
+	if got, err := rewriteResponseAddrs([]byte{1, 2}, nil); err != nil || string(got) != string([]byte{1, 2}) {
+		t.Fatalf("empty map did not pass bytes through: %x, %v", got, err)
+	}
+}
+
+func TestForwarderRewritesProfileDNSAnswers(t *testing.T) {
+	canonicalV4, effectiveV4, _, _, _ := rewriteTestAddrs()
+	rewrites := map[netip.Addr]netip.Addr{canonicalV4: effectiveV4}
+	upstream := testDNSMessage(t, true, dnsmessage.TypeA)
+	var base dnsmessage.Message
+	if err := base.Unpack(upstream); err != nil {
+		t.Fatal(err)
+	}
+	base.Answers = []dnsmessage.Resource{
+		rewriteTestResource("host.example.com.", 60, dnsmessage.TypeA, &dnsmessage.AResource{A: canonicalV4.As4()}),
+	}
+	response, err := base.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := StartProfileDNSForwarder(context.Background(), functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { return response, nil }), rewrites)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	for _, network := range []string{"udp", "tcp"} {
+		conn := testDNSConn(t, f, network)
+		// The canned response carries the same question as the query, so
+		// validation accepts it on any name.
+		query := testDNSMessage(t, false, dnsmessage.TypeA)
+		writeDNSQuery(t, conn, network, query)
+		msg := readDNSReply(t, conn, network)
+		var body *dnsmessage.AResource
+		for i := range msg.Answers {
+			if body == nil {
+				body, _ = msg.Answers[i].Body.(*dnsmessage.AResource)
+			}
+		}
+		if body == nil {
+			t.Fatalf("%s: no A answer in %+v", network, msg)
+		}
+		if got := netip.AddrFrom4(body.A); got != effectiveV4 {
+			t.Fatalf("%s: answer = %v, want effective %v", network, got, effectiveV4)
+		}
+	}
+}
+
+type directDNSDialer struct{}
+
+func (directDNSDialer) Dial(ctx context.Context, network, address string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, network, address)
+}
+
+func TestForwarderRewritesClassicSplitDNSAnswers(t *testing.T) {
+	canonicalV4, effectiveV4, _, _, _ := rewriteTestAddrs()
+	rewrites := map[netip.Addr]netip.Addr{canonicalV4: effectiveV4}
+	upstream, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	go func() {
+		buffer := make([]byte, 64<<10)
+		for {
+			n, peer, err := upstream.ReadFromUDP(buffer)
+			if err != nil {
+				return
+			}
+			var query dnsmessage.Message
+			if err := query.Unpack(buffer[:n]); err != nil {
+				continue
+			}
+			response, err := (&dnsmessage.Message{
+				Header:    dnsmessage.Header{ID: query.Header.ID, Response: true, RecursionAvailable: true, RCode: dnsmessage.RCodeSuccess},
+				Questions: query.Questions,
+				Answers: []dnsmessage.Resource{
+					rewriteTestResource("host.example.com.", 60, dnsmessage.TypeA, &dnsmessage.AResource{A: canonicalV4.As4()}),
+				},
+			}).Pack()
+			if err != nil {
+				continue
+			}
+			_, _ = upstream.WriteToUDP(response, peer)
+		}
+	}()
+	f, err := StartForwarder(context.Background(), directDNSDialer{}, []*dnstype.Resolver{{Addr: upstream.LocalAddr().String()}}, rewrites)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	conn := testDNSConn(t, f, "udp")
+	// The fake upstream echoes the query question, so validation accepts
+	// the canned response on any name.
+	writeDNSQuery(t, conn, "udp", testDNSMessage(t, false, dnsmessage.TypeA))
+	msg := readDNSReply(t, conn, "udp")
+	if len(msg.Answers) != 1 {
+		t.Fatalf("answers = %+v, want one rewritten A", msg.Answers)
+	}
+	if got := answerV4(t, msg, 0); got != effectiveV4 {
+		t.Fatalf("answer = %v, want effective %v", got, effectiveV4)
 	}
 }

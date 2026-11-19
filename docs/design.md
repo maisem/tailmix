@@ -208,9 +208,12 @@ Rules:
 - Configured domains without a current DNS route remain desired but
   are not installed.
 - DNS answers for node and Tailscale Service names return effective IPs.
-- Addresses returned by split DNS follow ordinary host IP routing. A
-  destination that must traverse a tailnet needs a separate IP route policy;
-  DNS bindings do not create application or app-connector routes.
+- Split-DNS answers that point at a known node or service of the routing
+  profile are translated to its effective IP, so the host receives a routable
+  address. Other addresses returned by split DNS follow ordinary host IP
+  routing. A destination that must traverse a tailnet needs a separate IP
+  route policy; DNS bindings do not create application or app-connector
+  routes.
 
 Expected DNS-shaped names include upstream-style fully qualified names:
 
