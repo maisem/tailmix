@@ -95,7 +95,7 @@ fi
 next="$root/.current.$$"
 ln -s "versions/$version" "$next"
 if [ "$os" = darwin ]; then
-	mv -fh "$next" "$root/current"
+	mv -f "$next" "$root/current"
 else
 	mv -Tf "$next" "$root/current"
 fi
