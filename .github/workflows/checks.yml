@@ -26,7 +26,7 @@ on:
       - integration/**
       - .github/workflows/checks.yml
   schedule:
-    - cron: "23 9 * * 1"
+    - cron: "23 9 * * *"
   workflow_dispatch:
     inputs:
       suite:
