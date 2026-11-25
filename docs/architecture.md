@@ -296,6 +296,9 @@ exact-name route without claiming its entire source suffix.
 For advertised split-DNS and default resolvers, tailmix creates a loopback
 forwarder tied to the chosen profile. Classic DNS and DNS-over-HTTPS connections
 therefore travel through that profile rather than the host's default network.
+When a forwarded A or AAAA answer is a CNAME chain ending at a MagicDNS name,
+the forwarder replaces the upstream's addresses for that name with tailmix's
+effective IPs, as for a direct MagicDNS query.
 
 On macOS, the Tailscale DNS manager installs native split-DNS resolver entries.
 When a root DNS route is active, it installs a synthetic System Configuration

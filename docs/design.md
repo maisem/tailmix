@@ -211,6 +211,17 @@ Rules:
 - Addresses returned by split DNS follow ordinary host IP routing. A
   destination that must traverse a tailnet needs a separate IP route policy;
   DNS bindings do not create application or app-connector routes.
+- tailmix never rewrites an address in a forwarded answer. An address does
+  not say which tailnet it belongs to: the same Tailscale address can name
+  different nodes in different tailnets, or something outside any tailnet.
+  A record that points at a node's tailnet address is therefore not
+  reachable through tailmix. Point the name at the node's MagicDNS name with
+  a CNAME instead.
+- A name does identify its tailnet and node. When a forwarded A or AAAA
+  answer's CNAME chain ends at a MagicDNS name tailmix serves, tailmix keeps
+  the chain and answers that name itself with the node's effective IPs,
+  dropping whatever addresses the upstream resolver added for it. A target
+  under a profile's MagicDNS suffix with no matching node answers NXDOMAIN.
 
 Expected DNS-shaped names include upstream-style fully qualified names:
 

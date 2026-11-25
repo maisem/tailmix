@@ -352,7 +352,7 @@ func TestForwarderServfailForUpstreamErrorsAndInvalidResponses(t *testing.T) {
 				case "not-response":
 					response = testDNSMessage(t, false, dnsmessage.TypeAAAA)
 				}
-				f, startErr := StartProfileDNSForwarder(context.Background(), functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { return response, err }))
+				f, startErr := StartProfileDNSForwarder(context.Background(), functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { return response, err }), nil)
 				if startErr != nil {
 					t.Fatal(startErr)
 				}
@@ -378,7 +378,7 @@ func TestForwarderRequestBudgetAndContextTrait(t *testing.T) {
 		t.Error("legacy method called")
 		return nil, errors.New("wrong method")
 	}, query: func(ctx context.Context) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }}
-	f, err := StartProfileDNSForwarder(context.Background(), q)
+	f, err := StartProfileDNSForwarder(context.Background(), q, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestForwarderRetireDrainsUDPAndTCP(t *testing.T) {
 			entered, release := make(chan struct{}), make(chan struct{})
 			response := testDNSMessage(t, true, dnsmessage.TypeA)
 			q := functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { close(entered); <-release; return response, nil })
-			f, err := StartProfileDNSForwarder(context.Background(), q)
+			f, err := StartProfileDNSForwarder(context.Background(), q, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -426,7 +426,7 @@ func TestForwarderRetireDrainsUDPAndTCP(t *testing.T) {
 			f.Retire()
 			// Further generations retire independently, not by closing their predecessor.
 			for i := 0; i < 2; i++ {
-				next, err := StartProfileDNSForwarder(context.Background(), q)
+				next, err := StartProfileDNSForwarder(context.Background(), q, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -449,7 +449,7 @@ func TestForwarderRetireDrainsUDPAndTCP(t *testing.T) {
 func TestForwarderParentCancellationClosesIdleTCP(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	f, err := StartProfileDNSForwarder(ctx, functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { return nil, errors.New("unused") }))
+	f, err := StartProfileDNSForwarder(ctx, functionQueryer(func(string, dnsmessage.Type) ([]byte, error) { return nil, errors.New("unused") }), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +476,7 @@ func TestForwarderLegacyWorkerBoundSurvivesTimeouts(t *testing.T) {
 		finished <- struct{}{}
 		return nil, errors.New("released")
 	})
-	f, err := StartProfileDNSForwarder(context.Background(), q)
+	f, err := StartProfileDNSForwarder(context.Background(), q, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,7 +563,7 @@ func TestForwarderRetireClosesPartialTCPReads(t *testing.T) {
 	f, err := StartProfileDNSForwarder(context.Background(), functionQueryer(func(string, dnsmessage.Type) ([]byte, error) {
 		t.Error("partial query reached upstream")
 		return nil, errors.New("unused")
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -87,6 +87,7 @@ func (r *rig) tests() {
 	require(err == nil && state.SyntheticPool == "100.127.0.0/16" &&
 		netip.MustParsePrefix("100.127.0.0/16").Contains(nat) && state.DNSIP == "100.127.0.53",
 		"default synthetic root/NAT/DNS")
+	peerEffective := map[int]string{}
 	for i, ips := range [][]string{canonical, peer.TailscaleIPs} {
 		for _, family := range []int{4, 6} {
 			real := ""
@@ -115,6 +116,9 @@ func (r *rig) tests() {
 			require(len(effective) == 1, "effective address discovery")
 			addr, err := netip.ParseAddr(effective[0])
 			require(err == nil && ((family == 4 && addr.Is4()) || (family == 6 && addr.Is6())), "effective address family")
+			if i == 1 {
+				peerEffective[family] = effective[0]
+			}
 			// Warm only initial WireGuard establishment. The two-packet
 			// regression assertion itself is strict and is never retried.
 			familyFlag := "-" + strconv.Itoa(family)
@@ -127,6 +131,14 @@ func (r *rig) tests() {
 	r.announce("private corporate UDP and TCP DNS")
 	r.c("dns", "routes", "bind", "--profile", "work", "corp.test")
 	r.answers()
+	r.announce("split-DNS CNAME to a MagicDNS name")
+	// dnsmasq answers node.corp.test with a CNAME to the peer's MagicDNS name
+	// plus the peer's canonical addresses, which tailmix does not route. The
+	// effective IPs were shown reachable above.
+	for family, typ := range map[int]string{4: "A", 6: "AAAA"} {
+		res := r.e("client", "dig", "@100.127.0.53", "node.corp.test", typ, "+short", "+time=6", "+tries=1")
+		require(cnameAnswerAddrs(res.stdout) == peerEffective[family], "CNAME answer uses the effective IP")
+	}
 	r.announce("bounded resolver outage and recovery")
 	if err := guarded(func() {
 		r.pause("STOP")
@@ -222,4 +234,16 @@ func (r *rig) mutate(domain string) {
 	started := time.Now()
 	r.cli(true, 1400*time.Millisecond, "dns", "routes", "bind", "--profile", "work", domain)
 	require(time.Since(started) <= 1400*time.Millisecond, "policy mutation blocked")
+}
+
+// cnameAnswerAddrs returns the addresses in dig +short output, which lists
+// CNAME targets (ending in a dot) before the addresses they resolve to.
+func cnameAnswerAddrs(text string) string {
+	var addrs []string
+	for _, line := range strings.Fields(text) {
+		if _, err := netip.ParseAddr(line); err == nil {
+			addrs = append(addrs, line)
+		}
+	}
+	return strings.Join(addrs, " ")
 }

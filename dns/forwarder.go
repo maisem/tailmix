@@ -43,6 +43,7 @@ type Forwarder struct {
 	dialer     ProfileDialer
 	queryer    ProfileDNSQueryer
 	resolvers  []*dnstype.Resolver
+	names      *MagicDNSNames
 	udp        *net.UDPConn
 	tcp        net.Listener
 	addr       netip.AddrPort
@@ -55,26 +56,30 @@ type Forwarder struct {
 	querySlots chan struct{}
 }
 
-func StartForwarder(ctx context.Context, dialer ProfileDialer, resolvers []*dnstype.Resolver) (*Forwarder, error) {
+// StartForwarder sends queries to resolvers through dialer. Answers whose
+// CNAME chain ends at a name in names are finished with tailmix's MagicDNS
+// records; names may be nil.
+func StartForwarder(ctx context.Context, dialer ProfileDialer, resolvers []*dnstype.Resolver, names *MagicDNSNames) (*Forwarder, error) {
 	if dialer == nil {
 		return nil, errors.New("profile DNS forwarder requires a dialer")
 	}
 	if len(resolvers) == 0 {
 		return nil, errors.New("profile DNS forwarder requires at least one resolver")
 	}
-	return startForwarder(ctx, dialer, nil, resolvers)
+	return startForwarder(ctx, dialer, nil, resolvers, names)
 }
 
 // StartProfileDNSForwarder exposes a loopback classic-DNS endpoint backed by a
-// profile's effective Tailscale DNS configuration.
-func StartProfileDNSForwarder(ctx context.Context, queryer ProfileDNSQueryer) (*Forwarder, error) {
+// profile's effective Tailscale DNS configuration. names is used as in
+// StartForwarder.
+func StartProfileDNSForwarder(ctx context.Context, queryer ProfileDNSQueryer, names *MagicDNSNames) (*Forwarder, error) {
 	if queryer == nil {
 		return nil, errors.New("profile DNS forwarder requires a queryer")
 	}
-	return startForwarder(ctx, nil, queryer, nil)
+	return startForwarder(ctx, nil, queryer, nil, names)
 }
 
-func startForwarder(ctx context.Context, dialer ProfileDialer, queryer ProfileDNSQueryer, resolvers []*dnstype.Resolver) (*Forwarder, error) {
+func startForwarder(ctx context.Context, dialer ProfileDialer, queryer ProfileDNSQueryer, resolvers []*dnstype.Resolver, names *MagicDNSNames) (*Forwarder, error) {
 	udp, tcp, err := listenForwarder(ctx, net.ListenUDP, net.ListenTCP)
 	if err != nil {
 		return nil, err
@@ -87,6 +92,7 @@ func startForwarder(ctx context.Context, dialer ProfileDialer, queryer ProfileDN
 		dialer:     dialer,
 		queryer:    queryer,
 		resolvers:  cloneDNSResolvers(resolvers),
+		names:      names,
 		udp:        udp,
 		tcp:        tcp,
 		conns:      make(map[net.Conn]struct{}),
@@ -278,6 +284,9 @@ func (f *Forwarder) answer(network string, query []byte) []byte {
 	ctx, cancel := context.WithTimeout(f.ctx, requestTimeout)
 	defer cancel()
 	response, err := f.exchange(ctx, network, query)
+	if err == nil {
+		response, err = f.names.finishCNAME(response)
+	}
 	if err == nil {
 		return response
 	}
