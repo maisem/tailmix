@@ -1262,7 +1262,11 @@ func profileNodeName(profile controlapi.Profile) string {
 }
 
 func writeStatus(w io.Writer, status controlapi.Status) {
-	fmt.Fprintf(w, "STATE\t%s\n\n", status.State)
+	fmt.Fprintf(w, "STATE\t%s\n", status.State)
+	for _, warning := range status.Warnings {
+		fmt.Fprintf(w, "WARNING\t%s\n", warning)
+	}
+	fmt.Fprintln(w)
 	writeProfiles(w, status.Profiles)
 
 	writeStatusSection(w, "IP ROUTES", statusHasIPRoutes(status.IPRoutes), func() {

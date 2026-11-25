@@ -33,8 +33,13 @@ func (s *supervisor) Status(_ context.Context) (controlapi.Status, error) {
 	searchDomains.Available = nil
 	searchDomains.ReconcileError = s.reconcileErr
 
+	ownTUN := ""
+	if s.host != nil {
+		ownTUN = s.host.Name()
+	}
 	return controlapi.Status{
 		State:         s.daemonStateLocked().State,
+		Warnings:      tailscaleConflictWarnings(ownTUN, s.cfg.Interfaces),
 		Profiles:      s.listProfilesLocked(false).Profiles,
 		IPRoutes:      ipRoutes,
 		ExitNodes:     exitNodes,

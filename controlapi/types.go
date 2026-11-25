@@ -125,6 +125,7 @@ type Profiles struct {
 // through their dedicated list endpoints.
 type Status struct {
 	State         string        `json:"state"`
+	Warnings      []string      `json:"warnings,omitempty"`
 	Profiles      []Profile     `json:"profiles"`
 	IPRoutes      IPRoutes      `json:"ipRoutes"`
 	ExitNodes     ExitNodes     `json:"exitNodes"`

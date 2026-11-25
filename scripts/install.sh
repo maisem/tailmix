@@ -126,3 +126,19 @@ else
 fi
 
 echo "Installed tailmix $version."
+
+# tailmix and the regular Tailscale client both manage routes and DNS for
+# Tailscale addresses. Warn if Tailscale is running so the user disconnects it.
+if [ -z "$destdir" ] && command -v pgrep >/dev/null 2>&1; then
+	if pgrep -x tailscaled >/dev/null 2>&1 ||
+		{ [ "$os" = darwin ] && pgrep -f 'IPNExtension|io\.tailscale\.ipn\.macsys\.network-extension' >/dev/null 2>&1; }; then
+		cat >&2 <<'WARN'
+
+Warning: Tailscale is running on this machine. Disconnect it before using
+tailmix; both manage the same routes and DNS:
+  Linux:  sudo tailscale down (or sudo systemctl disable --now tailscaled)
+  macOS:  choose Disconnect in the Tailscale menu
+tailmix status shows a warning while another Tailscale client is connected.
+WARN
+	fi
+fi

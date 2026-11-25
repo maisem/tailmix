@@ -176,6 +176,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		Version:      tailmixversion.GetMeta().Short,
 		UpdateRoot:   *updateRoot,
 		UpdateDelay:  defaultUpdateDelay,
+		Interfaces:   systemInterfaces,
 	})
 	err = supervisor.Run(ctx)
 	var restart *updateRestart

@@ -1236,3 +1236,12 @@ func TestProfileNodeNameDropsTailnetSuffix(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusShowsDaemonWarnings(t *testing.T) {
+	warning := "another Tailscale client is connected"
+	var out bytes.Buffer
+	writeStatus(&out, controlapi.Status{State: "up", Warnings: []string{warning}})
+	if !strings.Contains(out.String(), warning) {
+		t.Fatalf("status output omits daemon warning:\n%s", out.String())
+	}
+}
