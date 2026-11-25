@@ -40,7 +40,6 @@ type profileSpec struct {
 	ID             string
 	Alias          string
 	Dir            string
-	Hostname       string
 	MagicDNSSuffix string
 	AuthKeyEnv     string
 }
@@ -187,7 +186,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 }
 
 func registerProfileFlags(fs *flag.FlagSet, profiles *profileFlag) {
-	const usage = "profile config: id=work,dir=/path,hostname=tailmix-work[,suffix=tailnet.ts.net][,auth-key-env=ENV]"
+	const usage = "profile config: id=work,dir=/path[,suffix=tailnet.ts.net][,auth-key-env=ENV]"
 	fs.Var(profiles, "profile", usage)
 	fs.Var(profiles, "p", usage+" (shorthand)")
 }
@@ -397,12 +396,12 @@ func parseProfileSpec(raw string) (profileSpec, error) {
 			spec.Alias = value
 		case "dir", "state-dir", "statedir":
 			spec.Dir = value
-		case "hostname":
-			spec.Hostname = value
 		case "suffix", "magicdns-suffix", "magic-dns-suffix":
 			spec.MagicDNSSuffix = value
 		case "auth-key-env", "authkey-env":
 			spec.AuthKeyEnv = value
+		case "hostname":
+			return spec, errors.New("profile field hostname was removed; use tailmix ts -p <profile> set --hostname")
 		default:
 			return spec, fmt.Errorf("unknown profile field %q", key)
 		}
@@ -443,9 +442,6 @@ func resolveProfiles(st state.State, specs []profileSpec, statePath string) ([]r
 		if spec.Dir != "" {
 			rp.State.StateDir = spec.Dir
 		}
-		if spec.Hostname != "" {
-			rp.State.Hostname = spec.Hostname
-		}
 		if spec.MagicDNSSuffix != "" {
 			rp.State.MagicDNSSuffix = spec.MagicDNSSuffix
 		}
@@ -462,9 +458,6 @@ func resolveProfiles(st state.State, specs []profileSpec, statePath string) ([]r
 		}
 		if rp.State.StateDir == "" {
 			rp.State.StateDir = filepath.Join(baseDir, rp.State.ID)
-		}
-		if rp.State.Hostname == "" {
-			rp.State.Hostname = "tailmix-" + dnsLabel(rp.State.ID)
 		}
 		out = append(out, rp)
 	}
@@ -509,7 +502,6 @@ func tsnetConfig(rp runtimeProfile, stderr io.Writer, verbose, logUpload bool, l
 		ProfileID:      rp.State.ID,
 		Alias:          rp.State.Alias,
 		Dir:            rp.State.StateDir,
-		Hostname:       rp.State.Hostname,
 		AuthKey:        authKey,
 		MagicDNSSuffix: rp.State.MagicDNSSuffix,
 		UserLogf:       prefixedLogf(stderr, rp.State.ID),

@@ -20,7 +20,6 @@ func TestTSNetEngineAcceptsProvidedTunBeforeStart(t *testing.T) {
 		ProfileID: "work",
 		Alias:     "work",
 		Dir:       t.TempDir(),
-		Hostname:  "tailmix-work",
 		Tun:       tun,
 	})
 	if engine == nil {

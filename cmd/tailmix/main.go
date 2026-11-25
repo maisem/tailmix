@@ -432,8 +432,6 @@ func runProfiles(ctx context.Context, client managementClient, args []string, de
 		}
 		fmt.Fprintf(deps.stdout, "Profile %q renamed to %q.\n", args[1], result.Name)
 		return nil
-	case "set":
-		return runProfileSet(ctx, client, args[1:], deps)
 	case "enable", "disable", "restart":
 		rest := args[1:]
 		jsonOutput, err := takeBool(&rest, "--json")
@@ -504,10 +502,6 @@ func runProfiles(ctx context.Context, client managementClient, args []string, de
 
 func runProfileAdd(ctx context.Context, client managementClient, args []string, deps dependencies) error {
 	rest := append([]string(nil), args...)
-	hostname, hostnameSet, err := takeString(&rest, "--hostname")
-	if err != nil {
-		return err
-	}
 	stateDir, _, err := takeString(&rest, "--state-dir")
 	if err != nil {
 		return err
@@ -554,9 +548,6 @@ func runProfileAdd(ctx context.Context, client managementClient, args []string, 
 		AuthKey:  authKey,
 		Disabled: disabled,
 	}
-	if hostnameSet {
-		request.Hostname = hostname
-	}
 	result, err := client.AddProfile(ctx, request)
 	if err != nil {
 		return err
@@ -569,38 +560,6 @@ func runProfileAdd(ctx context.Context, client managementClient, args []string, 
 		return nil
 	}
 	fmt.Fprintf(deps.stdout, "Profile %q added (%s).\n", result.Name, result.RuntimeState)
-	return nil
-}
-
-func runProfileSet(ctx context.Context, client managementClient, args []string, deps dependencies) error {
-	rest := append([]string(nil), args...)
-	hostname, hostnameSet, err := takeString(&rest, "--hostname")
-	if err != nil {
-		return err
-	}
-	jsonOutput, err := takeBool(&rest, "--json")
-	if err != nil {
-		return err
-	}
-	name, err := oneOperand(rest, "profile name")
-	if err != nil {
-		return err
-	}
-	if !hostnameSet {
-		return usageError{"profiles set requires --hostname"}
-	}
-	request := controlapi.PatchProfileRequest{}
-	if hostnameSet {
-		request.Hostname = &hostname
-	}
-	result, err := client.PatchProfile(ctx, name, request)
-	if err != nil {
-		return err
-	}
-	if jsonOutput {
-		return writeJSON(deps.stdout, result)
-	}
-	fmt.Fprintf(deps.stdout, "Profile %q updated (%s).\n", result.Name, result.RuntimeState)
 	return nil
 }
 
@@ -1354,7 +1313,6 @@ func writeProfile(w io.Writer, profile controlapi.Profile) {
 		{"Runtime", profile.RuntimeState},
 		{"Backend", profile.BackendState},
 		{"State directory", profile.StateDir},
-		{"Hostname", profile.Hostname},
 		{"Tailnet", profile.MagicDNSSuffix},
 		{"Self DNS", profile.SelfDNSName},
 		{"Accept all routes", yesNo(profile.AcceptAllRoutes)},
@@ -1689,14 +1647,12 @@ const profilesHelp = `Usage:
   tailmix profiles show <profile> [--json]
   tailmix profiles add <profile> [options]
   tailmix profiles rename <profile> <new-profile>
-  tailmix profiles set <profile> --hostname <hostname> [--json]
   tailmix profiles enable <profile> [--json]
   tailmix profiles disable <profile> [--json]
   tailmix profiles restart <profile> [--json]
   tailmix profiles remove <profile> [--purge --yes] [--json]
 
 Add options:
-  --hostname <hostname>
   --state-dir <directory>
   --auth-key-env <variable>
   --auth-key-file <path|->

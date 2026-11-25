@@ -33,18 +33,24 @@ func TestVersion(t *testing.T) {
 }
 
 func TestParseProfileSpecUsesMagicDNSSuffixAndAuthKeyEnv(t *testing.T) {
-	got, err := parseProfileSpec("id=work,dir=/tmp/work,hostname=tailmix-work,suffix=example.ts.net,auth-key-env=WORK_AUTHKEY")
+	got, err := parseProfileSpec("id=work,dir=/tmp/work,suffix=example.ts.net,auth-key-env=WORK_AUTHKEY")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.ID != "work" || got.Alias != "work" {
 		t.Fatalf("profile identity = id %q alias %q, want work/work", got.ID, got.Alias)
 	}
-	if got.Dir != "/tmp/work" || got.Hostname != "tailmix-work" {
-		t.Fatalf("profile storage = dir %q hostname %q", got.Dir, got.Hostname)
+	if got.Dir != "/tmp/work" {
+		t.Fatalf("profile storage dir = %q", got.Dir)
 	}
 	if got.MagicDNSSuffix != "example.ts.net" || got.AuthKeyEnv != "WORK_AUTHKEY" {
 		t.Fatalf("profile routing/login config = suffix %q auth env %q", got.MagicDNSSuffix, got.AuthKeyEnv)
+	}
+}
+
+func TestParseProfileSpecRejectsHostname(t *testing.T) {
+	if _, err := parseProfileSpec("id=work,hostname=tailmix-work"); err == nil {
+		t.Fatal("removed hostname field unexpectedly accepted")
 	}
 }
 
@@ -73,7 +79,6 @@ func TestResolveProfilesMergesFlagsWithPersistentState(t *testing.T) {
 			ID:             "work",
 			Alias:          "old",
 			StateDir:       "/var/lib/tailmix/work",
-			Hostname:       "tailmix-old",
 			MagicDNSSuffix: "old.ts.net",
 		}},
 	}, []profileSpec{{
@@ -94,7 +99,7 @@ func TestResolveProfilesMergesFlagsWithPersistentState(t *testing.T) {
 	if got[0].State.ID == "work" {
 		work = got[0]
 	}
-	if work.State.Alias != "work" || work.State.StateDir != "/var/lib/tailmix/work" || work.State.Hostname != "tailmix-old" {
+	if work.State.Alias != "work" || work.State.StateDir != "/var/lib/tailmix/work" {
 		t.Fatalf("merged work profile = %+v", work.State)
 	}
 	if work.State.MagicDNSSuffix != "new.ts.net" || work.AuthKeyEnv != "WORK_AUTHKEY" {
@@ -104,7 +109,7 @@ func TestResolveProfilesMergesFlagsWithPersistentState(t *testing.T) {
 	if home.State.ID != "home" {
 		home = got[1]
 	}
-	if home.State.Alias != "home" || home.State.StateDir == "" || home.State.Hostname != "tailmix-home" {
+	if home.State.Alias != "home" || home.State.StateDir == "" {
 		t.Fatalf("defaulted home profile = %+v", home.State)
 	}
 }

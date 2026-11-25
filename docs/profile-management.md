@@ -18,7 +18,6 @@ tailmix profiles list
 tailmix profiles show <name>
 tailmix profiles add <name> [options]
 tailmix profiles rename <name> <new-name>
-tailmix profiles set <name> [options]
 tailmix profiles enable <name>
 tailmix profiles disable <name>
 tailmix profiles restart <name>
@@ -171,7 +170,9 @@ The CLI and API use five deliberately separate names:
 - **Profile name** is the locally unique operator-chosen handle, such as
   `work`. It is the only CLI selector and is never sent to a tailnet.
 - **Device hostname** is the name advertised by that profile's Tailscale
-  engine. It is configured with `--hostname` and is never a profile selector.
+  engine. tailmix does not set it: a new profile reports the OS hostname, like
+  `tailscaled`. Change it with `tailmix ts -p <name> set --hostname <hostname>`.
+  It is never a profile selector.
 - **Tailnet DNS suffix** and **node DNS names** are observed from the profile's
   control-plane state. They are read-only status and routing data.
 - **Command names** belong only to the CLI grammar.
@@ -468,7 +469,7 @@ tailmix profiles show <name> [--json]
 The result includes:
 
 - Persisted configuration: stable profile ID, profile name, state directory,
-  hostname, control URL, and enabled state.
+  control URL, and enabled state.
 - Runtime state and last lifecycle error.
 - Tailscale backend state, login URL, tailnet suffix, self DNS name and
   addresses, peer count, and shields-up state when available.
@@ -482,7 +483,6 @@ An auth key is never returned.
 
 ```text
 tailmix profiles add <name> \
-  [--hostname <hostname>] \
   [--state-dir <directory>] \
   [--auth-key-env <name> | --auth-key-file <path|->] \
   [--disabled] \
@@ -494,8 +494,7 @@ Defaults are:
 - The daemon generates a stable opaque profile ID.
 - State directory defaults to a persisted path under
   `<daemon-state-dir>/profiles` derived from that ID.
-- Hostname defaults to an independently generated, persisted DNS hostname. It
-  is not derived from the profile name.
+- The device hostname is left to Tailscale, which reports the OS hostname.
 - The profile is enabled unless `--disabled` is supplied.
 
 The CLI, not the daemon, resolves `--auth-key-env`. `--auth-key-file -` reads
@@ -526,26 +525,22 @@ tailmix ts --profile work login \
 Re-adding a previously removed name resurrects its retained profile definition,
 stable ID, state directory, and effective-IP leases unless it was purged.
 
-### `profiles rename` and `set`
+### `profiles rename`
 
 ```text
 tailmix profiles rename <name> <new-name>
-
-tailmix profiles set <name> \
-  --hostname <hostname> \
-  [--json]
 ```
+
+`rename` updates only the local control-plane index; the stable ID and running
+engine do not change.
 
 State directory is immutable after creation. Moving identity state is a
 separate, offline administrative operation and should not be hidden inside a
 live update.
 
-`rename` updates only the local control-plane index; the stable ID and running
-engine do not change. `set` changes the Tailmix-owned hostname. Changing it
-restarts only the selected profile after persisting the new desired
-configuration. The command reports that brief profile-local disruption before
-applying it. Native Tailscale settings, including the login server, remain in
-the profile's Tailscale state and are preserved by that restart.
+The device hostname is a native Tailscale setting, not tailmix configuration.
+Change it with `sudo tailmix ts -p <name> set --hostname <hostname>`; it
+persists in the profile's Tailscale state across restarts.
 
 ### `profiles enable`, `disable`, and `restart`
 
@@ -696,7 +691,6 @@ The profile resource separates desired state from observed state:
   "id": "p_01k2x7vq3c8m",
   "name": "work",
   "stateDir": "/var/db/tailmix/profiles/p_01k2x7vq3c8m",
-  "hostname": "tailmix-a2c123",
   "enabled": true,
   "removed": false,
   "acceptAllRoutes": true,
@@ -1096,7 +1090,7 @@ Auth key material is never added to `state.State`.
 
 ### Slice 4: configuration and destructive cleanup
 
-- Add `profiles rename` and `set`.
+- Add `profiles rename`.
 - Add guarded `remove --purge`.
 - Deprecate routine use of startup `--profile` flags.
 - Add a daemon-wide operator policy if non-root mutation is required.

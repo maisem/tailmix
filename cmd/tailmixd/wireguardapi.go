@@ -103,7 +103,6 @@ func (s *supervisor) ApplyWireGuard(_ context.Context, requested wireguardcfg.Co
 	if create || beforeProfileRemoved(before, configured.ID) {
 		configured.Disabled = false
 	}
-	configured.Hostname = ""
 	configured.MagicDNSSuffix = config.DNSSuffix
 	configured.WireGuard = configPointer(config)
 	configured.WireGuardSecretFile = secretFile

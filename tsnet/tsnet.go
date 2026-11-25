@@ -723,7 +723,9 @@ func (s *Server) startupPrefs(saved ipn.PrefsView) *ipn.Prefs {
 	if prefs == nil {
 		prefs = ipn.NewPrefs()
 	}
-	prefs.Hostname = s.hostname
+	if s.Hostname != "" {
+		prefs.Hostname = s.Hostname
+	}
 	prefs.WantRunning = true
 	if controlURL := s.getControlURL(); controlURL != "" {
 		prefs.ControlURL = controlURL

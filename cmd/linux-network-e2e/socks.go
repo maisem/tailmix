@@ -131,7 +131,7 @@ func (r *rig) socksTests() {
 	r.d("exec", "-d", r.names["client"], "sh", "-c",
 		"echo $$ > /private/app.pid; exec /checkout/tailmixd --mode=socks --socks=127.0.0.1:1080 "+
 			"--auto-update=false --state=/private/state.json --socket-dir=/private/sockets "+
-			"--profile=id=work,dir=/private/work,hostname=client,auth-key-env=TEST_AUTHKEY "+
+			"--profile=id=work,dir=/private/work,auth-key-env=TEST_AUTHKEY "+
 			"> /private/socks-daemon.log 2>&1")
 	r.clientStarted = true
 	r.poll(60*time.Second, r.ready)

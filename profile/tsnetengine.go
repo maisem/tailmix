@@ -26,7 +26,6 @@ type TSNetConfig struct {
 	ProfileID      string
 	Alias          string
 	Dir            string
-	Hostname       string
 	AuthKey        string
 	MagicDNSSuffix string
 	UserLogf       logger.Logf
@@ -53,7 +52,6 @@ func (e *TSNetEngine) Start(ctx context.Context) error {
 	}
 	s := &tsnet.Server{
 		Dir:               e.cfg.Dir,
-		Hostname:          e.cfg.Hostname,
 		UserLogf:          e.cfg.UserLogf,
 		Logf:              e.cfg.Logf,
 		LogUpload:         e.cfg.LogUpload,

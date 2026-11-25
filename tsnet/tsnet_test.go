@@ -69,7 +69,7 @@ func TestStartupPrefsPreserveNativeTailscaleSettings(t *testing.T) {
 	saved.Hostname = "old-hostname"
 	saved.WantRunning = false
 
-	server := &Server{hostname: "tailmix-work"}
+	server := &Server{hostname: "tailmixd"}
 	got := server.startupPrefs(saved.View())
 
 	if got.ControlURL != saved.ControlURL {
@@ -84,11 +84,24 @@ func TestStartupPrefsPreserveNativeTailscaleSettings(t *testing.T) {
 	if len(got.AdvertiseTags) != 1 || got.AdvertiseTags[0] != "tag:native" {
 		t.Fatalf("AdvertiseTags = %q, want saved value", got.AdvertiseTags)
 	}
-	if got.Hostname != "tailmix-work" {
-		t.Fatalf("Hostname = %q, want Tailmix-owned hostname", got.Hostname)
+	if got.Hostname != "old-hostname" {
+		t.Fatalf("Hostname = %q, want saved value", got.Hostname)
 	}
 	if !got.WantRunning {
 		t.Fatal("WantRunning = false, want true")
+	}
+}
+
+func TestStartupPrefsHostname(t *testing.T) {
+	saved := ipn.NewPrefs()
+	saved.Hostname = "saved"
+	if got := (&Server{Hostname: "configured"}).startupPrefs(saved.View()).Hostname; got != "configured" {
+		t.Fatalf("explicit Hostname = %q, want configured", got)
+	}
+	// Without Server.Hostname, a new node leaves the preference empty so
+	// Tailscale reports the OS hostname, not the program name.
+	if got := (&Server{hostname: "tailmixd"}).startupPrefs(ipn.PrefsView{}).Hostname; got != "" {
+		t.Fatalf("default Hostname = %q, want empty", got)
 	}
 }
 
@@ -97,7 +110,6 @@ func TestStartupPrefsExplicitControlURLWins(t *testing.T) {
 	saved.ControlURL = "https://saved.example.com"
 
 	server := &Server{
-		hostname:   "tailmix-work",
 		ControlURL: "https://configured.example.com",
 	}
 	got := server.startupPrefs(saved.View())

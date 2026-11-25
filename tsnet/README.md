@@ -17,9 +17,12 @@ The fork also changes remote logging behavior:
 - `Server.LogUploadURL` can replace the default upload base URL.
 
 On restart, the fork retains preferences written through the native Tailscale
-LocalAPI. Server-owned settings such as the embedded hostname still take
-precedence, and an explicitly configured `Server.ControlURL` still overrides a
-saved login server.
+LocalAPI. An explicitly configured `Server.Hostname` or `Server.ControlURL`
+still overrides the saved value. Unlike upstream, an unset `Server.Hostname`
+does not default the advertised hostname to the program name: the saved
+preference is kept, and a new node leaves it empty so Tailscale reports the
+OS hostname. tailmix never sets `Server.Hostname`; users rename a profile's
+node with `tailmix ts set --hostname`.
 
 `Server.DisableAuthKeyEnv` lets profile managers opt out of the upstream
 `TS_AUTHKEY` and `TS_AUTH_KEY` fallback while retaining explicit auth-key
