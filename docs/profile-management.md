@@ -444,11 +444,16 @@ tailmix profiles list [--all] [--json]
 The human-readable output is stable enough for people, not scripts:
 
 ```text
-PROFILE  ENABLED  RUNTIME      TAILNET          PEERS  ERROR
-home     yes      running      home.ts.net      14
-lab      no       disabled
-work     yes      needs-login                  0
+PROFILE  NODE    TAILNET      KIND       STATUS       PEERS
+home     laptop  home.ts.net  tailscale  running      14
+lab                           tailscale  disabled     0
+work                          tailscale  needs-login  0
 ```
+
+`NODE` is this machine's name in that profile's tailnet, as shown in the
+admin console. `STATUS` is the profile's `runtimeState`; a disabled profile
+shows `disabled`. For a profile in `error`, `profiles show` prints the last
+error. `tailmix status` starts with the same table.
 
 JSON is the scripting interface. Profiles are sorted by name in both formats.
 Listing is a non-blocking snapshot and never waits for a profile to become

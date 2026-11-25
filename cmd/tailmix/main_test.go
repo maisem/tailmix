@@ -1220,3 +1220,19 @@ func TestTSWithoutProfile(t *testing.T) {
 		})
 	}
 }
+
+func TestProfileNodeNameDropsTailnetSuffix(t *testing.T) {
+	for _, tc := range []struct {
+		profile controlapi.Profile
+		want    string
+	}{
+		{controlapi.Profile{SelfDNSName: "laptop.tailxyz.ts.net.", MagicDNSSuffix: "tailxyz.ts.net"}, "laptop"},
+		{controlapi.Profile{SelfDNSName: "laptop.tailxyz.ts.net", MagicDNSSuffix: "tailxyz.ts.net."}, "laptop"},
+		{controlapi.Profile{SelfDNSName: "laptop.other.example.", MagicDNSSuffix: "tailxyz.ts.net"}, "laptop.other.example"},
+		{controlapi.Profile{}, ""},
+	} {
+		if got := profileNodeName(tc.profile); got != tc.want {
+			t.Errorf("profileNodeName(%q, %q) = %q, want %q", tc.profile.SelfDNSName, tc.profile.MagicDNSSuffix, got, tc.want)
+		}
+	}
+}

@@ -1283,13 +1283,23 @@ func writeJSON(w io.Writer, value any) error {
 
 func writeProfiles(w io.Writer, profiles []controlapi.Profile) {
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "PROFILE\tKIND\tENABLED\tRUNTIME\tTAILNET\tPEERS\tERROR")
+	fmt.Fprintln(table, "PROFILE\tNODE\tTAILNET\tKIND\tSTATUS\tPEERS")
 	for _, profile := range profiles {
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
-			profile.Name, profile.Kind, yesNo(profile.Enabled), profile.RuntimeState,
-			profile.MagicDNSSuffix, profile.PeerCount, profile.LastError)
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%d\n",
+			profile.Name, profileNodeName(profile), profile.MagicDNSSuffix,
+			profile.Kind, profile.RuntimeState, profile.PeerCount)
 	}
 	_ = table.Flush()
+}
+
+// profileNodeName returns the profile's own machine name in its tailnet, the
+// name shown in the admin console, without the tailnet suffix.
+func profileNodeName(profile controlapi.Profile) string {
+	name := strings.TrimSuffix(profile.SelfDNSName, ".")
+	if suffix := strings.TrimSuffix(profile.MagicDNSSuffix, "."); suffix != "" {
+		name = strings.TrimSuffix(name, "."+suffix)
+	}
+	return name
 }
 
 func writeStatus(w io.Writer, status controlapi.Status) {
