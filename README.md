@@ -12,10 +12,16 @@ Inc.
 
 ## Install
 
-Disconnect the regular Tailscale client first; it competes with tailmix for
-routes and DNS.
+1. Disconnect the regular Tailscale client. It competes with tailmix for
+   routes and DNS, so tailmix does not work properly while it is connected.
 
-1. Install and start tailmix (macOS, or Linux with systemd):
+   - macOS: choose **Disconnect** in the Tailscale menu bar app.
+   - Linux: `sudo tailscale down`. It stays down after a reboot. To remove it
+     completely instead, run `sudo systemctl disable --now tailscaled`.
+
+   `tailmix status` warns while another Tailscale client is connected.
+
+2. Install and start tailmix (macOS, or Linux with systemd):
 
    ```sh
    curl -fsSL https://tailmix.net/install.sh | sudo sh
@@ -24,7 +30,7 @@ routes and DNS.
    This serves `install.sh` from the latest GitHub release. To read it first,
    run `curl -fLO https://tailmix.net/install.sh`, then `sudo sh install.sh`.
 
-2. Log in to your first tailnet and open the link it prints:
+3. Log in to your first tailnet and open the link it prints:
 
    ```sh
    sudo tailmix ts login
@@ -32,7 +38,7 @@ routes and DNS.
 
    tailmix creates a profile named `default` for it.
 
-3. Check it:
+4. Check it:
 
    ```sh
    tailmix status

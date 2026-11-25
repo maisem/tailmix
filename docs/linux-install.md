@@ -4,12 +4,16 @@ You need systemd, `curl`, and root access.
 
 ## Do this
 
-1. Stop the regular Tailscale service so it does not compete for routes and
-   DNS:
+1. Disconnect the regular Tailscale client. It competes with tailmix for
+   routes and DNS, so tailmix does not work properly while it is connected:
 
    ```sh
-   sudo systemctl disable --now tailscaled
+   sudo tailscale down
    ```
+
+   It stays down after a reboot. To remove it completely instead, run
+   `sudo systemctl disable --now tailscaled`. The installer and
+   `tailmix status` warn while Tailscale is still running or connected.
 
 2. Download the stable-release installer, inspect it, then install and start
    the service:
