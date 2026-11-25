@@ -28,26 +28,27 @@ type Update struct {
 }
 
 type Status struct {
-	ProfileID       string
-	Alias           string
-	Kind            string
-	MagicDNSSuffix  string
-	BackendState    string
-	AuthURL         string
-	SelfNodeID      string
-	SelfDNSName     string
-	SelfIPs         []netip.Addr
-	Peers           []PeerStatus
-	Services        []ServiceStatus
-	PeerCount       int
-	ShieldsUp       bool
-	AvailableRoutes []RouteStatus
-	DNSRoutes       []DNSRouteStatus
-	SearchDomains   []string
-	RouteAll        bool
-	ExitNodeID      string
-	PublicKey       string
-	ListenPort      uint16
+	ProfileID        string
+	Alias            string
+	Kind             string
+	MagicDNSSuffix   string
+	BackendState     string
+	AuthURL          string
+	SelfNodeID       string
+	SelfDNSName      string
+	SelfIPs          []netip.Addr
+	Peers            []PeerStatus
+	Services         []ServiceStatus
+	PeerCount        int
+	ShieldsUp        bool
+	AvailableRoutes  []RouteStatus
+	DNSRoutes        []DNSRouteStatus
+	SearchDomains    []string
+	RouteAll         bool
+	ExitNodeID       string
+	AdvertisedRoutes []netip.Prefix
+	PublicKey        string
+	ListenPort       uint16
 }
 
 type PeerStatus struct {
@@ -98,4 +99,8 @@ type RoutePreferenceController interface {
 
 type ExitNodePreferenceController interface {
 	SetExitNodeIP(context.Context, netip.Addr) error
+}
+
+type AdvertiseRoutesController interface {
+	SetAdvertiseRoutes(context.Context, []netip.Prefix) error
 }

@@ -91,6 +91,9 @@ func (h *darwinHost) Configure(cfg Config) error {
 	if err != nil {
 		return err
 	}
+	if len(cfg.Advertised) != 0 {
+		return errors.New("route advertisement requires Linux tun mode")
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {

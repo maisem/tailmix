@@ -30,6 +30,9 @@ type fakeManagementClient struct {
 	exitCleared      bool
 	exitNodes        controlapi.ExitNodes
 	dnsPatch         controlapi.PatchDNSRoutesRequest
+	advertised       controlapi.AdvertisedRoutes
+	advertiseSet     controlapi.PatchAdvertiseRoutesRequest
+	advertiseCleared string
 	searchReplace    []string
 	statusProfiles   []controlapi.Profile
 	serverVersion    tailmixversion.Meta
@@ -101,6 +104,17 @@ func (f *fakeManagementClient) SetExitNode(_ context.Context, request controlapi
 func (f *fakeManagementClient) ClearExitNode(context.Context) (controlapi.ExitNodes, error) {
 	f.exitCleared = true
 	return f.exitNodes, nil
+}
+func (f *fakeManagementClient) AdvertiseRoutes(context.Context) (controlapi.AdvertisedRoutes, error) {
+	return f.advertised, nil
+}
+func (f *fakeManagementClient) SetAdvertiseRoutes(_ context.Context, request controlapi.PatchAdvertiseRoutesRequest) (controlapi.AdvertisedRoutes, error) {
+	f.advertiseSet = request
+	return f.advertised, nil
+}
+func (f *fakeManagementClient) ClearAdvertiseRoutes(_ context.Context, name string) (controlapi.AdvertisedRoutes, error) {
+	f.advertiseCleared = name
+	return f.advertised, nil
 }
 func (f *fakeManagementClient) DNSRoutes(context.Context, bool) (controlapi.DNSRoutes, error) {
 	return controlapi.DNSRoutes{}, nil
@@ -836,6 +850,66 @@ func TestExitNodeSetAndClearRequests(t *testing.T) {
 		testDependencies(client, io.Discard, io.Discard, nil))
 	if code != 0 || !client.exitCleared {
 		t.Fatalf("clear exit code = %d, cleared = %v", code, client.exitCleared)
+	}
+}
+
+func TestAdvertiseSetAcceptsExitDefaults(t *testing.T) {
+	client := &fakeManagementClient{advertised: controlapi.AdvertisedRoutes{
+		Profiles: []controlapi.ProfileAdvertisedRoutes{{
+			ProfileID: "work-id", ProfileName: "work",
+			Routes:  []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")},
+			Applied: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")},
+			State:   "installed",
+		}},
+	}}
+	code := runWithDependencies(context.Background(),
+		[]string{"advertise", "set", "--profile", "work", "0.0.0.0/0", "::/0"},
+		testDependencies(client, io.Discard, io.Discard, nil))
+	if code != 0 {
+		t.Fatalf("advertise set exit code = %d", code)
+	}
+	want := []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")}
+	if client.advertiseSet.ProfileName != "work" || !client.advertiseSet.Replace ||
+		!slices.Equal(client.advertiseSet.Add, want) {
+		t.Fatalf("advertise set request = %+v", client.advertiseSet)
+	}
+
+	code = runWithDependencies(context.Background(),
+		[]string{"advertise", "clear", "--profile", "work"},
+		testDependencies(client, io.Discard, io.Discard, nil))
+	if code != 0 || client.advertiseCleared != "work" {
+		t.Fatalf("advertise clear code = %d, cleared = %q", code, client.advertiseCleared)
+	}
+
+	var stderr bytes.Buffer
+	code = runWithDependencies(context.Background(),
+		[]string{"advertise", "set", "10.0.0.0/8"},
+		testDependencies(client, io.Discard, &stderr, nil))
+	if code != 2 || !strings.Contains(stderr.String(), "advertise set requires --profile") {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+}
+
+func TestAdvertiseListShowsDesiredAndApplied(t *testing.T) {
+	client := &fakeManagementClient{advertised: controlapi.AdvertisedRoutes{
+		Profiles: []controlapi.ProfileAdvertisedRoutes{{
+			ProfileID: "work-id", ProfileName: "work",
+			Routes:  []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")},
+			Applied: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")},
+			State:   "installed",
+		}},
+	}}
+	var stdout bytes.Buffer
+	code := runWithDependencies(context.Background(),
+		[]string{"advertise", "list", "--profile", "work"},
+		testDependencies(client, &stdout, io.Discard, nil))
+	if code != 0 {
+		t.Fatalf("advertise list exit code = %d", code)
+	}
+	for _, want := range []string{"PROFILE", "work", "0.0.0.0/0", "::/0", "✓"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("advertise list does not contain %q:\n%s", want, stdout.String())
+		}
 	}
 }
 

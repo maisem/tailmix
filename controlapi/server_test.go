@@ -18,6 +18,9 @@ type recordingBackend struct {
 	daemonUp         bool
 	ipPatch          PatchIPRoutesRequest
 	exitRequest      SetExitNodeRequest
+	advertisePatch   PatchAdvertiseRoutesRequest
+	advertiseCleared string
+	advertised       AdvertisedRoutes
 	profiles         Profiles
 	status           Status
 	update           UpdateStatus
@@ -81,6 +84,20 @@ func (b *recordingBackend) SetExitNode(_ context.Context, request SetExitNodeReq
 		DNSName:     request.Peer,
 		State:       "installed",
 	}}, nil
+}
+
+func (b *recordingBackend) AdvertiseRoutes(context.Context) (AdvertisedRoutes, error) {
+	return b.advertised, nil
+}
+
+func (b *recordingBackend) SetAdvertiseRoutes(_ context.Context, request PatchAdvertiseRoutesRequest) (AdvertisedRoutes, error) {
+	b.advertisePatch = request
+	return b.advertised, nil
+}
+
+func (b *recordingBackend) ClearAdvertiseRoutes(_ context.Context, name string) (AdvertisedRoutes, error) {
+	b.advertiseCleared = name
+	return b.advertised, nil
 }
 
 func (b *recordingBackend) ApplyWireGuard(_ context.Context, config wireguardcfg.Config, secrets wireguardcfg.Secrets) (WireGuardProfile, error) {
@@ -312,6 +329,49 @@ func TestHandlerSetsExitNode(t *testing.T) {
 	}
 	if got.Selected == nil || got.Selected.State != "installed" {
 		t.Fatalf("response = %+v", got)
+	}
+}
+
+func TestHandlerAdvertisesRoutes(t *testing.T) {
+	backend := &recordingBackend{advertised: AdvertisedRoutes{
+		Profiles: []ProfileAdvertisedRoutes{{
+			ProfileID: "work-id", ProfileName: "work",
+			Routes: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")},
+			State:  "installed",
+		}},
+	}}
+	request := httptest.NewRequest(http.MethodPut, "/v1/advertise", strings.NewReader(`{
+		"profileName":"work",
+		"add":["0.0.0.0/0","::/0"],
+		"replace":true
+	}`))
+	response := httptest.NewRecorder()
+	Handler(backend).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if backend.advertisePatch.ProfileName != "work" || !backend.advertisePatch.Replace ||
+		len(backend.advertisePatch.Add) != 2 {
+		t.Fatalf("request = %+v", backend.advertisePatch)
+	}
+	var got AdvertisedRoutes
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Profiles) != 1 || got.Profiles[0].State != "installed" {
+		t.Fatalf("response = %+v", got)
+	}
+
+	response = httptest.NewRecorder()
+	Handler(backend).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/advertise", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"profileName":"work"`) {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	Handler(backend).ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/v1/advertise/by-name/work", nil))
+	if response.Code != http.StatusOK || backend.advertiseCleared != "work" {
+		t.Fatalf("status = %d, cleared = %q, body = %s", response.Code, backend.advertiseCleared, response.Body.String())
 	}
 }
 

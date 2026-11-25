@@ -152,6 +152,24 @@ func (c *Client) ClearExitNode(ctx context.Context) (ExitNodes, error) {
 	return out, err
 }
 
+func (c *Client) AdvertiseRoutes(ctx context.Context) (AdvertisedRoutes, error) {
+	var out AdvertisedRoutes
+	err := c.do(ctx, http.MethodGet, "/v1/advertise", nil, &out)
+	return out, err
+}
+
+func (c *Client) SetAdvertiseRoutes(ctx context.Context, request PatchAdvertiseRoutesRequest) (AdvertisedRoutes, error) {
+	var out AdvertisedRoutes
+	err := c.do(ctx, http.MethodPut, "/v1/advertise", request, &out)
+	return out, err
+}
+
+func (c *Client) ClearAdvertiseRoutes(ctx context.Context, name string) (AdvertisedRoutes, error) {
+	var out AdvertisedRoutes
+	err := c.do(ctx, http.MethodDelete, "/v1/advertise/by-name/"+url.PathEscape(name), nil, &out)
+	return out, err
+}
+
 func (c *Client) DNSRoutes(ctx context.Context, available bool) (DNSRoutes, error) {
 	path := "/v1/dns/routes"
 	if available {

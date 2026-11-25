@@ -6,10 +6,12 @@ import (
 	"flag"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	tailmixdns "github.com/maisem/tailmix/dns"
 	"github.com/maisem/tailmix/effectiveip"
+	"github.com/maisem/tailmix/hosttun"
 	"github.com/maisem/tailmix/packetmap"
 	tailmixprofile "github.com/maisem/tailmix/profile"
 	"github.com/maisem/tailmix/state"
@@ -447,6 +449,40 @@ func TestTunConfigUsesSharedNATRouteSource(t *testing.T) {
 	for key, source := range table.Sources {
 		if source.HostIP != st.NATIP || source.CanonicalIP != canonicalSelf {
 			t.Fatalf("profile source %v = %+v, want host NAT %v and canonical %v", key, source, st.NATIP, canonicalSelf)
+		}
+	}
+}
+
+func TestTunConfigForwardsAdvertisedRoutes(t *testing.T) {
+	self := netip.MustParseAddr("100.64.0.10")
+	statuses := []tailmixprofile.Status{{
+		ProfileID: "work",
+		SelfIPs:   []netip.Addr{self},
+	}}
+	st := state.State{
+		SyntheticPool:   "100.127.0.0/24",
+		SyntheticPoolV6: "fd6d:6e65:7400::/120",
+		Profiles: []state.Profile{
+			{ID: "work", Name: "work", AdvertiseRoutes: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}},
+			{ID: "lab", Name: "lab", Disabled: true, AdvertiseRoutes: []netip.Prefix{netip.MustParsePrefix("10.9.0.0/16")}},
+		},
+	}
+	if err := ensureHostIPs(&st); err != nil {
+		t.Fatal(err)
+	}
+	_, hostCfg, err := tunConfig(st, statuses, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []hosttun.AdvertisedRoute{{
+		ProfileID: "work", Prefix: netip.MustParsePrefix("192.168.1.0/24"),
+	}}
+	if !slices.Equal(hostCfg.Advertised, want) {
+		t.Fatalf("advertised forwarding = %v, want %v", hostCfg.Advertised, want)
+	}
+	for _, route := range hostCfg.Routes {
+		if route.Destination == netip.MustParsePrefix("192.168.1.0/24") {
+			t.Fatalf("advertised prefix %v is installed as a host destination", route.Destination)
 		}
 	}
 }

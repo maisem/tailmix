@@ -49,6 +49,7 @@ type Profile struct {
 	Removed             bool                 `json:"removed,omitempty"`
 	AcceptAllRoutes     bool                 `json:"acceptAllRoutes,omitempty"`
 	AcceptAllDNSRoutes  bool                 `json:"acceptAllDnsRoutes,omitempty"`
+	AdvertiseRoutes     []netip.Prefix       `json:"advertiseRoutes,omitempty"`
 	WireGuard           *wireguardcfg.Config `json:"wireguard,omitempty"`
 	WireGuardSecretFile string               `json:"wireguardSecretFile,omitempty"`
 	WireGuardShieldsUp  bool                 `json:"wireguardShieldsUp,omitempty"`

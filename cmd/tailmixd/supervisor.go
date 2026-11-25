@@ -459,6 +459,9 @@ func (s *supervisor) reconcileLocked() (err error) {
 	if err := s.setRoutePreferencesLocked(); err != nil {
 		return err
 	}
+	if err := s.setAdvertisePreferencesLocked(observedStatuses); err != nil {
+		return err
+	}
 	if err := s.setExitNodePreferencesLocked(observedStatuses); err != nil {
 		return err
 	}
@@ -790,6 +793,7 @@ func cloneState(st state.State) state.State {
 			cfg := st.Profiles[i].WireGuard.Clone()
 			st.Profiles[i].WireGuard = &cfg
 		}
+		st.Profiles[i].AdvertiseRoutes = append([]netip.Prefix(nil), st.Profiles[i].AdvertiseRoutes...)
 	}
 	st.Leases = append([]state.EffectiveLease(nil), st.Leases...)
 	st.IPRouteBindings = append([]state.IPRouteBinding(nil), st.IPRouteBindings...)
@@ -852,6 +856,7 @@ func (s *supervisor) projectProfileLocked(configured state.Profile) controlapi.P
 		Removed:            configured.Removed,
 		AcceptAllRoutes:    configured.AcceptAllRoutes,
 		AcceptAllDNSRoutes: configured.AcceptAllDNSRoutes,
+		AdvertisedRoutes:   append([]netip.Prefix(nil), configured.AdvertiseRoutes...),
 		ShieldsUp:          configured.Kind == state.ProfileKindWireGuard && configured.WireGuardShieldsUp,
 		LastError:          s.lastErrors[configured.ID],
 	}
@@ -1192,6 +1197,9 @@ func (s *supervisor) RemoveProfile(_ context.Context, name string, purge bool) (
 	configured.Removed = true
 	configured.Disabled = true
 	configured.WireGuardShieldsUp = false
+	// Drop the persisted advertisement so a later re-add starts clean even
+	// when the engine below cannot be reached for a live withdrawal.
+	configured.AdvertiseRoutes = nil
 	if s.st.ExitNode != nil && s.st.ExitNode.ProfileID == configured.ID {
 		s.st.ExitNode = nil
 	}
@@ -1202,6 +1210,9 @@ func (s *supervisor) RemoveProfile(_ context.Context, name string, purge bool) (
 	if err := s.reconcileLocked(); err != nil {
 		return controlapi.Profile{}, controlapi.NewError("reconcile_failed", "%v", err)
 	}
+	// Withdraw live tailnet advertisements before closing the engine so
+	// stale ads never survive a re-add from the same state directory.
+	s.withdrawAdvertisedRoutesLocked(configured.ID)
 	if err := s.stopProfileLocked(configured.ID); err != nil {
 		s.lastErrors[configured.ID] = err.Error()
 	}

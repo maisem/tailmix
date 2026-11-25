@@ -1054,6 +1054,19 @@ func tunConfigWithPolicy(st state.State, statuses []tailmixprofile.Status, lease
 			}
 		}
 	}
+	// Advertised routes are offered to the tailnet, not installed as host
+	// destinations. The host only forwards tailnet-originated packets for
+	// them (see hosttun advertising support). Only usable (reachable)
+	// profiles contribute; a profile whose backend is down cannot receive
+	// the traffic, so its advertisements stay inert until it recovers.
+	for _, ps := range statuses {
+		for _, prefix := range advertisedRoutesForProfile(st, ps.ProfileID) {
+			hostCfg.Advertised = append(hostCfg.Advertised, hosttun.AdvertisedRoute{
+				ProfileID: ps.ProfileID,
+				Prefix:    prefix,
+			})
+		}
+	}
 	serviceIPs := []netip.Addr{st.DNSIP, tailmixdns.ServiceIP()}
 	for _, serviceIP := range serviceIPs {
 		if !serviceIP.IsValid() {
@@ -1160,6 +1173,18 @@ func prefixesOverlap(a, b netip.Prefix) bool {
 	}
 	a, b = a.Masked(), b.Masked()
 	return a.Contains(b.Addr()) || b.Contains(a.Addr())
+}
+
+func advertisedRoutesForProfile(st state.State, profileID string) []netip.Prefix {
+	for _, configured := range st.Profiles {
+		if configured.ID == profileID {
+			if configured.Disabled || configured.Removed {
+				return nil
+			}
+			return configured.AdvertiseRoutes
+		}
+	}
+	return nil
 }
 
 func natIPFor(st state.State, canonical netip.Addr) netip.Addr {

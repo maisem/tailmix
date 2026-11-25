@@ -20,6 +20,18 @@ type Route struct {
 type Config struct {
 	LocalAddrs []netip.Prefix
 	Routes     []Route
+	// Advertised lists subnet prefixes this host forwards on behalf of the
+	// tailnet. They are not installed as host destinations; the Linux
+	// forwarding plane accepts and masquerades tailnet-originated packets
+	// for them. Empty on platforms without forwarding support.
+	Advertised []AdvertisedRoute
+}
+
+// AdvertisedRoute is one profile's offer to route a subnet prefix for the
+// tailnet. ProfileID scopes ownership of the installed forwarding rules.
+type AdvertisedRoute struct {
+	ProfileID string
+	Prefix    netip.Prefix
 }
 
 type Host interface {
@@ -79,6 +91,35 @@ func normalizeConfig(cfg Config) ([]netip.Prefix, []Route, error) {
 		return routes[i].Destination.Bits() < routes[j].Destination.Bits()
 	})
 	return localAddrs, routes, nil
+}
+
+// normalizeAdvertised canonicalizes desired advertised routes: every entry
+// needs an owning profile and a valid prefix, duplicates collapse, and the
+// result sorts deterministically by profile then prefix.
+func normalizeAdvertised(routes []AdvertisedRoute) ([]AdvertisedRoute, error) {
+	seen := make(map[AdvertisedRoute]bool, len(routes))
+	out := make([]AdvertisedRoute, 0, len(routes))
+	for _, route := range routes {
+		if route.ProfileID == "" {
+			return nil, fmt.Errorf("advertised route %v has no owning profile", route.Prefix)
+		}
+		if !route.Prefix.IsValid() {
+			return nil, fmt.Errorf("advertised route for profile %q is not a valid prefix", route.ProfileID)
+		}
+		route.Prefix = route.Prefix.Masked()
+		if seen[route] {
+			continue
+		}
+		seen[route] = true
+		out = append(out, route)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ProfileID != out[j].ProfileID {
+			return out[i].ProfileID < out[j].ProfileID
+		}
+		return out[i].Prefix.String() < out[j].Prefix.String()
+	})
+	return out, nil
 }
 
 func verifyHostConfig(wantAddrs []netip.Prefix, wantRoutes []Route, gotAddrs []netip.Prefix, gotRoutes []Route) error {

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
 	"slices"
 	"sync"
 
@@ -56,6 +57,7 @@ type linuxHost struct {
 	link       netlink.Link
 	logf       logger.Logf
 	ops        linuxNetlinkOps
+	runCmd     func(name string, args ...string) ([]byte, error)
 	readState  func([]Route) (linuxInstalledState, error)
 	mu         sync.Mutex
 	localAddrs []netip.Prefix
@@ -99,6 +101,9 @@ func Open(cfg OpenConfig) (Host, error) {
 			ruleAdd:      netlink.RuleAdd,
 			ruleDel:      netlink.RuleDel,
 		},
+		runCmd: func(name string, args ...string) ([]byte, error) {
+			return exec.Command(name, args...).CombinedOutput()
+		},
 	}
 	h.readState = h.readInstalledState
 	return h, nil
@@ -109,6 +114,10 @@ func (h *linuxHost) Name() string       { return h.name }
 
 func (h *linuxHost) Configure(cfg Config) error {
 	localAddrs, routes, err := normalizeConfig(cfg)
+	if err != nil {
+		return err
+	}
+	advertised, err := normalizeAdvertised(cfg.Advertised)
 	if err != nil {
 		return err
 	}
@@ -154,6 +163,9 @@ func (h *linuxHost) Configure(cfg Config) error {
 		return err
 	}
 	if err := h.addMissingRules(installed.rules, routes); err != nil {
+		return err
+	}
+	if err := h.reconcileForwardingLocked(advertised); err != nil {
 		return err
 	}
 
@@ -546,6 +558,9 @@ func (h *linuxHost) Close() error {
 	h.closeOnce.Do(func() {
 		h.mu.Lock()
 		var errs []error
+		if err := h.teardownForwardingLocked(); err != nil {
+			errs = append(errs, err)
+		}
 		state, err := h.installedState(h.routes)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("read Linux TUN %s before close: %w", h.name, err))

@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -148,6 +149,24 @@ func TestNormalizeMigratesProfileNameAndDNSPolicy(t *testing.T) {
 	}
 	if len(st.SearchDomains) != 1 || st.SearchDomains[0] != "work.example.com" {
 		t.Fatalf("search domains = %q", st.SearchDomains)
+	}
+}
+
+func TestNormalizeCanonicalizesAdvertisedRoutes(t *testing.T) {
+	st := State{
+		Profiles: []Profile{{ID: "work", AdvertiseRoutes: []netip.Prefix{
+			netip.MustParsePrefix("192.168.1.99/24"),
+			netip.MustParsePrefix("192.168.1.0/24"),
+			netip.MustParsePrefix("0.0.0.0/0"),
+		}}},
+	}
+	Normalize(&st)
+	want := []netip.Prefix{
+		netip.MustParsePrefix("0.0.0.0/0"),
+		netip.MustParsePrefix("192.168.1.0/24"),
+	}
+	if !slices.Equal(st.Profiles[0].AdvertiseRoutes, want) {
+		t.Fatalf("advertised routes = %v, want %v", st.Profiles[0].AdvertiseRoutes, want)
 	}
 }
 
