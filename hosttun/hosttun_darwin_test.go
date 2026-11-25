@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	netroute "golang.org/x/net/route"
 	"golang.org/x/sys/unix"
 
 	"tailscale.com/net/routetable"
@@ -306,5 +307,36 @@ func TestDarwinConfigureAllowsMissingOptionalRoute(t *testing.T) {
 	}
 	if len(logs) == 0 || !strings.Contains(logs[len(logs)-1], "optional TUN route") {
 		t.Fatalf("logs = %q, want optional route warning", logs)
+	}
+}
+
+// The kernel reports a scoped default's gateway without the zone that
+// routetable.Get includes. Reading it back must still verify against the
+// route tailmix installed, for both link-local IPv6 and IPv4 gateways.
+func TestDarwinScopedDefaultReadBackVerifies(t *testing.T) {
+	names := map[int]string{7: "en7"}
+	for _, tc := range []struct {
+		desired darwinScopedDefault
+		kernel  netroute.Addr
+	}{{
+		desired: darwinScopedDefault{
+			Destination: netip.MustParsePrefix("::/0"), Interface: "en7",
+			Gateway: netip.MustParseAddr("fe80::464e:6dff:fe1d:735f%en7"),
+		},
+		kernel: &netroute.Inet6Addr{IP: netip.MustParseAddr("fe80::464e:6dff:fe1d:735f").As16(), ZoneID: 7},
+	}, {
+		desired: darwinScopedDefault{
+			Destination: netip.MustParsePrefix("0.0.0.0/0"), Interface: "en7",
+			Gateway: netip.MustParseAddr("192.0.2.1"),
+		},
+		kernel: &netroute.Inet4Addr{IP: [4]byte{192, 0, 2, 1}},
+	}} {
+		addrs := make([]netroute.Addr, unix.RTAX_MAX)
+		addrs[unix.RTAX_GATEWAY] = tc.kernel
+		installed := tc.desired
+		installed.Gateway = darwinRouteGateway(addrs, names)
+		if err := verifyDarwinScopedDefaults([]darwinScopedDefault{tc.desired}, []darwinScopedDefault{installed}); err != nil {
+			t.Errorf("%v: installed route does not verify: %v", tc.desired.Destination, err)
+		}
 	}
 }

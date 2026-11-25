@@ -96,7 +96,7 @@ func (h *darwinHost) readInstalledState(wantRoutes []Route) (darwinInstalledStat
 		state.scopedDefaults = append(state.scopedDefaults, darwinScopedDefault{
 			Destination: destination,
 			Interface:   interfaceNames[rm.Index],
-			Gateway:     darwinRouteAddr(rm.Addrs, unix.RTAX_GATEWAY),
+			Gateway:     darwinRouteGateway(rm.Addrs, interfaceNames),
 		})
 	}
 	return state, nil
@@ -134,6 +134,21 @@ func darwinRouteAddr(addrs []netroute.Addr, index int) netip.Addr {
 	default:
 		return netip.Addr{}
 	}
+}
+
+// darwinRouteGateway returns a route's gateway address. The kernel reports
+// the scope of link-local IPv6 gateways as an interface index; restore it as
+// the zone so the address matches the one routetable.Get reported and the
+// one passed to route(8).
+func darwinRouteGateway(addrs []netroute.Addr, interfaceNames map[int]string) netip.Addr {
+	addr := darwinRouteAddr(addrs, unix.RTAX_GATEWAY)
+	if !addr.Is6() {
+		return addr
+	}
+	if gateway := addrs[unix.RTAX_GATEWAY].(*netroute.Inet6Addr); gateway.ZoneID != 0 {
+		return addr.WithZone(interfaceNames[gateway.ZoneID])
+	}
+	return addr
 }
 
 func verifyDarwinScopedDefaults(want, got []darwinScopedDefault) error {
