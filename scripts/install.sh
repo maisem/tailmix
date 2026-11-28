@@ -92,13 +92,32 @@ else
 		fi
 	done
 fi
+
+test_mv() (
+	probe_dir=$(mktemp -d "$tmp/mv.XXXXXX") || exit 1
+	CDPATH= cd "$probe_dir" || exit 1
+
+	mkdir old new || exit 1
+	ln -s new source || exit 1
+	ln -s old target || exit 1
+
+	command mv "$1" source target 2>/dev/null &&
+		[ "$(readlink target)" = new ]
+)
+
+if test_mv -fT; then
+	MV_FLAG="-fT"
+elif test_mv -fh; then
+	MV_FLAG="-fh"
+else
+	echo "Unsupported mv implementation" >&2
+	exit 1
+fi
+
 next="$root/.current.$$"
 ln -s "versions/$version" "$next"
-if [ "$os" = darwin ]; then
-	mv -fh "$next" "$root/current"
-else
-	mv -Tf "$next" "$root/current"
-fi
+command mv "$MV_FLAG" "$next" "$root/current"
+
 ln -sfn "$install_root/current/tailmix" "$destdir/usr/local/bin/tailmix"
 ln -sfn "$install_root/current/tailmixd" "$destdir/usr/local/bin/tailmixd"
 
